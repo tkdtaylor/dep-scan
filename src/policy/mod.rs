@@ -1,4 +1,5 @@
 pub mod age;
+pub mod dependency_confusion;
 
 use serde::Serialize;
 

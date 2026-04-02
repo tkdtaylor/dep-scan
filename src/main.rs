@@ -17,6 +17,7 @@ use cache::Cache;
 use cli::{Cli, Command, ConfigAction};
 use config::Config;
 use policy::age::AgePolicy;
+use policy::dependency_confusion::DependencyConfusionPolicy;
 use policy::{Policy, PolicyDetail, aggregate_results};
 use registry::npm::NpmRegistry;
 use registry::pypi::PyPiRegistry;
@@ -119,7 +120,10 @@ async fn run_check(
             config.min_package_age_hours as i64,
         ))));
     }
-    // Future policies will be added here
+    // Dependency confusion check (disabled when internal_prefixes is empty)
+    policies.push(Box::new(DependencyConfusionPolicy::new(
+        config.dependency_confusion.internal_prefixes.clone(),
+    )));
 
     // Check each package
     let mut results: Vec<CheckResult> = Vec::new();
