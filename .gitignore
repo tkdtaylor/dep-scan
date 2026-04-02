@@ -1,0 +1,8 @@
+# Secrets
+.env
+
+# Python virtual environment (lives in the Docker volume — not part of the repo)
+.venv/
+
+# Build artifacts (language-dependent, will expand after ADR 001)
+target/

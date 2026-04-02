@@ -1,0 +1,46 @@
+# docker-compose.yml — dep-scan
+# Generated: 2026-04-02
+#
+# Uses the project-specific dev image (docker/Dockerfile), which extends the
+# shared claude-project-dev base with the project's runtime and uid/gid fix.
+# This project's workspace lives entirely in the named volume below.
+#
+# Usage:
+#   docker compose run --rm dev        — open an interactive shell
+#   docker compose run --rm dev <cmd>  — run a single command and exit
+#
+# First run: the entrypoint seeds the workspace from the host and installs
+# Python deps from requirements.txt into /app/.venv automatically.
+
+services:
+  dev:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    volumes:
+      # Named volume — this project's isolated, persistent workspace
+      - workspace:/app
+      # Host project root — read-only, used for first-run seeding only
+      - type: bind
+        source: ..
+        target: /host
+        read_only: true
+      # .env bind-mounted writable so it can be edited from inside the container
+      - type: bind
+        source: "../.env"
+        target: /app/.env
+      # Claude Code config directory — mounted writable so Claude can refresh tokens
+      # and write session state. ${HOME} is resolved by Docker Compose at runtime.
+      - type: bind
+        source: "${HOME}/.claude"
+        target: /home/developer/.claude
+    working_dir: /app
+    env_file:
+      - ../.env
+    stdin_open: true
+    tty: true
+
+volumes:
+  workspace:
+    # Explicit name avoids the compose-project-name prefix
+    name: "dep-scan-workspace"

@@ -27,6 +27,22 @@ Rust or Go (TBD — first ADR). Cross-platform CLI, single binary distribution. 
 # TODO: fill in — how to build / compile
 # TODO: fill in — how to run the CLI
 # TODO: fill in — how to lint / format
+
+# Docker (run from host, outside the container)
+docker run --rm -it \
+  -v dep-scan-workspace:/app \
+  -v "$(pwd)":/host:ro \
+  -v "$HOME/.claude":/home/developer/.claude \
+  -v "$(pwd)/.env":/app/.env \
+  --env-file .env \
+  dep-scan-dev:latest
+
+# Export workspace → host
+docker run --rm -v dep-scan-workspace:/src:ro -v "$(pwd)":/dst debian:bookworm-slim cp -r /src/. /dst/
+
+# Backup / restore workspace volume
+docker run --rm -v dep-scan-workspace:/src:ro -v "$(pwd)":/dst debian:bookworm-slim tar czf /dst/workspace-backup.tar.gz -C /src .
+docker run --rm -v dep-scan-workspace:/dst -v "$(pwd)":/src debian:bookworm-slim tar xzf /src/workspace-backup.tar.gz -C /dst
 ```
 
 ## Conventions
