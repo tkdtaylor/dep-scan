@@ -20,6 +20,7 @@ use cli::{Cli, Command, ConfigAction};
 use config::Config;
 use osv::{OsvClient, registry_to_ecosystem};
 use policy::age::AgePolicy;
+use policy::dependency_confusion::DependencyConfusionPolicy;
 use policy::install_script::InstallScriptPolicy;
 use policy::maintainer::MaintainerChangePolicy;
 use policy::typosquatting::TyposquattingPolicy;
@@ -138,6 +139,10 @@ async fn run_check(
     if config.policies.check_vulnerabilities {
         policies.push(Box::new(VulnerabilityPolicy::new()));
     }
+    // Dependency confusion check (disabled when internal_prefixes is empty)
+    policies.push(Box::new(DependencyConfusionPolicy::new(
+        config.dependency_confusion.internal_prefixes.clone(),
+    )));
 
     // Create OSV client for vulnerability lookups
     let osv_client = if config.policies.check_vulnerabilities {

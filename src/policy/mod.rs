@@ -1,4 +1,5 @@
 pub mod age;
+pub mod dependency_confusion;
 pub mod install_script;
 pub mod maintainer;
 pub mod typosquatting;

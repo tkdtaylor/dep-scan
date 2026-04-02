@@ -25,6 +25,7 @@
 | 012 | Install script extraction + analysis | 012-install-script-analysis-test-spec.md | 12/12 | Done |
 | 013 | Typosquatting detection | 013-typosquatting-test-spec.md | 20/20 | Done |
 | 014 | Maintainer change detection | 014-maintainer-change-test-spec.md | 9/9 | Done |
+| 015 | Dependency confusion heuristics | 015-dependency-confusion-test-spec.md | 11/11 | Done |
 
 ## Status key
 

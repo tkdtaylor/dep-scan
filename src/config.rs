@@ -87,6 +87,30 @@ impl Default for PolicyConfig {
     }
 }
 
+/// Configuration for the dependency confusion detection policy.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct DependencyConfusionConfig {
+    /// Package name prefixes that indicate internal/private packages.
+    #[serde(default = "default_internal_prefixes")]
+    pub internal_prefixes: Vec<String>,
+}
+
+fn default_internal_prefixes() -> Vec<String> {
+    vec![
+        "internal-".to_string(),
+        "private-".to_string(),
+        "corp-".to_string(),
+    ]
+}
+
+impl Default for DependencyConfusionConfig {
+    fn default() -> Self {
+        Self {
+            internal_prefixes: default_internal_prefixes(),
+        }
+    }
+}
+
 /// Main configuration for dep-scan.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Config {
@@ -109,6 +133,10 @@ pub struct Config {
     /// OSV.dev API configuration.
     #[serde(default)]
     pub osv: OsvConfig,
+
+    /// Dependency confusion detection configuration.
+    #[serde(default)]
+    pub dependency_confusion: DependencyConfusionConfig,
 }
 
 fn default_min_package_age_hours() -> u64 {
@@ -123,6 +151,7 @@ impl Default for Config {
             registries: RegistryConfig::default(),
             policies: PolicyConfig::default(),
             osv: OsvConfig::default(),
+            dependency_confusion: DependencyConfusionConfig::default(),
         }
     }
 }
