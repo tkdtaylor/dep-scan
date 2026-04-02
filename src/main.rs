@@ -17,6 +17,7 @@ use cache::Cache;
 use cli::{Cli, Command, ConfigAction};
 use config::Config;
 use policy::age::AgePolicy;
+use policy::maintainer::MaintainerChangePolicy;
 use policy::{Policy, PolicyDetail, aggregate_results};
 use registry::npm::NpmRegistry;
 use registry::pypi::PyPiRegistry;
@@ -119,7 +120,9 @@ async fn run_check(
             config.min_package_age_hours as i64,
         ))));
     }
-    // Future policies will be added here
+    if config.policies.check_maintainer_changes {
+        policies.push(Box::new(MaintainerChangePolicy));
+    }
 
     // Check each package
     let mut results: Vec<CheckResult> = Vec::new();
@@ -187,8 +190,18 @@ async fn run_check(
         // Calculate age
         let age_hours = metadata.published_at.map(|t| (Utc::now() - t).num_hours());
 
+        // Fetch previous maintainers from cache if maintainer change checks are enabled
+        let previous_maintainers = if config.policies.check_maintainer_changes {
+            cache
+                .get_previous_maintainers(pkg_name, &reg_str)
+                .unwrap_or(None)
+        } else {
+            None
+        };
+
         // Build scan context
-        let ctx = ScanContext::from_metadata(metadata.clone());
+        let mut ctx = ScanContext::from_metadata(metadata.clone());
+        ctx.previous_maintainers = previous_maintainers;
 
         // Evaluate all policies
         let mut policy_details: Vec<PolicyDetail> = Vec::new();
@@ -202,6 +215,11 @@ async fn run_check(
 
         if result_str == "block" || result_str == "warn" {
             has_failure = true;
+        }
+
+        // Record current maintainers in cache for future comparisons
+        if config.policies.check_maintainer_changes {
+            let _ = cache.record_maintainers(pkg_name, &reg_str, &metadata.maintainers);
         }
 
         // Store in cache using "latest" as version key to match lookup
