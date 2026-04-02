@@ -1,9 +1,13 @@
 mod cli;
+mod config;
+
+use std::path::Path;
 
 use anyhow::Result;
 use clap::Parser;
 
 use cli::{Cli, Command, ConfigAction};
+use config::Config;
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -35,16 +39,14 @@ fn main() -> Result<()> {
         }
         Command::Config { action } => match action {
             ConfigAction::Show => {
-                if let Some(ref path) = cli.config {
-                    println!("Config path: {}", path.display());
-                } else {
-                    println!("No config file specified; using defaults.");
-                }
-                // TODO: implement config show
+                let config = Config::load(cli.config.as_deref())?;
+                let toml_str = config.to_toml_string()?;
+                println!("{toml_str}");
             }
             ConfigAction::Init => {
-                println!("Initializing configuration...");
-                // TODO: implement config init
+                let target = Path::new(".dep-scan.toml");
+                Config::write_default(target)?;
+                println!("Created {}", target.display());
             }
         },
     }
