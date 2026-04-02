@@ -1,6 +1,7 @@
 pub mod age;
 pub mod install_script;
 pub mod maintainer;
+pub mod typosquatting;
 pub mod vulnerability;
 
 use serde::Serialize;

@@ -5,6 +5,7 @@ mod osv;
 mod policy;
 mod registry;
 mod types;
+mod typosquat;
 
 use std::path::Path;
 use std::process;
@@ -21,6 +22,7 @@ use osv::{OsvClient, registry_to_ecosystem};
 use policy::age::AgePolicy;
 use policy::install_script::InstallScriptPolicy;
 use policy::maintainer::MaintainerChangePolicy;
+use policy::typosquatting::TyposquattingPolicy;
 use policy::vulnerability::VulnerabilityPolicy;
 use policy::{Policy, PolicyDetail, aggregate_results};
 use registry::npm::NpmRegistry;
@@ -129,6 +131,9 @@ async fn run_check(
     }
     if config.policies.check_maintainer_changes {
         policies.push(Box::new(MaintainerChangePolicy));
+    }
+    if config.policies.check_typosquatting {
+        policies.push(Box::new(TyposquattingPolicy::with_defaults()));
     }
     if config.policies.check_vulnerabilities {
         policies.push(Box::new(VulnerabilityPolicy::new()));
