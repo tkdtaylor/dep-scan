@@ -335,12 +335,13 @@ async fn new_results_are_cached() {
         .assert()
         .code(0);
 
-    // Verify only 1 request was made to wiremock (first run hit registry, second used cache)
+    // Verify only 2 requests were made to wiremock on the first run:
+    // 1 for metadata + 1 for install scripts. The second run should use cache.
     let received = server.received_requests().await.unwrap();
     assert_eq!(
         received.len(),
-        1,
-        "Expected exactly 1 HTTP request (second run should use cache), got {}",
+        2,
+        "Expected exactly 2 HTTP requests on first run (metadata + install scripts), got {}",
         received.len()
     );
 }

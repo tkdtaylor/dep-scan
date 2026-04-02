@@ -5,7 +5,7 @@ use reqwest::Client;
 use serde::Deserialize;
 
 use super::{Registry, RegistryError};
-use crate::types::PackageMetadata;
+use crate::types::{InstallScript, PackageMetadata};
 
 /// npm registry client.
 ///
@@ -27,6 +27,76 @@ impl NpmRegistry {
             base_url,
             client: Client::new(),
         }
+    }
+}
+
+/// The npm script hook names that are relevant for install-time analysis.
+const INSTALL_SCRIPT_NAMES: &[&str] = &["preinstall", "install", "postinstall"];
+
+impl NpmRegistry {
+    /// Fetch install scripts for a package from the npm registry.
+    ///
+    /// Makes a request to the npm registry and extracts the `scripts` field
+    /// from the resolved version's metadata. Only `preinstall`, `install`,
+    /// and `postinstall` scripts are returned.
+    pub async fn get_install_scripts(
+        &self,
+        name: &str,
+        version: Option<&str>,
+    ) -> Result<Vec<InstallScript>, RegistryError> {
+        let url = format!("{}/{}", self.base_url, name);
+
+        let response = self
+            .client
+            .get(&url)
+            .send()
+            .await
+            .map_err(|e| RegistryError::NetworkError(e.to_string()))?;
+
+        match response.status().as_u16() {
+            404 => return Err(RegistryError::NotFound(name.to_string())),
+            429 => return Err(RegistryError::RateLimited),
+            200 => {}
+            status => {
+                return Err(RegistryError::NetworkError(format!(
+                    "unexpected status code: {status}"
+                )));
+            }
+        }
+
+        let npm_response: NpmPackageResponse = response
+            .json()
+            .await
+            .map_err(|e| RegistryError::ParseError(e.to_string()))?;
+
+        let resolved_version = match version {
+            Some(v) => v.to_string(),
+            None => npm_response
+                .dist_tags
+                .get("latest")
+                .cloned()
+                .ok_or_else(|| RegistryError::ParseError("missing dist-tags.latest".to_string()))?,
+        };
+
+        let scripts = npm_response
+            .versions
+            .as_ref()
+            .and_then(|v| v.get(&resolved_version))
+            .and_then(|vi| vi.scripts.as_ref())
+            .map(|scripts_map| {
+                INSTALL_SCRIPT_NAMES
+                    .iter()
+                    .filter_map(|&hook| {
+                        scripts_map.get(hook).map(|content| InstallScript {
+                            name: hook.to_string(),
+                            content: content.clone(),
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        Ok(scripts)
     }
 }
 
@@ -141,6 +211,7 @@ struct NpmPackageResponse {
 struct NpmVersionInfo {
     description: Option<String>,
     repository: Option<NpmRepository>,
+    scripts: Option<HashMap<String, String>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -401,5 +472,84 @@ mod tests {
         assert_eq!(meta.name, "lodash");
         // The expect(1) on the mock will panic on drop if the request was not received,
         // confirming the custom base URL was used.
+    }
+
+    /// npm JSON fixture with install scripts.
+    fn malicious_pkg_json() -> String {
+        r#"{
+            "name": "malicious-pkg",
+            "description": "A malicious package",
+            "dist-tags": { "latest": "1.0.0" },
+            "versions": {
+                "1.0.0": {
+                    "name": "malicious-pkg",
+                    "version": "1.0.0",
+                    "description": "A malicious package",
+                    "scripts": {
+                        "preinstall": "node setup.js",
+                        "postinstall": "node malicious.js",
+                        "test": "jest"
+                    }
+                }
+            },
+            "time": {
+                "1.0.0": "2025-06-01T00:00:00.000Z"
+            },
+            "maintainers": [
+                { "name": "attacker", "email": "attacker@example.com" }
+            ]
+        }"#
+        .to_string()
+    }
+
+    // T-012-09: npm registry extracts scripts field
+    #[tokio::test]
+    async fn npm_registry_extracts_scripts_field() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/malicious-pkg"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(malicious_pkg_json()))
+            .mount(&server)
+            .await;
+
+        let registry = NpmRegistry::new(server.uri());
+        let scripts = registry
+            .get_install_scripts("malicious-pkg", None)
+            .await
+            .unwrap();
+
+        // Should extract preinstall and postinstall, but NOT test
+        assert_eq!(scripts.len(), 2);
+
+        let preinstall = scripts.iter().find(|s| s.name == "preinstall").unwrap();
+        assert_eq!(preinstall.content, "node setup.js");
+
+        let postinstall = scripts.iter().find(|s| s.name == "postinstall").unwrap();
+        assert_eq!(postinstall.content, "node malicious.js");
+
+        // "test" script should not be included
+        assert!(scripts.iter().all(|s| s.name != "test"));
+    }
+
+    // T-012-10: npm package without scripts field -> empty Vec
+    #[tokio::test]
+    async fn npm_package_without_scripts_field_returns_empty() {
+        let server = MockServer::start().await;
+
+        // lodash_json() has no scripts field
+        Mock::given(method("GET"))
+            .and(path("/lodash"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(lodash_json()))
+            .mount(&server)
+            .await;
+
+        let registry = NpmRegistry::new(server.uri());
+        let scripts = registry.get_install_scripts("lodash", None).await.unwrap();
+
+        assert!(
+            scripts.is_empty(),
+            "Package without scripts should return empty Vec"
+        );
     }
 }

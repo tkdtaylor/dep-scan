@@ -275,6 +275,7 @@ dependencies = [
  "chrono",
  "clap",
  "predicates",
+ "regex",
  "reqwest",
  "rusqlite",
  "serde",

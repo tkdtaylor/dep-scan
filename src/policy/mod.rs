@@ -1,4 +1,5 @@
 pub mod age;
+pub mod install_script;
 
 use serde::Serialize;
 

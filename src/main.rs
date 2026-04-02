@@ -17,6 +17,7 @@ use cache::Cache;
 use cli::{Cli, Command, ConfigAction};
 use config::Config;
 use policy::age::AgePolicy;
+use policy::install_script::InstallScriptPolicy;
 use policy::{Policy, PolicyDetail, aggregate_results};
 use registry::npm::NpmRegistry;
 use registry::pypi::PyPiRegistry;
@@ -119,7 +120,9 @@ async fn run_check(
             config.min_package_age_hours as i64,
         ))));
     }
-    // Future policies will be added here
+    if config.policies.check_install_scripts {
+        policies.push(Box::new(InstallScriptPolicy));
+    }
 
     // Check each package
     let mut results: Vec<CheckResult> = Vec::new();
@@ -187,8 +190,27 @@ async fn run_check(
         // Calculate age
         let age_hours = metadata.published_at.map(|t| (Utc::now() - t).num_hours());
 
+        // Fetch install scripts (npm only; PyPI does not expose them via JSON API)
+        let install_scripts = if config.policies.check_install_scripts
+            && reg_type == RegistryType::Npm
+        {
+            let client = NpmRegistry::new(config.registries.npm_url.clone());
+            match client.get_install_scripts(pkg_name, None).await {
+                Ok(scripts) => scripts,
+                Err(e) => {
+                    if verbose {
+                        eprintln!("Warning: failed to fetch install scripts for {pkg_name}: {e}");
+                    }
+                    vec![]
+                }
+            }
+        } else {
+            vec![]
+        };
+
         // Build scan context
-        let ctx = ScanContext::from_metadata(metadata.clone());
+        let mut ctx = ScanContext::from_metadata(metadata.clone());
+        ctx.install_scripts = install_scripts;
 
         // Evaluate all policies
         let mut policy_details: Vec<PolicyDetail> = Vec::new();
