@@ -196,19 +196,18 @@ async fn multi_policy_violations_in_output() {
     // npm: package published 1h ago (fails 48h age policy)
     Mock::given(method("GET"))
         .and(path("/new-vuln-pkg"))
-        .respond_with(
-            ResponseTemplate::new(200)
-                .set_body_string(npm_json("new-vuln-pkg", "1.0.0", 1)),
-        )
+        .respond_with(ResponseTemplate::new(200).set_body_string(npm_json(
+            "new-vuln-pkg",
+            "1.0.0",
+            1,
+        )))
         .mount(&npm_server)
         .await;
 
     // OSV: returns a vulnerability
     Mock::given(method("POST"))
         .and(path("/v1/query"))
-        .respond_with(
-            ResponseTemplate::new(200).set_body_string(osv_vulnerable_response()),
-        )
+        .respond_with(ResponseTemplate::new(200).set_body_string(osv_vulnerable_response()))
         .mount(&osv_server)
         .await;
 
@@ -298,9 +297,11 @@ async fn clean_package_passes_all_policies() {
     // npm: clean package published 72h ago
     Mock::given(method("GET"))
         .and(path("/clean-pkg"))
-        .respond_with(
-            ResponseTemplate::new(200).set_body_string(npm_json("clean-pkg", "1.0.0", 72)),
-        )
+        .respond_with(ResponseTemplate::new(200).set_body_string(npm_json(
+            "clean-pkg",
+            "1.0.0",
+            72,
+        )))
         .mount(&npm_server)
         .await;
 
@@ -349,9 +350,7 @@ async fn typosquatting_match_in_output() {
     // npm: returns valid metadata for "reqests"
     Mock::given(method("GET"))
         .and(path("/reqests"))
-        .respond_with(
-            ResponseTemplate::new(200).set_body_string(npm_json("reqests", "1.0.0", 72)),
-        )
+        .respond_with(ResponseTemplate::new(200).set_body_string(npm_json("reqests", "1.0.0", 72)))
         .mount(&npm_server)
         .await;
 
@@ -403,9 +402,7 @@ async fn config_toggle_disables_policy() {
     // npm: 1h old package (would normally fail age, but age is disabled)
     Mock::given(method("GET"))
         .and(path("/new-pkg"))
-        .respond_with(
-            ResponseTemplate::new(200).set_body_string(npm_json("new-pkg", "1.0.0", 1)),
-        )
+        .respond_with(ResponseTemplate::new(200).set_body_string(npm_json("new-pkg", "1.0.0", 1)))
         .mount(&npm_server)
         .await;
 
@@ -468,9 +465,11 @@ async fn json_output_has_stable_multi_policy_schema() {
     // npm: clean package
     Mock::given(method("GET"))
         .and(path("/schema-pkg"))
-        .respond_with(
-            ResponseTemplate::new(200).set_body_string(npm_json("schema-pkg", "2.0.0", 72)),
-        )
+        .respond_with(ResponseTemplate::new(200).set_body_string(npm_json(
+            "schema-pkg",
+            "2.0.0",
+            72,
+        )))
         .mount(&npm_server)
         .await;
 
@@ -528,7 +527,9 @@ async fn json_output_has_stable_multi_policy_schema() {
             "policy_name should be a string, got: {:?}",
             policy["policy_name"]
         );
-        let result = policy["result"].as_str().expect("result should be a string");
+        let result = policy["result"]
+            .as_str()
+            .expect("result should be a string");
         assert!(
             result == "pass" || result == "warn" || result == "block",
             "result should be pass/warn/block, got: {result}"
@@ -589,19 +590,18 @@ async fn exit_codes_with_multi_policy() {
     // npm: old package (passes age)
     Mock::given(method("GET"))
         .and(path("/vuln-only-pkg"))
-        .respond_with(
-            ResponseTemplate::new(200)
-                .set_body_string(npm_json("vuln-only-pkg", "1.0.0", 72)),
-        )
+        .respond_with(ResponseTemplate::new(200).set_body_string(npm_json(
+            "vuln-only-pkg",
+            "1.0.0",
+            72,
+        )))
         .mount(&npm_server)
         .await;
 
     // OSV: returns vulnerability (blocks)
     Mock::given(method("POST"))
         .and(path("/v1/query"))
-        .respond_with(
-            ResponseTemplate::new(200).set_body_string(osv_vulnerable_response()),
-        )
+        .respond_with(ResponseTemplate::new(200).set_body_string(osv_vulnerable_response()))
         .mount(&osv_server)
         .await;
 

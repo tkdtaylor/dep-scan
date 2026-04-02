@@ -7,3 +7,4 @@
 # Build artifacts (language-dependent, will expand after ADR 001)
 target/
 .claude/worktrees/
+codescan-reports/
