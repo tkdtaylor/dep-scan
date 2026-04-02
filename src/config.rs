@@ -31,6 +31,26 @@ impl Default for RegistryConfig {
     }
 }
 
+/// OSV.dev API configuration.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct OsvConfig {
+    /// Base URL for the OSV API.
+    #[serde(default = "default_osv_url")]
+    pub osv_url: String,
+}
+
+fn default_osv_url() -> String {
+    "https://api.osv.dev".to_string()
+}
+
+impl Default for OsvConfig {
+    fn default() -> Self {
+        Self {
+            osv_url: default_osv_url(),
+        }
+    }
+}
+
 /// Policy toggles for controlling which checks are enabled.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct PolicyConfig {
@@ -46,6 +66,9 @@ pub struct PolicyConfig {
     /// Check for suspicious maintainer changes
     #[serde(default = "default_true")]
     pub check_maintainer_changes: bool,
+    /// Check for known vulnerabilities via OSV.dev
+    #[serde(default = "default_true")]
+    pub check_vulnerabilities: bool,
 }
 
 fn default_true() -> bool {
@@ -59,6 +82,7 @@ impl Default for PolicyConfig {
             check_install_scripts: true,
             check_min_age: true,
             check_maintainer_changes: true,
+            check_vulnerabilities: true,
         }
     }
 }
@@ -81,6 +105,10 @@ pub struct Config {
     /// Policy toggles.
     #[serde(default)]
     pub policies: PolicyConfig,
+
+    /// OSV.dev API configuration.
+    #[serde(default)]
+    pub osv: OsvConfig,
 }
 
 fn default_min_package_age_hours() -> u64 {
@@ -94,6 +122,7 @@ impl Default for Config {
             cache_path: None,
             registries: RegistryConfig::default(),
             policies: PolicyConfig::default(),
+            osv: OsvConfig::default(),
         }
     }
 }
@@ -156,6 +185,9 @@ impl Config {
         }
         if let Ok(val) = std::env::var("DEP_SCAN_CACHE_PATH") {
             self.cache_path = Some(val);
+        }
+        if let Ok(val) = std::env::var("DEP_SCAN_OSV_URL") {
+            self.osv.osv_url = val;
         }
     }
 
@@ -330,5 +362,35 @@ min_package_age_hours = 100
         assert_eq!(config.registries.pypi_url, "https://pypi.org");
         // Policies should still be at defaults
         assert!(config.policies.check_typosquatting);
+    }
+
+    // T-011-09: OsvConfig has correct defaults
+    #[test]
+    fn osv_config_has_correct_defaults() {
+        let config = Config::default();
+        assert_eq!(config.osv.osv_url, "https://api.osv.dev");
+        assert!(config.policies.check_vulnerabilities);
+    }
+
+    // T-011-10: DEP_SCAN_OSV_URL env var overrides osv_url
+    #[test]
+    fn env_var_override_osv_url() {
+        let _lock = ENV_LOCK.lock().unwrap();
+
+        let _guard = EnvGuard::set("DEP_SCAN_OSV_URL", "http://localhost:9999");
+
+        let config = Config::load(None).unwrap();
+        assert_eq!(config.osv.osv_url, "http://localhost:9999");
+    }
+
+    // OsvConfig can be set via TOML
+    #[test]
+    fn osv_config_from_toml() {
+        let toml_str = r#"
+[osv]
+osv_url = "https://custom-osv.example.com"
+"#;
+        let config = Config::from_toml_str(toml_str).unwrap();
+        assert_eq!(config.osv.osv_url, "https://custom-osv.example.com");
     }
 }
