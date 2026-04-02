@@ -1,5 +1,9 @@
 mod cli;
 mod config;
+#[allow(dead_code)]
+mod registry;
+#[allow(dead_code)]
+mod types;
 
 use std::path::Path;
 
