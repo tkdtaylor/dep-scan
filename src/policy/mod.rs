@@ -1,4 +1,5 @@
 pub mod age;
+pub mod vulnerability;
 
 use serde::Serialize;
 

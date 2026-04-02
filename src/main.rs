@@ -1,6 +1,7 @@
 mod cache;
 mod cli;
 mod config;
+mod osv;
 mod policy;
 mod registry;
 mod types;
@@ -16,7 +17,9 @@ use serde::Serialize;
 use cache::Cache;
 use cli::{Cli, Command, ConfigAction};
 use config::Config;
+use osv::{OsvClient, registry_to_ecosystem};
 use policy::age::AgePolicy;
+use policy::vulnerability::VulnerabilityPolicy;
 use policy::{Policy, PolicyDetail, aggregate_results};
 use registry::npm::NpmRegistry;
 use registry::pypi::PyPiRegistry;
@@ -119,7 +122,16 @@ async fn run_check(
             config.min_package_age_hours as i64,
         ))));
     }
-    // Future policies will be added here
+    if config.policies.check_vulnerabilities {
+        policies.push(Box::new(VulnerabilityPolicy::new()));
+    }
+
+    // Create OSV client for vulnerability lookups
+    let osv_client = if config.policies.check_vulnerabilities {
+        Some(OsvClient::new(config.osv.osv_url.clone()))
+    } else {
+        None
+    };
 
     // Check each package
     let mut results: Vec<CheckResult> = Vec::new();
@@ -187,8 +199,27 @@ async fn run_check(
         // Calculate age
         let age_hours = metadata.published_at.map(|t| (Utc::now() - t).num_hours());
 
-        // Build scan context
-        let ctx = ScanContext::from_metadata(metadata.clone());
+        // Build scan context and enrich with vulnerability data
+        let mut ctx = ScanContext::from_metadata(metadata.clone());
+
+        // Query OSV for known vulnerabilities
+        if let Some(ref osv) = osv_client {
+            let ecosystem = registry_to_ecosystem(&reg_type);
+            match osv
+                .query(&metadata.name, &metadata.version, ecosystem)
+                .await
+            {
+                Ok(vulns) => {
+                    ctx.vulnerabilities = vulns;
+                }
+                Err(e) => {
+                    if verbose {
+                        eprintln!("Warning: OSV lookup failed for {pkg_name}: {e:#}");
+                    }
+                    // Non-fatal: continue with empty vulnerability list
+                }
+            }
+        }
 
         // Evaluate all policies
         let mut policy_details: Vec<PolicyDetail> = Vec::new();
