@@ -1,6 +1,60 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+/// Information about a known vulnerability affecting a package.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct VulnerabilityInfo {
+    /// Vulnerability identifier (e.g. CVE-2024-XXXX, GHSA-XXXX).
+    pub id: String,
+    /// Human-readable summary of the vulnerability.
+    pub summary: Option<String>,
+    /// Severity level (e.g. "critical", "high", "medium", "low").
+    pub severity: Option<String>,
+    /// Alternative identifiers for the same vulnerability.
+    pub aliases: Vec<String>,
+    /// Versions in which the vulnerability is fixed.
+    pub fixed_versions: Vec<String>,
+}
+
+/// An install script found in a package (e.g. npm preinstall, postinstall).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct InstallScript {
+    /// Script hook name (e.g. "preinstall", "postinstall").
+    pub name: String,
+    /// The script content.
+    pub content: String,
+}
+
+/// Enriched scan context passed to all policies.
+///
+/// Wraps the core `PackageMetadata` with additional data gathered during
+/// the scanning pipeline (vulnerabilities, install scripts, maintainer
+/// history, etc.). Every policy receives the same `ScanContext`.
+#[derive(Debug, Clone)]
+#[allow(dead_code)] // Enrichment fields used by upcoming policies (vulnerability, scripts, maintainer)
+pub struct ScanContext {
+    /// Core package metadata from the registry.
+    pub metadata: PackageMetadata,
+    /// Known vulnerabilities affecting this package version.
+    pub vulnerabilities: Vec<VulnerabilityInfo>,
+    /// Install scripts found in the package.
+    pub install_scripts: Vec<InstallScript>,
+    /// Previous maintainers, if maintainer history is available.
+    pub previous_maintainers: Option<Vec<String>>,
+}
+
+impl ScanContext {
+    /// Create a `ScanContext` from metadata with empty enrichment fields.
+    pub fn from_metadata(metadata: PackageMetadata) -> Self {
+        Self {
+            metadata,
+            vulnerabilities: Vec::new(),
+            install_scripts: Vec::new(),
+            previous_maintainers: None,
+        }
+    }
+}
+
 /// Metadata about a package retrieved from a registry.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct PackageMetadata {
@@ -103,5 +157,71 @@ mod tests {
             serde_json::from_str(&json).expect("deserialize from JSON");
 
         assert_eq!(original, deserialized);
+    }
+
+    // T-010-01: ScanContext construction with minimal data
+    #[test]
+    fn scan_context_from_metadata_minimal() {
+        let meta = PackageMetadata {
+            name: "test-pkg".to_string(),
+            version: "1.0.0".to_string(),
+            description: None,
+            published_at: None,
+            maintainers: vec![],
+            downloads: None,
+            repository_url: None,
+        };
+
+        let ctx = ScanContext::from_metadata(meta.clone());
+
+        assert_eq!(ctx.metadata, meta);
+        assert!(ctx.vulnerabilities.is_empty());
+        assert!(ctx.install_scripts.is_empty());
+        assert!(ctx.previous_maintainers.is_none());
+    }
+
+    // T-010-02: ScanContext construction with full enrichment
+    #[test]
+    fn scan_context_with_full_enrichment() {
+        let published = Utc.with_ymd_and_hms(2025, 1, 15, 12, 0, 0).unwrap();
+        let meta = PackageMetadata {
+            name: "lodash".to_string(),
+            version: "4.17.21".to_string(),
+            description: Some("A modern JavaScript utility library".to_string()),
+            published_at: Some(published),
+            maintainers: vec!["jdalton".to_string()],
+            downloads: Some(50_000_000),
+            repository_url: Some("https://github.com/lodash/lodash".to_string()),
+        };
+
+        let ctx = ScanContext {
+            metadata: meta.clone(),
+            vulnerabilities: vec![VulnerabilityInfo {
+                id: "CVE-2021-23337".to_string(),
+                summary: Some("Prototype pollution in lodash".to_string()),
+                severity: Some("high".to_string()),
+                aliases: vec!["GHSA-35jh-r3h4-6jhm".to_string()],
+                fixed_versions: vec!["4.17.21".to_string()],
+            }],
+            install_scripts: vec![InstallScript {
+                name: "postinstall".to_string(),
+                content: "echo hello".to_string(),
+            }],
+            previous_maintainers: Some(vec!["old-maintainer".to_string()]),
+        };
+
+        assert_eq!(ctx.metadata, meta);
+        assert_eq!(ctx.vulnerabilities.len(), 1);
+        assert_eq!(ctx.vulnerabilities[0].id, "CVE-2021-23337");
+        assert_eq!(ctx.vulnerabilities[0].severity, Some("high".to_string()));
+        assert_eq!(ctx.vulnerabilities[0].aliases.len(), 1);
+        assert_eq!(ctx.vulnerabilities[0].fixed_versions.len(), 1);
+        assert_eq!(ctx.install_scripts.len(), 1);
+        assert_eq!(ctx.install_scripts[0].name, "postinstall");
+        assert_eq!(ctx.install_scripts[0].content, "echo hello");
+        assert_eq!(
+            ctx.previous_maintainers,
+            Some(vec!["old-maintainer".to_string()])
+        );
     }
 }

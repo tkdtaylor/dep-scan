@@ -17,10 +17,11 @@ use cache::Cache;
 use cli::{Cli, Command, ConfigAction};
 use config::Config;
 use policy::age::AgePolicy;
-use policy::{Policy, PolicyResult};
+use policy::{Policy, PolicyDetail, aggregate_results};
 use registry::npm::NpmRegistry;
 use registry::pypi::PyPiRegistry;
 use registry::{Registry, RegistryType};
+use types::ScanContext;
 
 /// The result of checking a single package, suitable for JSON serialization.
 #[derive(Debug, Serialize)]
@@ -31,6 +32,7 @@ struct CheckResult {
     age_hours: Option<i64>,
     result: String,
     reason: Option<String>,
+    policies: Vec<PolicyDetail>,
 }
 
 #[tokio::main]
@@ -110,8 +112,14 @@ async fn run_check(
     let cache = Cache::new(&cache_path)
         .with_context(|| format!("Failed to open cache at {}", cache_path.display()))?;
 
-    // Build age policy
-    let age_policy = AgePolicy::new(TimeDelta::hours(config.min_package_age_hours as i64));
+    // Build policy list from config
+    let mut policies: Vec<Box<dyn Policy>> = Vec::new();
+    if config.policies.check_min_age {
+        policies.push(Box::new(AgePolicy::new(TimeDelta::hours(
+            config.min_package_age_hours as i64,
+        ))));
+    }
+    // Future policies will be added here
 
     // Check each package
     let mut results: Vec<CheckResult> = Vec::new();
@@ -142,6 +150,7 @@ async fn run_check(
                 age_hours: None,
                 result: cached_result,
                 reason: Some("cached result".to_string()),
+                policies: vec![],
             });
             continue;
         }
@@ -169,6 +178,7 @@ async fn run_check(
                     age_hours: None,
                     result: "error".to_string(),
                     reason: Some(format!("{e}")),
+                    policies: vec![],
                 });
                 continue;
             }
@@ -177,24 +187,22 @@ async fn run_check(
         // Calculate age
         let age_hours = metadata.published_at.map(|t| (Utc::now() - t).num_hours());
 
-        // Run age policy
-        let policy_result = if config.policies.check_min_age {
-            age_policy.evaluate(&metadata)
-        } else {
-            PolicyResult::Pass
-        };
+        // Build scan context
+        let ctx = ScanContext::from_metadata(metadata.clone());
 
-        let (result_str, reason) = match &policy_result {
-            PolicyResult::Pass => ("pass".to_string(), None),
-            PolicyResult::Warn(msg) => {
-                has_failure = true;
-                ("warn".to_string(), Some(msg.clone()))
-            }
-            PolicyResult::Block(msg) => {
-                has_failure = true;
-                ("block".to_string(), Some(msg.clone()))
-            }
-        };
+        // Evaluate all policies
+        let mut policy_details: Vec<PolicyDetail> = Vec::new();
+        for p in &policies {
+            let policy_result = p.evaluate(&ctx);
+            policy_details.push(PolicyDetail::from_result(p.name(), &policy_result));
+        }
+
+        // Aggregate results
+        let (result_str, reason) = aggregate_results(&policy_details);
+
+        if result_str == "block" || result_str == "warn" {
+            has_failure = true;
+        }
 
         // Store in cache using "latest" as version key to match lookup
         let _ = cache.insert(pkg_name, "latest", &reg_str, &result_str);
@@ -206,6 +214,7 @@ async fn run_check(
             age_hours,
             result: result_str,
             reason,
+            policies: policy_details,
         });
     }
 
@@ -225,14 +234,37 @@ async fn run_check(
             let result_display = match r.result.as_str() {
                 "pass" => "pass".to_string(),
                 "warn" => format!("WARN: {}", r.reason.as_deref().unwrap_or("unknown warning")),
-                "block" => format!("BLOCK: {}", r.reason.as_deref().unwrap_or("unknown reason")),
-                "error" => format!("ERROR: {}", r.reason.as_deref().unwrap_or("unknown error")),
+                "block" => {
+                    format!("BLOCK: {}", r.reason.as_deref().unwrap_or("unknown reason"))
+                }
+                "error" => {
+                    format!("ERROR: {}", r.reason.as_deref().unwrap_or("unknown error"))
+                }
                 other => other.to_string(),
             };
             println!(
                 "{:<20} {:<12} {:<10} {}",
                 r.package, r.version, age_display, result_display
             );
+
+            // Per-policy breakdown
+            for pd in &r.policies {
+                let detail_display = match pd.result.as_str() {
+                    "pass" => format!("  {}: pass", pd.policy_name),
+                    "warn" => format!(
+                        "  {}: WARN — {}",
+                        pd.policy_name,
+                        pd.reason.as_deref().unwrap_or("unknown")
+                    ),
+                    "block" => format!(
+                        "  {}: BLOCK — {}",
+                        pd.policy_name,
+                        pd.reason.as_deref().unwrap_or("unknown")
+                    ),
+                    _ => format!("  {}: {}", pd.policy_name, pd.result),
+                };
+                println!("{detail_display}");
+            }
         }
     }
 

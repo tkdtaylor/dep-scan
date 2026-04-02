@@ -2,6 +2,7 @@ use std::io::Write;
 
 use assert_cmd::Command;
 use predicates::prelude::*;
+use serde_json::Value;
 use tempfile::{NamedTempFile, TempDir};
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -414,4 +415,133 @@ async fn human_readable_output_format() {
         .stdout(predicate::str::contains("table-pkg"))
         .stdout(predicate::str::contains("3.2.1"))
         .stdout(predicate::str::contains("pass"));
+}
+
+// T-010-09: Check with only age policy — backwards compatible exit 0
+// Setup: wiremock npm JSON for package published 72h ago
+// Run: dep-scan check old-package --registry npm
+// Expected: same behavior as v0.1 — exit 0, pass result
+#[tokio::test]
+async fn check_with_age_policy_backwards_compatible() {
+    let server = MockServer::start().await;
+    let tmp = TempDir::new().unwrap();
+    let cache_path = tmp.path().join("cache.db");
+    let config = write_config(&server.uri(), cache_path.to_str().unwrap());
+
+    Mock::given(method("GET"))
+        .and(path("/compat-pkg"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(npm_json(
+            "compat-pkg",
+            "2.0.0",
+            72,
+        )))
+        .mount(&server)
+        .await;
+
+    dep_scan()
+        .args([
+            "--config",
+            config.path().to_str().unwrap(),
+            "check",
+            "compat-pkg",
+            "--registry",
+            "npm",
+        ])
+        .assert()
+        .code(0)
+        .stdout(predicate::str::contains("pass"))
+        .stdout(predicate::str::contains("compat-pkg"));
+}
+
+// T-010-10: JSON output includes policies array
+// Setup: wiremock npm JSON
+// Run: dep-scan check package --registry npm --json
+// Expected: JSON has "policies" array with at least age policy entry
+#[tokio::test]
+async fn json_output_includes_policies_array() {
+    let server = MockServer::start().await;
+    let tmp = TempDir::new().unwrap();
+    let cache_path = tmp.path().join("cache.db");
+    let config = write_config(&server.uri(), cache_path.to_str().unwrap());
+
+    Mock::given(method("GET"))
+        .and(path("/json-policies-pkg"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(npm_json(
+            "json-policies-pkg",
+            "1.5.0",
+            72,
+        )))
+        .mount(&server)
+        .await;
+
+    let output = dep_scan()
+        .args([
+            "--config",
+            config.path().to_str().unwrap(),
+            "check",
+            "json-policies-pkg",
+            "--registry",
+            "npm",
+            "--json",
+        ])
+        .output()
+        .expect("run dep-scan");
+
+    assert!(output.status.success(), "should exit 0 for old package");
+
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let parsed: Value = serde_json::from_str(&stdout).expect("output should be valid JSON");
+
+    let arr = parsed.as_array().expect("should be a JSON array");
+    assert_eq!(arr.len(), 1);
+
+    let entry = &arr[0];
+    assert_eq!(entry["package"], "json-policies-pkg");
+    assert_eq!(entry["result"], "pass");
+
+    // Verify the policies array exists and has the age policy
+    let policies = entry["policies"]
+        .as_array()
+        .expect("should have policies array");
+    assert!(
+        !policies.is_empty(),
+        "policies array should not be empty when age policy is enabled"
+    );
+    assert_eq!(policies[0]["policy_name"], "age");
+    assert_eq!(policies[0]["result"], "pass");
+}
+
+// T-010-11: Multiple policies in output (per-policy breakdown in human output)
+// Setup: wiremock npm JSON, age policy enabled, package passes age check
+// Expected: output shows individual policy results
+#[tokio::test]
+async fn human_output_shows_per_policy_breakdown() {
+    let server = MockServer::start().await;
+    let tmp = TempDir::new().unwrap();
+    let cache_path = tmp.path().join("cache.db");
+    let config = write_config(&server.uri(), cache_path.to_str().unwrap());
+
+    Mock::given(method("GET"))
+        .and(path("/breakdown-pkg"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(npm_json(
+            "breakdown-pkg",
+            "1.0.0",
+            72,
+        )))
+        .mount(&server)
+        .await;
+
+    dep_scan()
+        .args([
+            "--config",
+            config.path().to_str().unwrap(),
+            "check",
+            "breakdown-pkg",
+            "--registry",
+            "npm",
+        ])
+        .assert()
+        .code(0)
+        .stdout(predicate::str::contains("breakdown-pkg"))
+        .stdout(predicate::str::contains("age: pass"));
 }

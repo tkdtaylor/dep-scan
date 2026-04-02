@@ -1,7 +1,7 @@
 use chrono::{TimeDelta, Utc};
 
 use super::{Policy, PolicyResult};
-use crate::types::PackageMetadata;
+use crate::types::ScanContext;
 
 /// Policy that blocks packages published too recently.
 ///
@@ -21,11 +21,15 @@ impl AgePolicy {
 }
 
 impl Policy for AgePolicy {
-    fn evaluate(&self, metadata: &PackageMetadata) -> PolicyResult {
-        let Some(published_at) = metadata.published_at else {
+    fn name(&self) -> &str {
+        "age"
+    }
+
+    fn evaluate(&self, ctx: &ScanContext) -> PolicyResult {
+        let Some(published_at) = ctx.metadata.published_at else {
             return PolicyResult::Warn(format!(
                 "Package '{}' has no published date — cannot verify age",
-                metadata.name
+                ctx.metadata.name
             ));
         };
 
@@ -38,7 +42,7 @@ impl Policy for AgePolicy {
             let min_hours = self.min_age.num_hours();
             PolicyResult::Block(format!(
                 "Package '{}' is only {} hours old (minimum: {} hours)",
-                metadata.name, age_hours, min_hours
+                ctx.metadata.name, age_hours, min_hours
             ))
         }
     }
@@ -49,10 +53,11 @@ mod tests {
     use chrono::{TimeDelta, Utc};
 
     use super::*;
+    use crate::types::PackageMetadata;
 
-    /// Helper to build a PackageMetadata with a specific published_at.
-    fn make_metadata(name: &str, published_at: Option<chrono::DateTime<Utc>>) -> PackageMetadata {
-        PackageMetadata {
+    /// Helper to build a ScanContext with a specific published_at.
+    fn make_context(name: &str, published_at: Option<chrono::DateTime<Utc>>) -> ScanContext {
+        let meta = PackageMetadata {
             name: name.to_string(),
             version: "1.0.0".to_string(),
             description: None,
@@ -60,7 +65,8 @@ mod tests {
             maintainers: vec![],
             downloads: None,
             repository_url: None,
-        }
+        };
+        ScanContext::from_metadata(meta)
     }
 
     // T-008-01: Package 72h old with 48h min_age -> Pass
@@ -68,9 +74,9 @@ mod tests {
     fn package_older_than_min_age_passes() {
         let policy = AgePolicy::new(TimeDelta::hours(48));
         let published = Utc::now() - TimeDelta::hours(72);
-        let meta = make_metadata("safe-pkg", Some(published));
+        let ctx = make_context("safe-pkg", Some(published));
 
-        assert_eq!(policy.evaluate(&meta), PolicyResult::Pass);
+        assert_eq!(policy.evaluate(&ctx), PolicyResult::Pass);
     }
 
     // T-008-02: Package 1h old with 48h min_age -> Block with reason
@@ -78,9 +84,9 @@ mod tests {
     fn package_younger_than_min_age_is_blocked() {
         let policy = AgePolicy::new(TimeDelta::hours(48));
         let published = Utc::now() - TimeDelta::hours(1);
-        let meta = make_metadata("new-pkg", Some(published));
+        let ctx = make_context("new-pkg", Some(published));
 
-        let result = policy.evaluate(&meta);
+        let result = policy.evaluate(&ctx);
         match &result {
             PolicyResult::Block(reason) => {
                 assert!(
@@ -97,18 +103,18 @@ mod tests {
     fn package_exactly_at_threshold_passes() {
         let policy = AgePolicy::new(TimeDelta::hours(48));
         let published = Utc::now() - TimeDelta::hours(48);
-        let meta = make_metadata("threshold-pkg", Some(published));
+        let ctx = make_context("threshold-pkg", Some(published));
 
-        assert_eq!(policy.evaluate(&meta), PolicyResult::Pass);
+        assert_eq!(policy.evaluate(&ctx), PolicyResult::Pass);
     }
 
     // T-008-04: Missing published_at -> Warn with reason
     #[test]
     fn missing_published_at_warns() {
         let policy = AgePolicy::new(TimeDelta::hours(48));
-        let meta = make_metadata("mystery-pkg", None);
+        let ctx = make_context("mystery-pkg", None);
 
-        let result = policy.evaluate(&meta);
+        let result = policy.evaluate(&ctx);
         match &result {
             PolicyResult::Warn(reason) => {
                 assert!(
@@ -129,9 +135,9 @@ mod tests {
     fn zero_min_age_passes_everything() {
         let policy = AgePolicy::new(TimeDelta::zero());
         let published = Utc::now() - TimeDelta::seconds(1);
-        let meta = make_metadata("brand-new-pkg", Some(published));
+        let ctx = make_context("brand-new-pkg", Some(published));
 
-        assert_eq!(policy.evaluate(&meta), PolicyResult::Pass);
+        assert_eq!(policy.evaluate(&ctx), PolicyResult::Pass);
     }
 
     // T-008-06: Custom min_age=168h (1 week), 3 days old -> Block
@@ -139,9 +145,9 @@ mod tests {
     fn custom_min_age_one_week_blocks_three_day_old() {
         let policy = AgePolicy::new(TimeDelta::hours(168));
         let published = Utc::now() - TimeDelta::days(3);
-        let meta = make_metadata("recent-pkg", Some(published));
+        let ctx = make_context("recent-pkg", Some(published));
 
-        let result = policy.evaluate(&meta);
+        let result = policy.evaluate(&ctx);
         assert!(
             matches!(result, PolicyResult::Block(_)),
             "3-day-old package should be blocked by 1-week policy"
@@ -153,9 +159,9 @@ mod tests {
     fn block_message_includes_name_and_age() {
         let policy = AgePolicy::new(TimeDelta::hours(48));
         let published = Utc::now() - TimeDelta::hours(1);
-        let meta = make_metadata("suspicious-pkg", Some(published));
+        let ctx = make_context("suspicious-pkg", Some(published));
 
-        let result = policy.evaluate(&meta);
+        let result = policy.evaluate(&ctx);
         match result {
             PolicyResult::Block(reason) => {
                 assert!(
@@ -173,5 +179,30 @@ mod tests {
             }
             other => panic!("Expected Block, got {:?}", other),
         }
+    }
+
+    // T-010-03: AgePolicy works with ScanContext (72h old -> Pass)
+    #[test]
+    fn age_policy_with_scan_context_pass() {
+        let policy = AgePolicy::new(TimeDelta::hours(48));
+        assert_eq!(policy.name(), "age");
+
+        let published = Utc::now() - TimeDelta::hours(72);
+        let ctx = make_context("old-pkg", Some(published));
+        assert_eq!(policy.evaluate(&ctx), PolicyResult::Pass);
+    }
+
+    // T-010-04: AgePolicy blocks via ScanContext (1h old -> Block)
+    #[test]
+    fn age_policy_with_scan_context_block() {
+        let policy = AgePolicy::new(TimeDelta::hours(48));
+        let published = Utc::now() - TimeDelta::hours(1);
+        let ctx = make_context("evil-pkg", Some(published));
+
+        let result = policy.evaluate(&ctx);
+        assert!(
+            matches!(result, PolicyResult::Block(_)),
+            "1h-old package should be blocked by 48h policy"
+        );
     }
 }
