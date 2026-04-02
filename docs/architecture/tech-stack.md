@@ -7,9 +7,13 @@
 
 | Layer | Technology | Rationale |
 |-------|-----------|-----------|
-| Language | Rust or Go (TBD — ADR pending) | Cross-platform, fast, single binary distribution |
-| Framework | — | |
-| Database | Local SQLite / embedded KV store | Hash cache for already-scanned dependencies |
+| Language | Rust | Cross-platform, fast, single binary, strong type system for analysis work ([ADR 001](decisions/001-language-choice.md)) |
+| CLI framework | clap (derive) | Mature, ergonomic, auto-generates help and shell completions |
+| HTTP client | reqwest + tokio | Async HTTP for parallel registry API calls |
+| Serialization | serde + serde_json | Best-in-class JSON deserialization for registry metadata |
+| Database | rusqlite (SQLite) | Hash cache for already-scanned dependencies |
+| Config | toml (serde) | Parse `.dep-scan.toml` policy files |
+| Error handling | anyhow / thiserror | Ergonomic error propagation |
 | Infrastructure | — | Local-first CLI tool |
 
 ## Development tooling
@@ -23,12 +27,10 @@
 
 | Tool | Scope |
 |------|-------|
-| TBD (language-dependent) | Unit tests |
-| TBD | Integration tests (mock registry responses) |
-| TBD | End-to-end tests (real package manager invocations) |
+| `cargo test` | Unit tests |
+| `cargo test` + `mockito` or `wiremock` | Integration tests (mock registry responses) |
+| Shell scripts + `assert_cmd` | End-to-end tests (real CLI invocations) |
 
 ## Notes
 
-> Language decision (Rust vs Go) is the first ADR to write. Both are strong candidates:
-> - Rust: stronger static analysis, better security guarantees, cargo ecosystem
-> - Go: faster compile times, simpler cross-compilation, familiar to more contributors
+> Language decision made — see [ADR 001](decisions/001-language-choice.md).

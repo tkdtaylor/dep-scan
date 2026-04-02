@@ -18,15 +18,17 @@ The key distinction: `docs/` is the input side (read before you act), `src/` is 
 
 ## Tech stack
 
-Rust or Go (TBD — first ADR). Cross-platform CLI, single binary distribution. Local SQLite or embedded KV store for hash cache.
+Rust (see [ADR 001](docs/architecture/decisions/001-language-choice.md)). Cross-platform CLI, single binary distribution. Local SQLite for hash cache.
 
 ## Commands
 
 ```bash
-# TODO: fill in after language decision — how to run tests
-# TODO: fill in — how to build / compile
-# TODO: fill in — how to run the CLI
-# TODO: fill in — how to lint / format
+cargo test              # run all tests
+cargo build --release   # build optimized binary
+cargo run -- <args>     # run the CLI
+cargo clippy            # lint
+cargo fmt --check       # check formatting
+cargo fmt               # auto-format
 
 # Docker (run from host, outside the container)
 docker run --rm -it \

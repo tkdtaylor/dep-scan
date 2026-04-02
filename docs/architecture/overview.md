@@ -17,7 +17,7 @@ A cross-platform CLI tool that wraps package managers (npm, pip, cargo, go) to i
 
 | Decision | Choice | ADR |
 |----------|--------|-----|
-| | | |
+| Implementation language | Rust | [001](decisions/001-language-choice.md) |
 
 ## Data flow
 
