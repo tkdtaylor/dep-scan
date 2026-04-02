@@ -12,7 +12,7 @@
 
 | Task ID | Feature | Spec file | Tests written | Status |
 |---------|---------|-----------|---------------|--------|
-| | | | | |
+| 002 | CLI skeleton with clap | 002-cli-skeleton-test-spec.md | 11/11 | Done |
 
 ## Status key
 
