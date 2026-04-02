@@ -26,6 +26,7 @@
 | 013 | Typosquatting detection | 013-typosquatting-test-spec.md | 20/20 | Done |
 | 014 | Maintainer change detection | 014-maintainer-change-test-spec.md | 9/9 | Done |
 | 015 | Dependency confusion heuristics | 015-dependency-confusion-test-spec.md | 11/11 | Done |
+| 016 | v0.2 integration tests | 016-v2-integration-test-spec.md | 7/7 | Done |
 
 ## Status key
 
