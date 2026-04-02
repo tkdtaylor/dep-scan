@@ -15,6 +15,7 @@
 | 002 | CLI skeleton with clap | 002-cli-skeleton-test-spec.md | 11/11 | Done |
 | 003 | Configuration system | 003-config-system-test-spec.md | 10/10 | Done |
 | 004 | Package metadata types + registry trait | 004-types-and-registry-trait-test-spec.md | 6/6 | Done |
+| 006 | PyPI registry client | 006-pypi-registry-client-test-spec.md | 12/12 | Done |
 
 ## Status key
 
