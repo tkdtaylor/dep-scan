@@ -1,0 +1,28 @@
+{
+  "permissions": {
+    "allow": ["Bash(*)", "Read", "Write", "Edit", "Glob", "Grep"],
+    "ask": [
+      "Bash(sudo:*)",
+      "Bash(rm -rf:*)",
+      "Bash(git push --force:*)",
+      "Bash(git push -f:*)",
+      "Bash(git reset --hard:*)",
+      "Bash(dd :*)",
+      "Bash(mkfs:*)"
+    ]
+  },
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "ExitPlanMode",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR\"/.claude/scripts/restructure-plan.py",
+            "timeout": 30
+          }
+        ]
+      }
+    ]
+  }
+}
