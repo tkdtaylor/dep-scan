@@ -3,6 +3,8 @@ mod cache;
 mod cli;
 mod config;
 #[allow(dead_code)]
+mod policy;
+#[allow(dead_code)]
 mod registry;
 #[allow(dead_code)]
 mod types;
