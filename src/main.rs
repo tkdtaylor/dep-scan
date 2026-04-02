@@ -1,3 +1,5 @@
+#[allow(dead_code)]
+mod cache;
 mod cli;
 mod config;
 #[allow(dead_code)]

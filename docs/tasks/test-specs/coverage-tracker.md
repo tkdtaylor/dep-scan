@@ -16,6 +16,7 @@
 | 003 | Configuration system | 003-config-system-test-spec.md | 10/10 | Done |
 | 004 | Package metadata types + registry trait | 004-types-and-registry-trait-test-spec.md | 6/6 | Done |
 | 005 | npm registry client | 005-npm-registry-client-test-spec.md | 8/8 | Done |
+| 007 | SQLite hash cache | 007-sqlite-cache-test-spec.md | 10/10 | Done |
 
 ## Status key
 
