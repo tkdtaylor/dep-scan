@@ -16,6 +16,7 @@
 | 003 | Configuration system | 003-config-system-test-spec.md | 10/10 | Done |
 | 004 | Package metadata types + registry trait | 004-types-and-registry-trait-test-spec.md | 6/6 | Done |
 | 005 | npm registry client | 005-npm-registry-client-test-spec.md | 8/8 | Done |
+| 006 | PyPI registry client | 006-pypi-registry-client-test-spec.md | 12/12 | Done |
 | 007 | SQLite hash cache | 007-sqlite-cache-test-spec.md | 10/10 | Done |
 | 008 | Minimum package age policy | 008-age-policy-test-spec.md | 7/7 | Done |
 
