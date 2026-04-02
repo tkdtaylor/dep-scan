@@ -18,6 +18,7 @@ A cross-platform CLI tool that wraps package managers (npm, pip, cargo, go) to i
 | Decision | Choice | ADR |
 |----------|--------|-----|
 | Implementation language | Rust | [001](decisions/001-language-choice.md) |
+| v0.2 detection strategy | OSV.dev + bloom filters + built-in patterns | [002](decisions/002-detection-strategy.md) |
 
 ## Data flow
 
