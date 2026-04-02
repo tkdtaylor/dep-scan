@@ -100,3 +100,22 @@ use task-executor — task: docs/tasks/backlog/NNN-name.md, spec: docs/tasks/tes
 - Do not add a `Co-Authored-By` line to commit messages unless explicitly asked
 - Do not scan or interact with the network without user consent during development — dep-scan should only make network calls when the user explicitly invokes a scan
 - Do not hardcode registry URLs — they should be configurable for testing and future extensibility
+
+## Recommended tooling
+
+### Skills
+- **code-scanner** — scan third-party dependencies and packages for malicious code before integrating them. Directly relevant since dep-scan is a security tool that should eat its own dog food. Trigger: "scan this package for vulnerabilities"
+- **reverse-engineer** — analyze suspicious binaries or compiled packages in a sandboxed Ghidra container. Useful for investigating flagged dependencies. Trigger: "reverse engineer this binary"
+
+### MCP servers
+- **github** — read/write PRs, issues, and code search without leaving Claude. Install: `claude mcp add github -e GITHUB_TOKEN=<token> npx @modelcontextprotocol/server-github`
+- **fetch** — pull registry API docs, OSV specs, and package metadata pages on demand. Install: `claude mcp add fetch npx @modelcontextprotocol/server-fetch`
+
+### Hooks
+- Post-edit lint/format: once the language is chosen, add a PostToolUse hook to run the linter after every Edit/Write (configure via `/update-config`)
+
+### Agents
+- **architect** — review designs, CLI structure, and data flow against the architecture. Invoke: "use the architect agent to review this design"
+- **task-planner** — break features into scoped tasks with test specs. Invoke: "use the task-planner to break down [feature]"
+- **qa** — verify implementations against test specs, find coverage gaps. Invoke: "use the qa agent on task NNN"
+- **security-auditor** — audit dep-scan's own code for injection, TOCTOU, and bypass risks. Critical since this is a security tool handling adversarial input. Invoke: "use the security-auditor on [module]"
