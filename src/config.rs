@@ -70,6 +70,10 @@ pub struct Config {
     #[serde(default = "default_min_package_age_hours")]
     pub min_package_age_hours: u64,
 
+    /// Path to the cache database file. Defaults to `~/.dep-scan/cache.db`.
+    #[serde(default)]
+    pub cache_path: Option<String>,
+
     /// Registry URL configuration.
     #[serde(default)]
     pub registries: RegistryConfig,
@@ -87,6 +91,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             min_package_age_hours: default_min_package_age_hours(),
+            cache_path: None,
             registries: RegistryConfig::default(),
             policies: PolicyConfig::default(),
         }
@@ -148,6 +153,25 @@ impl Config {
         }
         if let Ok(val) = std::env::var("DEP_SCAN_PYPI_URL") {
             self.registries.pypi_url = val;
+        }
+        if let Ok(val) = std::env::var("DEP_SCAN_CACHE_PATH") {
+            self.cache_path = Some(val);
+        }
+    }
+
+    /// Resolve the effective cache path.
+    ///
+    /// Priority: `cache_path` from config/env, then `~/.dep-scan/cache.db`.
+    pub fn resolve_cache_path(&self) -> std::path::PathBuf {
+        if let Some(ref p) = self.cache_path {
+            std::path::PathBuf::from(p)
+        } else {
+            let home = std::env::var("HOME")
+                .or_else(|_| std::env::var("USERPROFILE"))
+                .unwrap_or_else(|_| ".".to_string());
+            std::path::PathBuf::from(home)
+                .join(".dep-scan")
+                .join("cache.db")
         }
     }
 

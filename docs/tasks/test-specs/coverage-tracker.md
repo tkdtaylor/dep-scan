@@ -19,6 +19,7 @@
 | 006 | PyPI registry client | 006-pypi-registry-client-test-spec.md | 12/12 | Done |
 | 007 | SQLite hash cache | 007-sqlite-cache-test-spec.md | 10/10 | Done |
 | 008 | Minimum package age policy | 008-age-policy-test-spec.md | 7/7 | Done |
+| 009 | Check subcommand integration | 009-check-integration-test-spec.md | 8/8 | Done |
 
 ## Status key
 

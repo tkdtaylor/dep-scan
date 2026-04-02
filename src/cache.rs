@@ -41,6 +41,7 @@ impl Cache {
     }
 
     /// Create an in-memory cache (convenience wrapper for tests).
+    #[cfg(test)]
     pub fn in_memory() -> Result<Self> {
         Self::new(Path::new(":memory:"))
     }
@@ -82,6 +83,7 @@ impl Cache {
     }
 
     /// Remove a single cache entry.  No-op if the entry does not exist.
+    #[allow(dead_code)]
     pub fn invalidate(&self, name: &str, version: &str, registry: &str) -> Result<()> {
         self.conn.execute(
             "DELETE FROM scanned_packages WHERE name = ?1 AND version = ?2 AND registry = ?3",
@@ -91,6 +93,7 @@ impl Cache {
     }
 
     /// Remove all entries from the cache.
+    #[allow(dead_code)]
     pub fn clear(&self) -> Result<()> {
         self.conn.execute("DELETE FROM scanned_packages", [])?;
         Ok(())
