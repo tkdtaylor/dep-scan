@@ -35,6 +35,13 @@ impl Cache {
                 result     TEXT NOT NULL,
                 scanned_at TEXT NOT NULL,
                 PRIMARY KEY (name, version, registry)
+            );
+            CREATE TABLE IF NOT EXISTS maintainer_history (
+                name        TEXT NOT NULL,
+                registry    TEXT NOT NULL,
+                maintainers TEXT NOT NULL,
+                recorded_at TEXT NOT NULL,
+                PRIMARY KEY (name, registry)
             );",
         )?;
         Ok(Self { conn })
@@ -97,6 +104,51 @@ impl Cache {
     pub fn clear(&self) -> Result<()> {
         self.conn.execute("DELETE FROM scanned_packages", [])?;
         Ok(())
+    }
+
+    /// Record the current maintainers for a package.
+    /// Uses INSERT OR REPLACE to update existing entries.
+    pub fn record_maintainers(
+        &self,
+        name: &str,
+        registry: &str,
+        maintainers: &[String],
+    ) -> Result<()> {
+        let maintainers_json = serde_json::to_string(maintainers)?;
+        let recorded_at = Utc::now().to_rfc3339();
+        self.conn.execute(
+            "INSERT OR REPLACE INTO maintainer_history (name, registry, maintainers, recorded_at)
+             VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![name, registry, maintainers_json, recorded_at],
+        )?;
+        Ok(())
+    }
+
+    /// Get the previously recorded maintainers for a package.
+    /// Returns None if no history exists.
+    pub fn get_previous_maintainers(
+        &self,
+        name: &str,
+        registry: &str,
+    ) -> Result<Option<Vec<String>>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT maintainers FROM maintainer_history
+             WHERE name = ?1 AND registry = ?2",
+        )?;
+
+        let mut rows = stmt.query_map(rusqlite::params![name, registry], |row| {
+            let json: String = row.get(0)?;
+            Ok(json)
+        })?;
+
+        match rows.next() {
+            Some(json_result) => {
+                let json = json_result?;
+                let maintainers: Vec<String> = serde_json::from_str(&json)?;
+                Ok(Some(maintainers))
+            }
+            None => Ok(None),
+        }
     }
 }
 
@@ -213,6 +265,44 @@ mod tests {
             assert!(entry.is_some(), "entry should persist across opens");
             assert_eq!(entry.unwrap().result, "pass");
         }
+    }
+
+    // T-014-01: Record and retrieve maintainers
+    #[test]
+    fn record_and_retrieve_maintainers() {
+        let cache = Cache::in_memory().unwrap();
+        let maintainers = vec!["alice".to_string(), "bob".to_string()];
+        cache
+            .record_maintainers("lodash", "npm", &maintainers)
+            .unwrap();
+
+        let result = cache.get_previous_maintainers("lodash", "npm").unwrap();
+        assert_eq!(result, Some(vec!["alice".to_string(), "bob".to_string()]));
+    }
+
+    // T-014-02: No history returns None
+    #[test]
+    fn no_maintainer_history_returns_none() {
+        let cache = Cache::in_memory().unwrap();
+        let result = cache
+            .get_previous_maintainers("nonexistent", "npm")
+            .unwrap();
+        assert!(result.is_none());
+    }
+
+    // T-014-03: Record updates existing
+    #[test]
+    fn record_maintainers_updates_existing() {
+        let cache = Cache::in_memory().unwrap();
+        cache
+            .record_maintainers("lodash", "npm", &["alice".to_string()])
+            .unwrap();
+        cache
+            .record_maintainers("lodash", "npm", &["alice".to_string(), "bob".to_string()])
+            .unwrap();
+
+        let result = cache.get_previous_maintainers("lodash", "npm").unwrap();
+        assert_eq!(result, Some(vec!["alice".to_string(), "bob".to_string()]));
     }
 
     // T-007-10: scanned_at is set on insert (valid timestamp)

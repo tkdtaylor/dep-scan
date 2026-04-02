@@ -18,6 +18,7 @@ use cli::{Cli, Command, ConfigAction};
 use config::Config;
 use policy::age::AgePolicy;
 use policy::install_script::InstallScriptPolicy;
+use policy::maintainer::MaintainerChangePolicy;
 use policy::{Policy, PolicyDetail, aggregate_results};
 use registry::npm::NpmRegistry;
 use registry::pypi::PyPiRegistry;
@@ -123,6 +124,9 @@ async fn run_check(
     if config.policies.check_install_scripts {
         policies.push(Box::new(InstallScriptPolicy));
     }
+    if config.policies.check_maintainer_changes {
+        policies.push(Box::new(MaintainerChangePolicy));
+    }
 
     // Check each package
     let mut results: Vec<CheckResult> = Vec::new();
@@ -208,9 +212,19 @@ async fn run_check(
             vec![]
         };
 
+        // Fetch previous maintainers from cache if maintainer change checks are enabled
+        let previous_maintainers = if config.policies.check_maintainer_changes {
+            cache
+                .get_previous_maintainers(pkg_name, &reg_str)
+                .unwrap_or(None)
+        } else {
+            None
+        };
+
         // Build scan context
         let mut ctx = ScanContext::from_metadata(metadata.clone());
         ctx.install_scripts = install_scripts;
+        ctx.previous_maintainers = previous_maintainers;
 
         // Evaluate all policies
         let mut policy_details: Vec<PolicyDetail> = Vec::new();
@@ -224,6 +238,11 @@ async fn run_check(
 
         if result_str == "block" || result_str == "warn" {
             has_failure = true;
+        }
+
+        // Record current maintainers in cache for future comparisons
+        if config.policies.check_maintainer_changes {
+            let _ = cache.record_maintainers(pkg_name, &reg_str, &metadata.maintainers);
         }
 
         // Store in cache using "latest" as version key to match lookup
