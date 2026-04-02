@@ -1,0 +1,31 @@
+{
+  "name": "dep-scan",
+  "build": {
+    // Project Dockerfile extends the shared base with the project's runtime and uid fix
+    "dockerfile": "../docker/Dockerfile"
+  },
+  // Workspace lives in a named Docker volume — persists across container rebuilds
+  "workspaceMount": "source=dep-scan-workspace,target=/app,type=volume",
+  "workspaceFolder": "/app",
+  "mounts": [
+    // Host project root — read-only, used by the entrypoint to seed the volume on first open
+    "source=${localWorkspaceFolder},target=/host,type=bind,readonly=true",
+    // .env bind-mounted writable so it can be edited from VS Code inside the container
+    "source=${localWorkspaceFolder}/.env,target=/app/.env,type=bind",
+    // Claude Code config directory — mounted writable so Claude can refresh tokens and write session state
+    "source=${localEnv:HOME}/.claude,target=/home/developer/.claude,type=bind"
+  ],
+  // Pass .env vars into the container environment (ANTHROPIC_API_KEY, GIT_TOKEN, etc.)
+  "runArgs": ["--env-file", "${localWorkspaceFolder}/.env"],
+  // Run as the non-root developer user (the entrypoint drops to this after init)
+  "remoteUser": "developer",
+  "shutdownAction": "stopContainer",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "rust-lang.rust-analyzer",
+        "golang.go"
+      ]
+    }
+  }
+}
