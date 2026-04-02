@@ -4,6 +4,7 @@ mod config;
 mod policy;
 mod registry;
 mod types;
+mod typosquat;
 
 use std::path::Path;
 use std::process;
@@ -17,6 +18,7 @@ use cache::Cache;
 use cli::{Cli, Command, ConfigAction};
 use config::Config;
 use policy::age::AgePolicy;
+use policy::typosquatting::TyposquattingPolicy;
 use policy::{Policy, PolicyDetail, aggregate_results};
 use registry::npm::NpmRegistry;
 use registry::pypi::PyPiRegistry;
@@ -119,7 +121,9 @@ async fn run_check(
             config.min_package_age_hours as i64,
         ))));
     }
-    // Future policies will be added here
+    if config.policies.check_typosquatting {
+        policies.push(Box::new(TyposquattingPolicy::with_defaults()));
+    }
 
     // Check each package
     let mut results: Vec<CheckResult> = Vec::new();

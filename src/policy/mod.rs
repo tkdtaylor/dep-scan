@@ -1,4 +1,5 @@
 pub mod age;
+pub mod typosquatting;
 
 use serde::Serialize;
 

@@ -21,6 +21,7 @@
 | 008 | Minimum package age policy | 008-age-policy-test-spec.md | 7/7 | Done |
 | 009 | Check subcommand integration | 009-check-integration-test-spec.md | 8/8 | Done |
 | 010 | ScanContext + multi-policy pipeline | 010-multi-policy-pipeline-test-spec.md | 11/11 | Done |
+| 013 | Typosquatting detection | 013-typosquatting-test-spec.md | 20/20 | Done |
 
 ## Status key
 
