@@ -4,10 +4,22 @@ A cross-platform CLI tool that intercepts and scans every dependency before inst
 
 Local-first, fast, open source. Single Rust binary with no runtime dependencies.
 
+[![CI](https://github.com/tkdtaylor/dep-scan/actions/workflows/ci.yml/badge.svg)](https://github.com/tkdtaylor/dep-scan/actions/workflows/ci.yml)
+
+## Install
+
+```bash
+# One-liner install (Linux/macOS)
+curl -fsSL https://raw.githubusercontent.com/tkdtaylor/dep-scan/main/install.sh | bash
+
+# Or build from source
+cargo install --git https://github.com/tkdtaylor/dep-scan.git
+```
+
 ## Quick start
 
 ```bash
-# Build from source
+# Build from source (alternative)
 cargo build --release
 
 # Check a package on npm
@@ -95,8 +107,8 @@ All settings can be overridden via environment variables:
 |----------|------|--------|----------------------|
 | **npm** | `--registry npm` | Full support | install scripts (`postinstall`, `preinstall`), typosquatting, age, CVEs, maintainer changes |
 | **PyPI** | `--registry pypi` | Full support | `setup.py` hooks, typosquatting, age, CVEs, maintainer changes |
-| **crates.io** | `--registry crates` | Planned (v0.3) | `build.rs` compile-time execution, proc macros, typosquatting, age, CVEs |
-| **Go modules** | `--registry go` | Planned (v0.3) | `init()` auto-execution, `os/exec` imports, typosquatting on vanity paths |
+| **crates.io** | `--registry crates` | Full support | typosquatting, age, CVEs, maintainer changes, popularity |
+| **Go modules** | `--registry go` | Full support | typosquatting, age, CVEs |
 
 ## Example output
 
@@ -476,7 +488,7 @@ cargo build --release
 ## Development
 
 ```bash
-cargo test              # run all tests (161 tests)
+cargo test              # run all tests (262 tests)
 cargo clippy            # lint
 cargo fmt --check       # check formatting
 ```
