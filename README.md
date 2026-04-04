@@ -28,10 +28,10 @@ dep-scan check lodash --registry npm
 # Check multiple packages on PyPI
 dep-scan check requests flask numpy --registry pypi
 
-# Check crates (v0.3)
+# Check crates
 dep-scan check serde tokio --registry crates
 
-# Check Go modules (v0.3)
+# Check Go modules
 dep-scan check github.com/gin-gonic/gin --registry go
 
 # JSON output for CI/CD pipelines
@@ -165,9 +165,7 @@ This gives you a `.dep-scan.toml` you can check into your repo so the whole team
 # Before running your package manager, check what you're about to add
 dep-scan check express body-parser cors --registry npm
 dep-scan check requests flask sqlalchemy --registry pypi
-dep-scan check serde tokio clap --registry crates          # v0.3
-dep-scan check github.com/gorilla/mux --registry go        # v0.3
-
+dep-scan check serde tokio clap --registry crates          dep-scan check github.com/gorilla/mux --registry go        
 # Or just use the wrappers — they scan automatically
 npmds install express body-parser cors
 pipds install requests flask sqlalchemy
@@ -190,16 +188,14 @@ dep-scan provides drop-in wrapper commands that scan every package before instal
 |---------|-------|--------|
 | **`npmds`** | `npm` | Available now |
 | **`pipds`** | `pip` | Available now |
-| **`cargods`** | `cargo` | Available when v0.3 lands |
-| **`gods`** | `go` | Available when v0.3 lands |
+| **`cargods`** | `cargo` | Available now |
+| **`gods`** | `go` | Available now |
 
 ```bash
 # These work exactly like the real commands, but scan before installing
 npmds install express body-parser cors
 pipds install requests flask sqlalchemy
-cargods add serde tokio          # v0.3
-gods get github.com/some/module  # v0.3
-
+cargods add serde tokio          gods get github.com/some/module  
 # All other subcommands pass through unchanged
 npmds test
 pipds list
@@ -259,7 +255,7 @@ fi
 WRAPPER
 sudo chmod +x /usr/local/bin/pipds
 
-# cargo wrapper (v0.3 — install now, works once crates.io registry support lands)
+# cargo wrapper
 sudo tee /usr/local/bin/cargods << 'WRAPPER' > /dev/null
 #!/usr/bin/env bash
 set -euo pipefail
@@ -284,7 +280,7 @@ fi
 WRAPPER
 sudo chmod +x /usr/local/bin/cargods
 
-# go wrapper (v0.3 — install now, works once Go module registry support lands)
+# go wrapper
 sudo tee /usr/local/bin/gods << 'WRAPPER' > /dev/null
 #!/usr/bin/env bash
 set -euo pipefail
@@ -347,7 +343,7 @@ function pipds {
   }
 }
 
-# v0.3 — cargo and go wrappers
+# cargo and go wrappers
 function cargods {
   if ($env:DEP_SCAN_SKIP -eq '1') { & cargo @args; return }
   if ($args[0] -in 'add', 'install') {
@@ -389,9 +385,7 @@ If you want to make `npmds`/`pipds` the **only** way to install packages on a sy
 # Redirect all package managers to their dep-scan wrappers
 alias npm='npmds'
 alias pip='pipds'
-alias cargo='cargods'   # v0.3
-alias go='gods'         # v0.3
-
+alias cargo='cargods'   alias go='gods'         
 # To bypass: use the full path or unset the alias
 #   /usr/bin/npm install something
 #   unalias npm && npm install something
