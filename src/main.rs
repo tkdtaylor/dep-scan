@@ -1,6 +1,7 @@
 mod cache;
 mod cli;
 mod config;
+mod lockfile;
 mod osv;
 mod policy;
 mod registry;
@@ -68,7 +69,20 @@ async fn run(cli: Cli) -> Result<i32> {
             packages,
             registry,
             json,
-        } => run_check(cli.config.as_deref(), cli.verbose, packages, registry, json).await,
+            lockfile,
+            lockfile_type,
+        } => {
+            run_check(
+                cli.config.as_deref(),
+                cli.verbose,
+                packages,
+                registry,
+                json,
+                lockfile,
+                lockfile_type,
+            )
+            .await
+        }
         Command::Install { packages: _ } => {
             println!("Install command is not yet implemented");
             Ok(0)
@@ -102,15 +116,34 @@ async fn run_check(
     packages: Vec<String>,
     registry_flag: Option<String>,
     json_output: bool,
+    lockfile_path: Option<std::path::PathBuf>,
+    lockfile_type_str: Option<String>,
 ) -> Result<i32> {
     let config = Config::load(config_path)?;
 
-    // Parse registry type (default to npm)
+    // Parse lockfile if provided
+    let mut all_packages = packages;
+    let mut lockfile_registry = None;
+    if let Some(ref lf_path) = lockfile_path {
+        let format = lockfile_type_str
+            .as_deref()
+            .map(lockfile::parse_format_type)
+            .transpose()?;
+        let deps = lockfile::parse(lf_path, format)?;
+        if !deps.is_empty() {
+            lockfile_registry = Some(deps[0].registry);
+        }
+        for dep in deps {
+            all_packages.push(dep.name);
+        }
+    }
+
+    // Parse registry type (default to npm, but prefer lockfile-inferred registry)
     let reg_type = match registry_flag.as_deref() {
         Some(s) => s
             .parse::<RegistryType>()
             .map_err(|e| anyhow::anyhow!("{e}"))?,
-        None => RegistryType::Npm,
+        None => lockfile_registry.unwrap_or(RegistryType::Npm),
     };
 
     // Open cache
@@ -167,7 +200,7 @@ async fn run_check(
     let mut has_failure = false;
     let mut has_error = false;
 
-    for pkg_name in &packages {
+    for pkg_name in &all_packages {
         if verbose {
             eprintln!("Checking {pkg_name} on {reg_type}...");
         }

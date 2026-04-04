@@ -27,7 +27,7 @@ pub enum Command {
     /// Check one or more packages for supply chain risks
     Check {
         /// Package name(s) to check
-        #[arg(required = true)]
+        #[arg(required_unless_present = "lockfile")]
         packages: Vec<String>,
 
         /// Registry to check against (e.g. npm, pypi, crates-io)
@@ -37,6 +37,14 @@ pub enum Command {
         /// Output results as JSON
         #[arg(long)]
         json: bool,
+
+        /// Path to a lockfile to scan (package-lock.json, requirements.txt, Cargo.lock, go.sum)
+        #[arg(long)]
+        lockfile: Option<PathBuf>,
+
+        /// Override lockfile format detection (npm, pypi, crates, go)
+        #[arg(long)]
+        lockfile_type: Option<String>,
     },
 
     /// Install packages (wrapping the underlying package manager)
