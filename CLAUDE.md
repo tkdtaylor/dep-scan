@@ -139,8 +139,11 @@ These are excuses agents use to skip steps. Don't fall for them.
 - **github** — read/write PRs, issues, and code search without leaving Claude. Install: `claude mcp add github -e GITHUB_TOKEN=<token> npx @modelcontextprotocol/server-github`
 - **fetch** — pull registry API docs, OSV specs, and package metadata pages on demand. Install: `claude mcp add fetch npx @modelcontextprotocol/server-fetch`
 
+### Skills (additional)
+- **simplify** — review changed code for over-engineering, dead code, and reuse opportunities after heavy implementation sprints. Trigger: "simplify this" or "review these changes"
+
 ### Hooks
-- Post-edit lint/format: once the language is chosen, add a PostToolUse hook to run the linter after every Edit/Write (configure via `/update-config`)
+- Post-edit lint/format: add a PostToolUse hook to run `cargo clippy` and `cargo fmt --check` after every Edit/Write (configure via `/update-config`)
 
 ### Agents
 - **architect** — review designs, CLI structure, and data flow against the architecture. Invoke: "use the architect agent to review this design"

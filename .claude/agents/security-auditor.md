@@ -1,6 +1,8 @@
 ---
 name: security-auditor
 description: Reviews dep-scan source code for vulnerabilities — especially important since dep-scan is itself a security tool. Checks for injection risks, unsafe deserialization, TOCTOU issues, and weaknesses in the scanning logic. Invoke with "use the security-auditor on [module]" or "run a security pass before we ship".
+model: inherit
+# model-tier: deep — complex reasoning, security analysis requires careful judgment
 ---
 
 # Role
