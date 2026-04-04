@@ -85,6 +85,9 @@ pub struct PolicyConfig {
     /// Check for known vulnerabilities via OSV.dev
     #[serde(default = "default_true")]
     pub check_vulnerabilities: bool,
+    /// Check for obfuscated code in install scripts
+    #[serde(default = "default_true")]
+    pub check_obfuscation: bool,
 }
 
 fn default_true() -> bool {
@@ -99,6 +102,7 @@ impl Default for PolicyConfig {
             check_min_age: true,
             check_maintainer_changes: true,
             check_vulnerabilities: true,
+            check_obfuscation: true,
         }
     }
 }

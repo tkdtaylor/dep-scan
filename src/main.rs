@@ -23,6 +23,7 @@ use policy::age::AgePolicy;
 use policy::dependency_confusion::DependencyConfusionPolicy;
 use policy::install_script::InstallScriptPolicy;
 use policy::maintainer::MaintainerChangePolicy;
+use policy::obfuscation::ObfuscationPolicy;
 use policy::typosquatting::TyposquattingPolicy;
 use policy::vulnerability::VulnerabilityPolicy;
 use policy::{Policy, PolicyDetail, aggregate_results};
@@ -129,6 +130,9 @@ async fn run_check(
     }
     if config.policies.check_install_scripts {
         policies.push(Box::new(InstallScriptPolicy));
+    }
+    if config.policies.check_obfuscation {
+        policies.push(Box::new(ObfuscationPolicy));
     }
     if config.policies.check_maintainer_changes {
         policies.push(Box::new(MaintainerChangePolicy));
