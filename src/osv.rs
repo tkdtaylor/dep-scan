@@ -172,6 +172,8 @@ pub fn registry_to_ecosystem(reg: &crate::registry::RegistryType) -> &'static st
     match reg {
         crate::registry::RegistryType::Npm => "npm",
         crate::registry::RegistryType::PyPI => "PyPI",
+        crate::registry::RegistryType::Crates => "crates.io",
+        crate::registry::RegistryType::Go => "Go",
     }
 }
 
@@ -359,5 +361,12 @@ mod tests {
     fn registry_type_to_ecosystem_mapping() {
         assert_eq!(registry_to_ecosystem(&RegistryType::Npm), "npm");
         assert_eq!(registry_to_ecosystem(&RegistryType::PyPI), "PyPI");
+    }
+
+    // T-017-06: registry_to_ecosystem for new types
+    #[test]
+    fn registry_type_to_ecosystem_crates_and_go() {
+        assert_eq!(registry_to_ecosystem(&RegistryType::Crates), "crates.io");
+        assert_eq!(registry_to_ecosystem(&RegistryType::Go), "Go");
     }
 }

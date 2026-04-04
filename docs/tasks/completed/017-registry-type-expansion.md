@@ -1,6 +1,6 @@
 # Task 017 — RegistryType expansion + config
 
-**Status:** backlog
+**Status:** done
 **Depends on:** v0.2 complete
 
 ## Objective

@@ -12,6 +12,12 @@ pub struct RegistryConfig {
     /// PyPI registry URL
     #[serde(default = "default_pypi_url")]
     pub pypi_url: String,
+    /// crates.io registry URL
+    #[serde(default = "default_crates_url")]
+    pub crates_url: String,
+    /// Go module proxy URL
+    #[serde(default = "default_go_proxy_url")]
+    pub go_proxy_url: String,
 }
 
 fn default_npm_url() -> String {
@@ -22,11 +28,21 @@ fn default_pypi_url() -> String {
     "https://pypi.org".to_string()
 }
 
+fn default_crates_url() -> String {
+    "https://crates.io".to_string()
+}
+
+fn default_go_proxy_url() -> String {
+    "https://proxy.golang.org".to_string()
+}
+
 impl Default for RegistryConfig {
     fn default() -> Self {
         Self {
             npm_url: default_npm_url(),
             pypi_url: default_pypi_url(),
+            crates_url: default_crates_url(),
+            go_proxy_url: default_go_proxy_url(),
         }
     }
 }
@@ -211,6 +227,12 @@ impl Config {
         }
         if let Ok(val) = std::env::var("DEP_SCAN_PYPI_URL") {
             self.registries.pypi_url = val;
+        }
+        if let Ok(val) = std::env::var("DEP_SCAN_CRATES_URL") {
+            self.registries.crates_url = val;
+        }
+        if let Ok(val) = std::env::var("DEP_SCAN_GO_PROXY_URL") {
+            self.registries.go_proxy_url = val;
         }
         if let Ok(val) = std::env::var("DEP_SCAN_CACHE_PATH") {
             self.cache_path = Some(val);
@@ -410,6 +432,54 @@ min_package_age_hours = 100
 
         let config = Config::load(None).unwrap();
         assert_eq!(config.osv.osv_url, "http://localhost:9999");
+    }
+
+    // T-017-04: Config defaults for new registry URLs
+    #[test]
+    fn default_config_has_crates_and_go_urls() {
+        let config = Config::default();
+        assert_eq!(config.registries.crates_url, "https://crates.io");
+        assert_eq!(config.registries.go_proxy_url, "https://proxy.golang.org");
+    }
+
+    // T-017-05: Env var overrides for new URLs
+    #[test]
+    fn env_var_override_crates_url() {
+        let _lock = ENV_LOCK.lock().unwrap();
+
+        let _guard = EnvGuard::set("DEP_SCAN_CRATES_URL", "http://localhost:8080");
+
+        let config = Config::load(None).unwrap();
+        assert_eq!(config.registries.crates_url, "http://localhost:8080");
+    }
+
+    #[test]
+    fn env_var_override_go_proxy_url() {
+        let _lock = ENV_LOCK.lock().unwrap();
+
+        let _guard = EnvGuard::set("DEP_SCAN_GO_PROXY_URL", "http://localhost:9090");
+
+        let config = Config::load(None).unwrap();
+        assert_eq!(config.registries.go_proxy_url, "http://localhost:9090");
+    }
+
+    // T-017-04 (continued): New URLs configurable via TOML
+    #[test]
+    fn crates_and_go_urls_configurable_via_toml() {
+        let toml_str = r#"
+[registries]
+crates_url = "https://custom-crates.example.com"
+go_proxy_url = "https://custom-go-proxy.example.com"
+"#;
+        let config = Config::from_toml_str(toml_str).unwrap();
+        assert_eq!(
+            config.registries.crates_url,
+            "https://custom-crates.example.com"
+        );
+        assert_eq!(
+            config.registries.go_proxy_url,
+            "https://custom-go-proxy.example.com"
+        );
     }
 
     // OsvConfig can be set via TOML

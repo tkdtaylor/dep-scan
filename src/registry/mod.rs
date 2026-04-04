@@ -1,3 +1,5 @@
+pub mod crates;
+pub mod go;
 pub mod npm;
 pub mod pypi;
 
@@ -11,6 +13,8 @@ use crate::types::PackageMetadata;
 pub enum RegistryType {
     Npm,
     PyPI,
+    Crates,
+    Go,
 }
 
 impl fmt::Display for RegistryType {
@@ -18,6 +22,8 @@ impl fmt::Display for RegistryType {
         match self {
             RegistryType::Npm => write!(f, "npm"),
             RegistryType::PyPI => write!(f, "pypi"),
+            RegistryType::Crates => write!(f, "crates"),
+            RegistryType::Go => write!(f, "go"),
         }
     }
 }
@@ -41,6 +47,8 @@ impl FromStr for RegistryType {
         match s.to_lowercase().as_str() {
             "npm" => Ok(RegistryType::Npm),
             "pypi" => Ok(RegistryType::PyPI),
+            "crates" | "crates.io" => Ok(RegistryType::Crates),
+            "go" | "gomod" => Ok(RegistryType::Go),
             other => Err(ParseRegistryTypeError(other.to_string())),
         }
     }
@@ -93,6 +101,13 @@ mod tests {
         assert_eq!(RegistryType::PyPI.to_string(), "pypi");
     }
 
+    // T-017-01: Display for new variants
+    #[test]
+    fn registry_type_display_crates_and_go() {
+        assert_eq!(RegistryType::Crates.to_string(), "crates");
+        assert_eq!(RegistryType::Go.to_string(), "go");
+    }
+
     // T-004-05: RegistryError variants each have meaningful Display message
     #[test]
     fn registry_error_display_messages() {
@@ -127,5 +142,41 @@ mod tests {
             err.unwrap_err().to_string(),
             "unknown registry type: invalid"
         );
+    }
+
+    // T-017-02: FromStr for new variants
+    #[test]
+    fn registry_type_from_str_crates_and_go() {
+        assert_eq!("crates".parse::<RegistryType>(), Ok(RegistryType::Crates));
+        assert_eq!(
+            "crates.io".parse::<RegistryType>(),
+            Ok(RegistryType::Crates)
+        );
+        assert_eq!("go".parse::<RegistryType>(), Ok(RegistryType::Go));
+        assert_eq!("gomod".parse::<RegistryType>(), Ok(RegistryType::Go));
+        // Case insensitive
+        assert_eq!("CRATES".parse::<RegistryType>(), Ok(RegistryType::Crates));
+        assert_eq!(
+            "CRATES.IO".parse::<RegistryType>(),
+            Ok(RegistryType::Crates)
+        );
+        assert_eq!("Go".parse::<RegistryType>(), Ok(RegistryType::Go));
+        assert_eq!("GOMOD".parse::<RegistryType>(), Ok(RegistryType::Go));
+    }
+
+    // T-017-03: Existing variants still work
+    #[test]
+    fn registry_type_existing_variants_still_work() {
+        assert_eq!("npm".parse::<RegistryType>(), Ok(RegistryType::Npm));
+        assert_eq!("pypi".parse::<RegistryType>(), Ok(RegistryType::PyPI));
+    }
+
+    // T-017-07: PartialEq works for all variants
+    #[test]
+    fn registry_type_partial_eq() {
+        assert_eq!(RegistryType::Crates, RegistryType::Crates);
+        assert_eq!(RegistryType::Go, RegistryType::Go);
+        assert_ne!(RegistryType::Go, RegistryType::Npm);
+        assert_ne!(RegistryType::Crates, RegistryType::PyPI);
     }
 }
