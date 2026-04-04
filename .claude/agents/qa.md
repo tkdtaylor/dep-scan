@@ -2,6 +2,7 @@
 name: qa
 description: Reads the test spec for a task, runs the test suite, and reports failures with context. Identifies missing test cases based on acceptance criteria. Invoke with "use the qa agent on task NNN".
 model: sonnet
+# model-tier: balanced — moderate reasoning, judgment on test coverage gaps
 ---
 
 # Role

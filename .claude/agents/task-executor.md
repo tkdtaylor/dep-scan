@@ -2,6 +2,7 @@
 name: task-executor
 description: Execute a single task from the project plan. Reads the task file and test spec, implements, tests, commits, and reports back. Context is ephemeral — won't bloat the main conversation.
 model: sonnet
+# model-tier: fast — scoped implementation work with clear specs
 color: green
 tools: ["Read", "Write", "Edit", "Bash", "Grep", "Glob"]
 ---

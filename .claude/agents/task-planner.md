@@ -2,6 +2,7 @@
 name: task-planner
 description: Takes a feature description and produces a paired task file + test spec. Asks clarifying questions about edge cases and acceptance criteria before writing. Invoke with "use the task-planner to break down [feature]".
 model: sonnet
+# model-tier: balanced — moderate reasoning with judgment calls on scope and acceptance criteria
 ---
 
 # Role
