@@ -29,6 +29,7 @@
 | 016 | v0.2 integration tests | 016-v2-integration-test-spec.md | 7/7 | Done |
 | 017 | RegistryType expansion + config | 017-registry-type-expansion-test-spec.md | 7/7 | Done |
 | 018 | crates.io registry client | 018-crates-registry-client-test-spec.md | 11/11 | Done |
+| 019 | Go module proxy client | 019-go-module-registry-test-spec.md | 11/11 | Done |
 
 ## Status key
 

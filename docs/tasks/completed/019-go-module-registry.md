@@ -1,6 +1,6 @@
 # Task 019 — Go module proxy client
 
-**Status:** backlog
+**Status:** done
 **Depends on:** 017
 
 ## Objective
