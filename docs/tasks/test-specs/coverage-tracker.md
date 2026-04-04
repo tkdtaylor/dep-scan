@@ -32,6 +32,7 @@
 | 019 | Go module proxy client | 019-go-module-registry-test-spec.md | 11/11 | Done |
 | 020 | Popular package lists for crates.io + Go | 020-popular-crates-go-test-spec.md | 7/7 | Done |
 | 021 | Obfuscation detection policy | 021-obfuscation-detection-test-spec.md | 11/11 | Done |
+| 022 | Popularity policy + v0.3 integration tests | 022-popularity-integration-test-spec.md | 11/11 | Done |
 
 ## Status key
 

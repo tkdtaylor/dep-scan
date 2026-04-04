@@ -3,6 +3,7 @@ pub mod dependency_confusion;
 pub mod install_script;
 pub mod maintainer;
 pub mod obfuscation;
+pub mod popularity;
 pub mod typosquatting;
 pub mod vulnerability;
 

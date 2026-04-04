@@ -24,6 +24,7 @@ use policy::dependency_confusion::DependencyConfusionPolicy;
 use policy::install_script::InstallScriptPolicy;
 use policy::maintainer::MaintainerChangePolicy;
 use policy::obfuscation::ObfuscationPolicy;
+use policy::popularity::PopularityPolicy;
 use policy::typosquatting::TyposquattingPolicy;
 use policy::vulnerability::VulnerabilityPolicy;
 use policy::{Policy, PolicyDetail, aggregate_results};
@@ -145,6 +146,10 @@ async fn run_check(
     if config.policies.check_vulnerabilities {
         policies.push(Box::new(VulnerabilityPolicy::new()));
     }
+    // Popularity check (always enabled — warns only, never blocks)
+    policies.push(Box::new(PopularityPolicy::new(
+        config.popularity.min_downloads,
+    )));
     // Dependency confusion check (disabled when internal_prefixes is empty)
     policies.push(Box::new(DependencyConfusionPolicy::new(
         config.dependency_confusion.internal_prefixes.clone(),

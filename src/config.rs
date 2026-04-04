@@ -107,6 +107,26 @@ impl Default for PolicyConfig {
     }
 }
 
+/// Configuration for the popularity/download threshold policy.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PopularityConfig {
+    /// Minimum number of downloads to pass without warning.
+    #[serde(default = "default_min_downloads")]
+    pub min_downloads: u64,
+}
+
+fn default_min_downloads() -> u64 {
+    1000
+}
+
+impl Default for PopularityConfig {
+    fn default() -> Self {
+        Self {
+            min_downloads: default_min_downloads(),
+        }
+    }
+}
+
 /// Configuration for the dependency confusion detection policy.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct DependencyConfusionConfig {
@@ -157,6 +177,10 @@ pub struct Config {
     /// Dependency confusion detection configuration.
     #[serde(default)]
     pub dependency_confusion: DependencyConfusionConfig,
+
+    /// Popularity/download threshold configuration.
+    #[serde(default)]
+    pub popularity: PopularityConfig,
 }
 
 fn default_min_package_age_hours() -> u64 {
@@ -172,6 +196,7 @@ impl Default for Config {
             policies: PolicyConfig::default(),
             osv: OsvConfig::default(),
             dependency_confusion: DependencyConfusionConfig::default(),
+            popularity: PopularityConfig::default(),
         }
     }
 }
