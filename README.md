@@ -16,6 +16,12 @@ dep-scan check lodash --registry npm
 # Check multiple packages on PyPI
 dep-scan check requests flask numpy --registry pypi
 
+# Check crates (v0.3)
+dep-scan check serde tokio --registry crates
+
+# Check Go modules (v0.3)
+dep-scan check github.com/gin-gonic/gin --registry go
+
 # JSON output for CI/CD pipelines
 dep-scan check express --registry npm --json
 ```
@@ -85,10 +91,12 @@ All settings can be overridden via environment variables:
 
 ## Supported registries
 
-- **npm** (`--registry npm`) — full support including install script extraction
-- **PyPI** (`--registry pypi`) — metadata and vulnerability scanning (install script analysis limited by PyPI API)
-
-Cargo and Go module support planned for v0.3.
+| Registry | Flag | Status | Attack vectors scanned |
+|----------|------|--------|----------------------|
+| **npm** | `--registry npm` | Full support | install scripts (`postinstall`, `preinstall`), typosquatting, age, CVEs, maintainer changes |
+| **PyPI** | `--registry pypi` | Full support | `setup.py` hooks, typosquatting, age, CVEs, maintainer changes |
+| **crates.io** | `--registry crates` | Planned (v0.3) | `build.rs` compile-time execution, proc macros, typosquatting, age, CVEs |
+| **Go modules** | `--registry go` | Planned (v0.3) | `init()` auto-execution, `os/exec` imports, typosquatting on vanity paths |
 
 ## Example output
 
@@ -142,9 +150,15 @@ This gives you a `.dep-scan.toml` you can check into your repo so the whole team
 ### 3. Scan before adding dependencies
 
 ```bash
-# Before running npm install / pip install, check what you're about to add
+# Before running your package manager, check what you're about to add
 dep-scan check express body-parser cors --registry npm
 dep-scan check requests flask sqlalchemy --registry pypi
+dep-scan check serde tokio clap --registry crates          # v0.3
+dep-scan check github.com/gorilla/mux --registry go        # v0.3
+
+# Or just use the wrappers — they scan automatically
+npmds install express body-parser cors
+pipds install requests flask sqlalchemy
 
 # In CI/CD — fail the build on any policy violation
 dep-scan check $(cat requirements.txt | grep -v '^#') --registry pypi --json
@@ -156,20 +170,29 @@ Run `dep-scan check` any time you add a new dependency. The local SQLite cache m
 
 ---
 
-## Wrapping package managers — `npmds` and `pipds`
+## Wrapping package managers
 
-dep-scan provides **`npmds`** and **`pipds`** — drop-in wrappers that scan every package before installing. Use them anywhere you'd use `npm` or `pip`. Same arguments, same behavior, but every install goes through dep-scan first.
+dep-scan provides drop-in wrapper commands that scan every package before installing. Same arguments, same behavior as the real commands, but every install goes through dep-scan first.
+
+| Wrapper | Wraps | Status |
+|---------|-------|--------|
+| **`npmds`** | `npm` | Available now |
+| **`pipds`** | `pip` | Available now |
+| **`cargods`** | `cargo` | Available when v0.3 lands |
+| **`gods`** | `go` | Available when v0.3 lands |
 
 ```bash
-# These work exactly like npm/pip, but scan before installing
+# These work exactly like the real commands, but scan before installing
 npmds install express body-parser cors
 pipds install requests flask sqlalchemy
+cargods add serde tokio          # v0.3
+gods get github.com/some/module  # v0.3
 
-# All other commands pass through unchanged
+# All other subcommands pass through unchanged
 npmds test
-npmds run build
 pipds list
-pipds freeze
+cargods build
+gods test ./...
 ```
 
 ### Installing the wrappers (Linux / macOS)
@@ -223,6 +246,56 @@ else
 fi
 WRAPPER
 sudo chmod +x /usr/local/bin/pipds
+
+# cargo wrapper (v0.3 — install now, works once crates.io registry support lands)
+sudo tee /usr/local/bin/cargods << 'WRAPPER' > /dev/null
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${DEP_SCAN_SKIP:-}" == "1" ]]; then exec cargo "$@"; fi
+if [[ "${1:-}" =~ ^(add|install)$ ]]; then
+  cmd="$1"; shift
+  pkgs=(); flags=()
+  for arg in "$@"; do
+    if [[ "$arg" == -* ]]; then flags+=("$arg"); else pkgs+=("$arg"); fi
+  done
+  if [ ${#pkgs[@]} -gt 0 ]; then
+    echo "dep-scan: scanning ${pkgs[*]}..."
+    dep-scan check "${pkgs[@]}" --registry crates || {
+      echo "dep-scan: blocked — resolve policy violations before installing" >&2
+      exit 1
+    }
+  fi
+  exec cargo "$cmd" "${flags[@]}" "${pkgs[@]}"
+else
+  exec cargo "$@"
+fi
+WRAPPER
+sudo chmod +x /usr/local/bin/cargods
+
+# go wrapper (v0.3 — install now, works once Go module registry support lands)
+sudo tee /usr/local/bin/gods << 'WRAPPER' > /dev/null
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${DEP_SCAN_SKIP:-}" == "1" ]]; then exec go "$@"; fi
+if [[ "${1:-}" =~ ^(get|install)$ ]]; then
+  cmd="$1"; shift
+  pkgs=(); flags=()
+  for arg in "$@"; do
+    if [[ "$arg" == -* ]]; then flags+=("$arg"); else pkgs+=("$arg"); fi
+  done
+  if [ ${#pkgs[@]} -gt 0 ]; then
+    echo "dep-scan: scanning ${pkgs[*]}..."
+    dep-scan check "${pkgs[@]}" --registry go || {
+      echo "dep-scan: blocked — resolve policy violations before installing" >&2
+      exit 1
+    }
+  fi
+  exec go "$cmd" "${flags[@]}" "${pkgs[@]}"
+else
+  exec go "$@"
+fi
+WRAPPER
+sudo chmod +x /usr/local/bin/gods
 ```
 
 For user-local install (no sudo), put them in `~/.local/bin/` instead.
@@ -261,6 +334,37 @@ function pipds {
     & pip @args
   }
 }
+
+# v0.3 — cargo and go wrappers
+function cargods {
+  if ($env:DEP_SCAN_SKIP -eq '1') { & cargo @args; return }
+  if ($args[0] -in 'add', 'install') {
+    $pkgs = $args[1..($args.Length-1)] | Where-Object { $_ -notlike '-*' }
+    if ($pkgs) {
+      Write-Host "dep-scan: scanning $($pkgs -join ', ')..."
+      & dep-scan check @pkgs --registry crates
+      if ($LASTEXITCODE -ne 0) { return }
+    }
+    & cargo @args
+  } else {
+    & cargo @args
+  }
+}
+
+function gods {
+  if ($env:DEP_SCAN_SKIP -eq '1') { & go @args; return }
+  if ($args[0] -in 'get', 'install') {
+    $pkgs = $args[1..($args.Length-1)] | Where-Object { $_ -notlike '-*' }
+    if ($pkgs) {
+      Write-Host "dep-scan: scanning $($pkgs -join ', ')..."
+      & dep-scan check @pkgs --registry go
+      if ($LASTEXITCODE -ne 0) { return }
+    }
+    & go @args
+  } else {
+    & go @args
+  }
+}
 ```
 
 ### Enforcing dep-scan (optional)
@@ -270,9 +374,11 @@ If you want to make `npmds`/`pipds` the **only** way to install packages on a sy
 **Per-user (shell aliases)** — add to `~/.bashrc` or `~/.zshrc`:
 
 ```bash
-# Redirect npm/pip to their dep-scan wrappers
+# Redirect all package managers to their dep-scan wrappers
 alias npm='npmds'
 alias pip='pipds'
+alias cargo='cargods'   # v0.3
+alias go='gods'         # v0.3
 
 # To bypass: use the full path or unset the alias
 #   /usr/bin/npm install something
@@ -285,19 +391,15 @@ alias pip='pipds'
 # Create a directory that sits before the real binaries in PATH
 sudo mkdir -p /usr/local/lib/dep-scan/bin
 
-# npm shim — redirects to npmds
-sudo tee /usr/local/lib/dep-scan/bin/npm << 'SHIM' > /dev/null
+# Create shims for each package manager
+for pair in "npm:npmds" "pip:pipds" "cargo:cargods" "go:gods"; do
+  cmd="${pair%%:*}"; wrapper="${pair##*:}"
+  sudo tee "/usr/local/lib/dep-scan/bin/$cmd" << SHIM > /dev/null
 #!/usr/bin/env bash
-exec npmds "$@"
+exec $wrapper "\$@"
 SHIM
-sudo chmod +x /usr/local/lib/dep-scan/bin/npm
-
-# pip shim — redirects to pipds
-sudo tee /usr/local/lib/dep-scan/bin/pip << 'SHIM' > /dev/null
-#!/usr/bin/env bash
-exec pipds "$@"
-SHIM
-sudo chmod +x /usr/local/lib/dep-scan/bin/pip
+  sudo chmod +x "/usr/local/lib/dep-scan/bin/$cmd"
+done
 
 # Add to system PATH (before /usr/bin)
 echo 'export PATH="/usr/local/lib/dep-scan/bin:$PATH"' | sudo tee /etc/profile.d/dep-scan.sh
@@ -320,6 +422,8 @@ DEP_SCAN_SKIP=1 npm install something
 # .envrc — enforces dep-scan for this project only
 alias npm='npmds'
 alias pip='pipds'
+alias cargo='cargods'
+alias go='gods'
 ```
 
 ### CI/CD integration
@@ -343,13 +447,17 @@ alias pip='pipds'
 When you need to bypass scanning (e.g., trusted CI environment or installing dep-scan's own build deps):
 
 ```bash
-# npmds/pipds are separate commands — npm/pip always work directly
+# The wrappers are separate commands — the real tools always work directly
 npm install something
 pip install something
+cargo add something
+go get something
 
-# Or skip scanning within the wrapper
+# Or skip scanning within a wrapper
 DEP_SCAN_SKIP=1 npmds install something
 DEP_SCAN_SKIP=1 pipds install something
+DEP_SCAN_SKIP=1 cargods add something
+DEP_SCAN_SKIP=1 gods get something
 ```
 
 ---
