@@ -34,6 +34,7 @@
 | 021 | Obfuscation detection policy | 021-obfuscation-detection-test-spec.md | 11/11 | Done |
 | 022 | Popularity policy + v0.3 integration tests | 022-popularity-integration-test-spec.md | 11/11 | Done |
 | 023 | Lockfile parser | 023-lockfile-parser-test-spec.md | 32/32 | Done |
+| 024 | Install subcommand | 024-install-subcommand-test-spec.md | 6/6 | Done |
 
 ## Status key
 

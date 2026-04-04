@@ -1,6 +1,6 @@
 # Task 024 — Install subcommand implementation
 
-**Status:** backlog
+**Status:** done
 **Depends on:** 023
 
 ## Objective

@@ -83,9 +83,19 @@ async fn run(cli: Cli) -> Result<i32> {
             )
             .await
         }
-        Command::Install { packages: _ } => {
-            println!("Install command is not yet implemented");
-            Ok(0)
+        Command::Install {
+            packages,
+            registry,
+            force,
+        } => {
+            run_install(
+                cli.config.as_deref(),
+                cli.verbose,
+                packages,
+                registry,
+                force,
+            )
+            .await
         }
         Command::Config { action } => {
             run_config(cli.config.as_deref(), action)?;
@@ -409,5 +419,68 @@ async fn run_check(
         Ok(1)
     } else {
         Ok(0)
+    }
+}
+
+async fn run_install(
+    config_path: Option<&Path>,
+    verbose: bool,
+    packages: Vec<String>,
+    registry_flag: String,
+    force: bool,
+) -> Result<i32> {
+    // 1. Run the scan (reuse run_check logic)
+    let scan_exit = run_check(
+        config_path,
+        verbose,
+        packages.clone(),
+        Some(registry_flag.clone()),
+        false, // not JSON
+        None,  // no lockfile
+        None,  // no lockfile type
+    )
+    .await?;
+
+    // 2. Check scan result
+    if scan_exit == 1 && !force {
+        eprintln!("\ndep-scan: blocked — resolve policy violations before installing");
+        return Ok(1);
+    }
+    if scan_exit == 1 && force {
+        eprintln!("\nWarning: proceeding with installation despite policy violations (--force)");
+    }
+    if scan_exit == 2 {
+        eprintln!("\ndep-scan: scan failed with errors");
+        return Ok(2);
+    }
+
+    // 3. Build and execute the package manager command
+    let reg_type: RegistryType = registry_flag.parse().map_err(|e| anyhow::anyhow!("{e}"))?;
+
+    let (cmd, args) = match reg_type {
+        RegistryType::Npm => ("npm", vec!["install".to_string()]),
+        RegistryType::PyPI => ("pip", vec!["install".to_string()]),
+        RegistryType::Crates => ("cargo", vec!["add".to_string()]),
+        RegistryType::Go => ("go", vec!["get".to_string()]),
+    };
+
+    let mut full_args = args;
+    full_args.extend(packages);
+
+    if verbose {
+        eprintln!("Running: {} {}", cmd, full_args.join(" "));
+    }
+
+    println!("\nInstalling via {cmd}...");
+
+    let status = std::process::Command::new(cmd)
+        .args(&full_args)
+        .status()
+        .with_context(|| format!("Failed to run '{cmd}'. Is it installed and in PATH?"))?;
+
+    if status.success() {
+        Ok(0)
+    } else {
+        Ok(status.code().unwrap_or(1))
     }
 }

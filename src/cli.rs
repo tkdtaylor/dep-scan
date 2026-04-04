@@ -52,6 +52,14 @@ pub enum Command {
         /// Package name(s) to install
         #[arg(required = true)]
         packages: Vec<String>,
+
+        /// Registry / package manager to use (npm, pypi, crates, go)
+        #[arg(long, required = true)]
+        registry: String,
+
+        /// Proceed with installation despite policy violations
+        #[arg(long)]
+        force: bool,
     },
 
     /// Manage dep-scan configuration
@@ -151,6 +159,49 @@ mod tests {
                 assert_eq!(action, ConfigAction::Init);
             }
             _ => panic!("expected Config command"),
+        }
+    }
+
+    // T-024-01: Install CLI parses packages and registry
+    #[test]
+    fn parse_install_with_packages_and_registry() {
+        let cli = Cli::parse_from(["dep-scan", "install", "express", "--registry", "npm"]);
+        match cli.command {
+            Command::Install {
+                packages,
+                registry,
+                force,
+            } => {
+                assert_eq!(packages, vec!["express"]);
+                assert_eq!(registry, "npm");
+                assert!(!force);
+            }
+            _ => panic!("expected Install command"),
+        }
+    }
+
+    // T-024-02: Install CLI parses --force flag
+    #[test]
+    fn parse_install_with_force_flag() {
+        let cli = Cli::parse_from([
+            "dep-scan",
+            "install",
+            "evil-pkg",
+            "--registry",
+            "npm",
+            "--force",
+        ]);
+        match cli.command {
+            Command::Install {
+                packages,
+                registry,
+                force,
+            } => {
+                assert_eq!(packages, vec!["evil-pkg"]);
+                assert_eq!(registry, "npm");
+                assert!(force);
+            }
+            _ => panic!("expected Install command"),
         }
     }
 }

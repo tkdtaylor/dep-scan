@@ -28,14 +28,14 @@ fn check_help_shows_check_usage() {
         .stdout(predicate::str::contains("--registry"));
 }
 
-// T-002-10: install prints not yet implemented
+// T-002-10: install requires --registry flag
 #[test]
-fn install_prints_not_yet_implemented() {
+fn install_requires_registry_flag() {
     dep_scan()
         .args(["install", "lodash"])
         .assert()
-        .success()
-        .stdout(predicate::str::contains("not yet implemented"));
+        .failure()
+        .stderr(predicate::str::contains("--registry"));
 }
 
 // T-002-11: no args shows help or exits non-zero
