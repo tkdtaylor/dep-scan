@@ -93,15 +93,41 @@ Use the **task-executor** agent to work through tasks one at a time. Each agent 
 use task-executor — task: docs/tasks/backlog/NNN-name.md, spec: docs/tasks/test-specs/NNN-name-test-spec.md
 ```
 
-## Do not
+## Boundaries
 
-- Do not modify files in `docs/` unless explicitly asked — they are planning documents, not implementation
-- Do not create new files in `src/` without a corresponding task and test spec
-- Do not combine multiple unrelated changes in one task
-- Do not skip the test spec even for "small" changes
-- Do not add a `Co-Authored-By` line to commit messages unless explicitly asked
-- Do not scan or interact with the network without user consent during development — dep-scan should only make network calls when the user explicitly invokes a scan
-- Do not hardcode registry URLs — they should be configurable for testing and future extensibility
+### Always
+- Write the test spec before any implementation code
+- Commit and push after every milestone (task completed, spec written, ADR written)
+- Read the task file and test spec before starting work on a task
+- Create an ADR for significant design decisions
+
+### Ask first
+- Modifying files in `docs/` — they are planning documents, not implementation
+- Deleting or renaming existing source files
+- Adding dependencies not already in the tech stack
+- Changing the project structure beyond what a task requires
+
+### Never
+- Create files in `src/` without a corresponding task and test spec
+- Combine unrelated changes in one task or commit
+- Skip the test spec — even for "small" changes
+- Force push or rewrite published git history
+- Add a `Co-Authored-By` line to commits unless explicitly asked
+- Scan or interact with the network without user consent during development — dep-scan should only make network calls when the user explicitly invokes a scan
+- Hardcode registry URLs — they should be configurable for testing and future extensibility
+
+## Common rationalizations
+
+These are excuses agents use to skip steps. Don't fall for them.
+
+| Excuse | Reality |
+|--------|---------|
+| "I'll commit after the next task too" | No. Commit now. Batched commits are impossible to untangle later. |
+| "This task is too small for a test spec" | The spec defines done — without it you're guessing. Write one. |
+| "I'll add tests later" | Later never comes. The test spec comes first, always. |
+| "These two tasks are related, I'll do them together" | One task, one commit. If it feels too granular, the tasks are scoped correctly. |
+| "The architecture doc doesn't need updating" | If you made a non-obvious design decision, write an ADR. |
+| "I'll just quickly fix this other thing I noticed" | Stay on your task. Note it for later — don't scope-creep. |
 
 ## Recommended tooling
 
