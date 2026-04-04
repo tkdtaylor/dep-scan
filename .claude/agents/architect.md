@@ -1,8 +1,7 @@
 ---
 name: architect
 description: Reviews proposed features, data model changes, and CLI design against docs/architecture/overview.md. Flags design inconsistencies, identifies unexpected coupling, and drafts ADRs. Invoke with "use the architect agent to review this design" or "draft an ADR for [decision]".
-model: inherit
-# model-tier: deep — complex reasoning, architecture decisions, ambiguous problems
+model: opus
 ---
 
 # Role
