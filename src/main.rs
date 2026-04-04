@@ -26,6 +26,7 @@ use policy::maintainer::MaintainerChangePolicy;
 use policy::typosquatting::TyposquattingPolicy;
 use policy::vulnerability::VulnerabilityPolicy;
 use policy::{Policy, PolicyDetail, aggregate_results};
+use registry::go::GoRegistry;
 use registry::npm::NpmRegistry;
 use registry::pypi::PyPiRegistry;
 use registry::{Registry, RegistryType};
@@ -198,9 +199,10 @@ async fn run_check(
             RegistryType::Crates => Err(registry::RegistryError::NetworkError(
                 "crates.io registry support coming in next release".to_string(),
             )),
-            RegistryType::Go => Err(registry::RegistryError::NetworkError(
-                "Go module proxy support coming in next release".to_string(),
-            )),
+            RegistryType::Go => {
+                let client = GoRegistry::new(config.registries.go_proxy_url.clone());
+                client.get_metadata(pkg_name, None).await
+            }
         };
 
         let metadata = match metadata {
