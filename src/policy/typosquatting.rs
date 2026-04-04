@@ -1,6 +1,9 @@
 use super::{Policy, PolicyResult};
 use crate::types::ScanContext;
-use crate::typosquat::{POPULAR_NPM, POPULAR_PYPI, find_closest_match};
+use crate::typosquat::{
+    POPULAR_CRATES, POPULAR_GO, POPULAR_NPM, POPULAR_PYPI, extract_go_module_name,
+    find_closest_match,
+};
 
 /// Policy that detects typosquatting by comparing package names against
 /// lists of popular packages using normalized Levenshtein distance.
@@ -19,6 +22,10 @@ pub struct TyposquattingPolicy {
     popular_npm: Vec<String>,
     /// Popular PyPI package names.
     popular_pypi: Vec<String>,
+    /// Popular crates.io package names.
+    popular_crates: Vec<String>,
+    /// Popular Go module names (last path segment).
+    popular_go: Vec<String>,
 }
 
 impl TyposquattingPolicy {
@@ -31,6 +38,8 @@ impl TyposquattingPolicy {
             block_threshold,
             popular_npm: POPULAR_NPM.iter().map(|s| s.to_string()).collect(),
             popular_pypi: POPULAR_PYPI.iter().map(|s| s.to_string()).collect(),
+            popular_crates: POPULAR_CRATES.iter().map(|s| s.to_string()).collect(),
+            popular_go: POPULAR_GO.iter().map(|s| s.to_string()).collect(),
         }
     }
 
@@ -40,10 +49,22 @@ impl TyposquattingPolicy {
     }
 
     /// Check if a name is in any popular package list (exact match, case-insensitive).
+    ///
+    /// For Go modules, also checks the last path segment against the Go list.
     fn is_popular(&self, name: &str) -> bool {
         let lower = name.to_lowercase();
+        let go_segment = extract_go_module_name(&lower);
+
         self.popular_npm.iter().any(|p| p.to_lowercase() == lower)
             || self.popular_pypi.iter().any(|p| p.to_lowercase() == lower)
+            || self
+                .popular_crates
+                .iter()
+                .any(|p| p.to_lowercase() == lower)
+            || self
+                .popular_go
+                .iter()
+                .any(|p| p.to_lowercase() == go_segment)
     }
 }
 
@@ -60,22 +81,21 @@ impl Policy for TyposquattingPolicy {
             return PolicyResult::Pass;
         }
 
-        // 2. Search both npm and pypi lists for the closest match
+        // 2. Search all lists for the closest match
         let npm_match = find_closest_match(name, POPULAR_NPM, self.warn_threshold);
         let pypi_match = find_closest_match(name, POPULAR_PYPI, self.warn_threshold);
+        let crates_match = find_closest_match(name, POPULAR_CRATES, self.warn_threshold);
 
-        // Pick the closest match across both lists
-        let closest = match (npm_match, pypi_match) {
-            (Some((n1, d1)), Some((n2, d2))) => {
-                if d1 <= d2 {
-                    Some((n1, d1))
-                } else {
-                    Some((n2, d2))
-                }
-            }
-            (Some(m), None) | (None, Some(m)) => Some(m),
-            (None, None) => None,
-        };
+        // For Go modules, compare the last path segment against the Go list
+        let go_segment = extract_go_module_name(name);
+        let go_match = find_closest_match(go_segment, POPULAR_GO, self.warn_threshold);
+
+        // Pick the closest match across all lists
+        let candidates = [npm_match, pypi_match, crates_match, go_match];
+        let closest = candidates
+            .into_iter()
+            .flatten()
+            .min_by(|(_, d1), (_, d2)| d1.partial_cmp(d2).unwrap_or(std::cmp::Ordering::Equal));
 
         match closest {
             Some((popular_name, distance)) if distance > 0.0 => {
@@ -239,6 +259,94 @@ mod tests {
         let ctx = make_context("lodash-js");
         // Normalized "lodash-js" -> "lodash", distance 0.0 to "lodash"
         // The distance == 0.0 case is treated as pass (it's basically the same package)
+        assert_eq!(policy.evaluate(&ctx), PolicyResult::Pass);
+    }
+
+    // T-020-03: Crate typosquat detected — "srde" warns about "serde"
+    #[test]
+    fn crate_typosquat_srde() {
+        // "srde" vs "serde": distance = 1/5 = 0.20
+        // Use a threshold that catches this
+        let policy = TyposquattingPolicy::new(0.25, 0.08);
+        let ctx = make_context("srde");
+        let result = policy.evaluate(&ctx);
+        match &result {
+            PolicyResult::Warn(msg) | PolicyResult::Block(msg) => {
+                assert!(
+                    msg.contains("serde"),
+                    "Message should mention 'serde', got: {msg}"
+                );
+            }
+            other => panic!("Expected Warn or Block for 'srde', got {:?}", other),
+        }
+    }
+
+    // T-020-03b: Crate typosquat detected — "tokioo" warns about "tokio"
+    #[test]
+    fn crate_typosquat_tokioo() {
+        // "tokioo" vs "tokio": raw distance 1 (extra char), normalized = 1/6 ~ 0.167
+        let policy = TyposquattingPolicy::new(0.20, 0.08);
+        let ctx = make_context("tokioo");
+        let result = policy.evaluate(&ctx);
+        match &result {
+            PolicyResult::Warn(msg) | PolicyResult::Block(msg) => {
+                assert!(
+                    msg.contains("tokio"),
+                    "Message should mention 'tokio', got: {msg}"
+                );
+            }
+            other => panic!("Expected Warn or Block for 'tokioo', got {:?}", other),
+        }
+    }
+
+    // T-020-04: Real crate name passes
+    #[test]
+    fn real_crate_serde_passes() {
+        let policy = TyposquattingPolicy::with_defaults();
+        let ctx = make_context("serde");
+        assert_eq!(policy.evaluate(&ctx), PolicyResult::Pass);
+    }
+
+    #[test]
+    fn real_crate_tokio_passes() {
+        let policy = TyposquattingPolicy::with_defaults();
+        let ctx = make_context("tokio");
+        assert_eq!(policy.evaluate(&ctx), PolicyResult::Pass);
+    }
+
+    // T-020-05: Go module typosquat detected — last segment close to popular Go package
+    #[test]
+    fn go_module_typosquat_detected() {
+        // "github.com/gin-gonic/gn" → last segment "gn" vs "gin": distance = 1/3 ~ 0.33
+        let policy = TyposquattingPolicy::new(0.40, 0.08);
+        let ctx = make_context("github.com/gin-gonic/gn");
+        let result = policy.evaluate(&ctx);
+        match &result {
+            PolicyResult::Warn(msg) | PolicyResult::Block(msg) => {
+                assert!(
+                    msg.contains("gin"),
+                    "Message should mention 'gin', got: {msg}"
+                );
+            }
+            other => panic!(
+                "Expected Warn or Block for 'github.com/gin-gonic/gn', got {:?}",
+                other
+            ),
+        }
+    }
+
+    // T-020-06: Real Go module passes — last segment matches popular Go package
+    #[test]
+    fn real_go_module_passes() {
+        let policy = TyposquattingPolicy::with_defaults();
+        let ctx = make_context("github.com/gin-gonic/gin");
+        assert_eq!(policy.evaluate(&ctx), PolicyResult::Pass);
+    }
+
+    #[test]
+    fn real_go_module_mux_passes() {
+        let policy = TyposquattingPolicy::with_defaults();
+        let ctx = make_context("github.com/gorilla/mux");
         assert_eq!(policy.evaluate(&ctx), PolicyResult::Pass);
     }
 }

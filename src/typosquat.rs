@@ -451,6 +451,262 @@ pub const POPULAR_PYPI: &[&str] = &[
     "charset-normalizer",
 ];
 
+/// Top ~100 most downloaded crates.io packages that attackers commonly typosquat.
+pub const POPULAR_CRATES: &[&str] = &[
+    "serde",
+    "serde_json",
+    "serde_derive",
+    "rand",
+    "log",
+    "tokio",
+    "clap",
+    "regex",
+    "chrono",
+    "anyhow",
+    "thiserror",
+    "reqwest",
+    "hyper",
+    "futures",
+    "bytes",
+    "syn",
+    "quote",
+    "proc-macro2",
+    "libc",
+    "lazy_static",
+    "once_cell",
+    "itertools",
+    "rayon",
+    "crossbeam",
+    "parking_lot",
+    "smallvec",
+    "indexmap",
+    "hashbrown",
+    "bitflags",
+    "num-traits",
+    "num",
+    "uuid",
+    "url",
+    "http",
+    "tower",
+    "tonic",
+    "prost",
+    "axum",
+    "actix-web",
+    "rocket",
+    "warp",
+    "diesel",
+    "sqlx",
+    "rusqlite",
+    "sea-orm",
+    "tracing",
+    "env_logger",
+    "config",
+    "toml",
+    "serde_yaml",
+    "csv",
+    "base64",
+    "ring",
+    "rustls",
+    "openssl",
+    "sha2",
+    "hmac",
+    "aes",
+    "rsa",
+    "ed25519-dalek",
+    "image",
+    "zip",
+    "flate2",
+    "tar",
+    "walkdir",
+    "glob",
+    "tempfile",
+    "clap_derive",
+    "structopt",
+    "argh",
+    "dialoguer",
+    "indicatif",
+    "colored",
+    "termcolor",
+    "console",
+    "atty",
+    "ctrlc",
+    "semver",
+    "version-check",
+    "cargo",
+    "cargo-edit",
+    "wasm-bindgen",
+    "web-sys",
+    "js-sys",
+    "gloo",
+    "nix",
+    "winapi",
+    "windows",
+    "mio",
+    "socket2",
+    "derive_more",
+    "strum",
+    "enum-iterator",
+    "paste",
+    "criterion",
+    "proptest",
+    "quickcheck",
+    "assert_cmd",
+    "predicates",
+    "ctor",
+    "inventory",
+    "linkme",
+    "dashmap",
+    "flume",
+    "kanal",
+    "pin-project",
+    "pin-project-lite",
+    "async-trait",
+    "async-std",
+    "nom",
+    "pest",
+    "winnow",
+    "chumsky",
+    "logos",
+    "miette",
+    "color-eyre",
+    "eyre",
+];
+
+/// Popular Go modules (last path segment used for typosquatting comparison).
+pub const POPULAR_GO: &[&str] = &[
+    "gin",
+    "mux",
+    "chi",
+    "echo",
+    "fiber",
+    "httprouter",
+    "gorm",
+    "sqlx",
+    "pgx",
+    "mongo-driver",
+    "redis",
+    "testify",
+    "gomock",
+    "gocheck",
+    "goblin",
+    "logrus",
+    "zap",
+    "zerolog",
+    "slog",
+    "viper",
+    "cobra",
+    "pflag",
+    "kingpin",
+    "grpc",
+    "protobuf",
+    "proto",
+    "twirp",
+    "aws-sdk-go",
+    "azure-sdk-for-go",
+    "google-cloud-go",
+    "kubernetes",
+    "client-go",
+    "apimachinery",
+    "terraform",
+    "packer",
+    "consul",
+    "vault",
+    "nomad",
+    "prometheus",
+    "grafana",
+    "jaeger",
+    "opentelemetry-go",
+    "docker",
+    "containerd",
+    "buildkit",
+    "moby",
+    "etcd",
+    "bbolt",
+    "badger",
+    "pebble",
+    "jwt",
+    "oauth2",
+    "casbin",
+    "authboss",
+    "wire",
+    "dig",
+    "fx",
+    "sarama",
+    "confluent-kafka-go",
+    "nats",
+    "websocket",
+    "melody",
+    "centrifugo",
+    "colly",
+    "goquery",
+    "chromedp",
+    "rod",
+    "excelize",
+    "tablewriter",
+    "uuid",
+    "ulid",
+    "ksuid",
+    "decimal",
+    "money",
+    "errors",
+    "multierr",
+    "errorx",
+    "afero",
+    "fsnotify",
+    "cron",
+    "robfig",
+    "migrate",
+    "goose",
+    "atlas",
+    "validator",
+    "ozzo-validation",
+    "imaging",
+    "resize",
+    "bimg",
+    "gjson",
+    "jsoniter",
+    "easyjson",
+    "sonic",
+    "lo",
+    "samber",
+    "gods",
+    "lane",
+    "ants",
+    "tunny",
+    "pond",
+    "resty",
+    "gentleman",
+    "heimdall",
+    "crypto",
+    "bcrypt",
+    "argon2",
+    "rate",
+    "tollbooth",
+    "limiter",
+    "cors",
+    "csrf",
+    "secure",
+    "air",
+    "fresh",
+    "realize",
+    "swag",
+    "swagger",
+    "go-swagger",
+    "mock",
+    "mockery",
+    "counterfeiter",
+    "golangci-lint",
+    "staticcheck",
+    "revive",
+];
+
+/// Extract the last path segment of a Go module path for typosquatting comparison.
+///
+/// For example: `"github.com/gin-gonic/gin"` returns `"gin"`.
+pub fn extract_go_module_name(module_path: &str) -> &str {
+    module_path.rsplit('/').next().unwrap_or(module_path)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -548,6 +804,16 @@ mod tests {
             "pypi list has {} entries, need >= 100",
             POPULAR_PYPI.len()
         );
+        assert!(
+            POPULAR_CRATES.len() >= 100,
+            "crates list has {} entries, need >= 100",
+            POPULAR_CRATES.len()
+        );
+        assert!(
+            POPULAR_GO.len() >= 100,
+            "go list has {} entries, need >= 100",
+            POPULAR_GO.len()
+        );
     }
 
     // Verify no duplicates in popular lists
@@ -561,6 +827,48 @@ mod tests {
         for &pkg in POPULAR_PYPI {
             assert!(pypi_set.insert(pkg), "Duplicate in pypi list: {pkg}");
         }
+        let mut crates_set = std::collections::HashSet::new();
+        for &pkg in POPULAR_CRATES {
+            assert!(crates_set.insert(pkg), "Duplicate in crates list: {pkg}");
+        }
+        let mut go_set = std::collections::HashSet::new();
+        for &pkg in POPULAR_GO {
+            assert!(go_set.insert(pkg), "Duplicate in go list: {pkg}");
+        }
+    }
+
+    // T-020-01: POPULAR_CRATES contains expected entries
+    #[test]
+    fn popular_crates_contains_expected() {
+        let expected = ["serde", "tokio", "clap", "reqwest", "anyhow"];
+        for name in &expected {
+            assert!(
+                POPULAR_CRATES.contains(name),
+                "POPULAR_CRATES should contain '{name}'"
+            );
+        }
+    }
+
+    // T-020-02: POPULAR_GO contains expected entries
+    #[test]
+    fn popular_go_contains_expected() {
+        let expected = ["gin", "mux", "testify"];
+        for name in &expected {
+            assert!(
+                POPULAR_GO.contains(name),
+                "POPULAR_GO should contain '{name}'"
+            );
+        }
+    }
+
+    // T-020-07: Go path segment extraction
+    #[test]
+    fn go_module_name_extraction() {
+        assert_eq!(extract_go_module_name("github.com/gin-gonic/gin"), "gin");
+        assert_eq!(extract_go_module_name("github.com/gorilla/mux"), "mux");
+        assert_eq!(extract_go_module_name("gin"), "gin");
+        assert_eq!(extract_go_module_name(""), "");
+        assert_eq!(extract_go_module_name("golang.org/x/crypto"), "crypto");
     }
 
     // Raw levenshtein sanity checks
