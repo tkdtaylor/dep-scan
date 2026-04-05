@@ -17,6 +17,17 @@ REPO="tkdtaylor/dep-scan"
 INSTALL_DIR="${INSTALL_DIR:-$HOME/.local/bin}"
 DRY_RUN=false
 
+# Temp directory at script scope so the EXIT trap survives `main` returning.
+# Declared and initialized before `main` runs so `set -u` is happy.
+TMPDIR=""
+cleanup() {
+  if [ -n "$TMPDIR" ]; then
+    rm -rf "$TMPDIR"
+  fi
+  return 0
+}
+trap cleanup EXIT
+
 for arg in "$@"; do
   case "$arg" in
     --dry-run) DRY_RUN=true ;;
@@ -105,19 +116,17 @@ main() {
     exit 0
   fi
 
-  # Create temp directory
-  local tmpdir
-  tmpdir="$(mktemp -d)"
-  trap 'rm -rf "$tmpdir"' EXIT
+  # Create temp directory (assigned to script-scope TMPDIR so the trap can clean it up)
+  TMPDIR="$(mktemp -d)"
 
   echo ""
   echo "Downloading ${filename}..."
-  curl -fsSL "$url" -o "${tmpdir}/${filename}"
+  curl -fsSL "$url" -o "${TMPDIR}/${filename}"
 
   # Verify checksum
   echo "Verifying checksum..."
-  curl -fsSL "$checksums_url" -o "${tmpdir}/sha256sums.txt"
-  cd "$tmpdir"
+  curl -fsSL "$checksums_url" -o "${TMPDIR}/sha256sums.txt"
+  cd "$TMPDIR"
   if command -v sha256sum >/dev/null 2>&1; then
     grep "$filename" sha256sums.txt | sha256sum -c --quiet
   elif command -v shasum >/dev/null 2>&1; then
@@ -130,14 +139,14 @@ main() {
   # Extract
   echo "Extracting..."
   if [ "$ext" = "tar.gz" ]; then
-    tar xzf "${tmpdir}/${filename}" -C "$tmpdir"
+    tar xzf "${TMPDIR}/${filename}" -C "$TMPDIR"
   else
-    unzip -q "${tmpdir}/${filename}" -d "$tmpdir"
+    unzip -q "${TMPDIR}/${filename}" -d "$TMPDIR"
   fi
 
   # Install
   mkdir -p "$INSTALL_DIR"
-  mv "${tmpdir}/dep-scan" "${INSTALL_DIR}/dep-scan"
+  mv "${TMPDIR}/dep-scan" "${INSTALL_DIR}/dep-scan"
   chmod +x "${INSTALL_DIR}/dep-scan"
 
   echo ""
