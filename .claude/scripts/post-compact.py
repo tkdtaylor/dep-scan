@@ -24,6 +24,9 @@ def main():
     cwd = os.environ.get("CLAUDE_PROJECT_DIR") or os.getcwd()
     project = Path(cwd)
 
+    if not project.is_dir():
+        sys.exit(0)
+
     parts = []
 
     # Git branch
@@ -63,6 +66,28 @@ def main():
                 parts.append(f"Test spec ({spec_name}):\n{preview}")
             except Exception:
                 parts.append(f"Test spec: {spec_name}")
+
+    # Research project context
+    research_log = project / "docs" / "research-log.md"
+    if research_log.exists():
+        try:
+            lines = research_log.read_text(encoding="utf-8").splitlines()
+            # Show last 10 non-empty lines (most recent activity)
+            recent = [l for l in lines if l.strip()][-10:]
+            if recent:
+                parts.append("Recent research log:\n" + "\n".join(recent))
+        except Exception:
+            pass
+
+    outline = project / "docs" / "outline.md"
+    if outline.exists():
+        try:
+            preview = "\n".join(
+                outline.read_text(encoding="utf-8").splitlines()[:15]
+            )
+            parts.append(f"Outline:\n{preview}")
+        except Exception:
+            pass
 
     # Check for plan skeleton
     plans_dir = Path.home() / ".claude" / "plans"

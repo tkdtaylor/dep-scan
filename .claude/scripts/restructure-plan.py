@@ -148,6 +148,9 @@ def main():
         or os.getcwd()
     )
 
+    if not cwd or not Path(cwd).is_dir():
+        sys.exit(0)
+
     tasks_dir = Path(cwd) / "docs" / "tasks"
     if not tasks_dir.is_dir():
         sys.exit(0)

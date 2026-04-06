@@ -18,7 +18,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"$CLAUDE_PROJECT_DIR\"/.claude/scripts/protect-secrets.py",
+            "command": "python3 \"${CLAUDE_PROJECT_DIR:-.}\"/.claude/scripts/protect-secrets.py",
             "timeout": 5
           }
         ]
@@ -30,7 +30,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"$CLAUDE_PROJECT_DIR\"/.claude/scripts/restructure-plan.py",
+            "command": "python3 \"${CLAUDE_PROJECT_DIR:-.}\"/.claude/scripts/restructure-plan.py",
             "timeout": 30
           }
         ]
@@ -41,7 +41,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"$CLAUDE_PROJECT_DIR\"/.claude/scripts/post-compact.py",
+            "command": "python3 \"${CLAUDE_PROJECT_DIR:-.}\"/.claude/scripts/post-compact.py",
             "timeout": 10
           }
         ]
