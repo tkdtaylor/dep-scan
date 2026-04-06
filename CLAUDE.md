@@ -143,3 +143,4 @@ These are excuses agents use to skip steps. Don't fall for them.
 - **task-planner** — break features into scoped tasks with test specs. Invoke: "use the task-planner to break down [feature]"
 - **qa** — verify implementations against test specs, find coverage gaps. Invoke: "use the qa agent on task NNN"
 - **security-auditor** — audit dep-scan's own code for injection, TOCTOU, and bypass risks. Critical since this is a security tool handling adversarial input. Invoke: "use the security-auditor on [module]"
+- **docs-writer** — generate or update README sections, CLI help text, docstrings, and changelog entries from actual source code. Invoke: "use the docs-writer to document [module or feature]"
