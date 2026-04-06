@@ -9,10 +9,10 @@ Implement the `dep-scan install` command that scans packages then executes the u
 
 ## Acceptance criteria
 
-- [ ] dep-scan install <packages> --registry npm scans then runs npm install
-- [ ] Blocks install if any policy violations (exit 1)
-- [ ] --force flag bypasses policy violations with warning
-- [ ] Supports all 4 registries (npm, pypi, crates, go)
-- [ ] Uses std::process::Command to exec the real package manager
-- [ ] Tests for scan-gate logic and command construction
-- [ ] All tests pass, clippy clean, fmt clean
+- [x] dep-scan install <packages> --registry npm scans then runs npm install
+- [x] Blocks install if any policy violations (exit 1)
+- [x] --force flag bypasses policy violations with warning
+- [x] Supports all 4 registries (npm, pypi, crates, go)
+- [x] Uses std::process::Command to exec the real package manager
+- [x] Tests for scan-gate logic and command construction
+- [x] All tests pass, clippy clean, fmt clean

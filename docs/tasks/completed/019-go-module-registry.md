@@ -9,14 +9,14 @@ Implement the Go module proxy client that fetches package metadata from proxy.go
 
 ## Acceptance criteria
 
-- [ ] src/registry/go.rs: GoRegistry with configurable base_url
-- [ ] Implements Registry trait
-- [ ] URL-encodes module paths (github.com/user/repo)
-- [ ] Fetches version list from {base_url}/{module}/@v/list
-- [ ] Fetches version info from {base_url}/{module}/@v/{version}.info
-- [ ] Parses: name (module path), version, published_at (Time field)
-- [ ] Handles 404, 410 (gone), network errors
-- [ ] Maintainers/downloads left as empty/None (not available from proxy)
-- [ ] Wired into main.rs dispatch for RegistryType::Go
-- [ ] Tests with wiremock
-- [ ] All tests pass, clippy clean, fmt clean
+- [x] src/registry/go.rs: GoRegistry with configurable base_url
+- [x] Implements Registry trait
+- [x] URL-encodes module paths (github.com/user/repo)
+- [x] Fetches version list from {base_url}/{module}/@v/list
+- [x] Fetches version info from {base_url}/{module}/@v/{version}.info
+- [x] Parses: name (module path), version, published_at (Time field)
+- [x] Handles 404, 410 (gone), network errors
+- [x] Maintainers/downloads left as empty/None (not available from proxy)
+- [x] Wired into main.rs dispatch for RegistryType::Go
+- [x] Tests with wiremock
+- [x] All tests pass, clippy clean, fmt clean

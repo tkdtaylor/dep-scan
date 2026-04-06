@@ -9,10 +9,10 @@ Curl-able install script for easy binary installation.
 
 ## Acceptance criteria
 
-- [ ] install.sh at project root
-- [ ] Detects OS and architecture
-- [ ] Downloads correct binary from latest GitHub release
-- [ ] Installs to ~/.local/bin/ or /usr/local/bin/ with sudo
-- [ ] Verifies SHA256 checksum
-- [ ] Passes shellcheck
-- [ ] Dry-run mode (--dry-run flag)
+- [x] install.sh at project root
+- [x] Detects OS and architecture
+- [x] Downloads correct binary from latest GitHub release
+- [x] Installs to ~/.local/bin/ or /usr/local/bin/ with sudo
+- [x] Verifies SHA256 checksum
+- [x] Passes shellcheck
+- [x] Dry-run mode (--dry-run flag)

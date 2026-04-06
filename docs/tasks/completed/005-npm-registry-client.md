@@ -9,12 +9,12 @@ Implement the npm registry client that fetches package metadata from the npm reg
 
 ## Acceptance criteria
 
-- [ ] src/registry/npm.rs: `NpmRegistry` struct with configurable `base_url`
-- [ ] Implements `Registry` trait
-- [ ] Fetches from `{base_url}/{package_name}` endpoint
-- [ ] Parses npm JSON response into `PackageMetadata`
-- [ ] Extracts: name, latest version, publish time from `time` field, maintainers array
-- [ ] Handles 404 (NotFound), rate limiting, network errors
-- [ ] Base URL is configurable (not hardcoded)
-- [ ] Tests use wiremock with realistic npm JSON fixtures
-- [ ] All tests pass, clippy clean, fmt clean
+- [x] src/registry/npm.rs: `NpmRegistry` struct with configurable `base_url`
+- [x] Implements `Registry` trait
+- [x] Fetches from `{base_url}/{package_name}` endpoint
+- [x] Parses npm JSON response into `PackageMetadata`
+- [x] Extracts: name, latest version, publish time from `time` field, maintainers array
+- [x] Handles 404 (NotFound), rate limiting, network errors
+- [x] Base URL is configurable (not hardcoded)
+- [x] Tests use wiremock with realistic npm JSON fixtures
+- [x] All tests pass, clippy clean, fmt clean

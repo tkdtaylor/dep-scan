@@ -9,11 +9,11 @@ Parse lockfile formats to extract dependency lists, enabling `dep-scan check --l
 
 ## Acceptance criteria
 
-- [ ] src/lockfile.rs: parse package-lock.json, requirements.txt, Cargo.lock, go.sum
-- [ ] Auto-detect format from filename
-- [ ] --lockfile-type flag for override
-- [ ] --lockfile <path> flag on check subcommand
-- [ ] Combine --lockfile with explicit package names
-- [ ] Skip comments, flags, blank lines in requirements.txt
-- [ ] Handle malformed input gracefully with clear errors
-- [ ] All tests pass, clippy clean, fmt clean
+- [x] src/lockfile.rs: parse package-lock.json, requirements.txt, Cargo.lock, go.sum
+- [x] Auto-detect format from filename
+- [x] --lockfile-type flag for override
+- [x] --lockfile <path> flag on check subcommand
+- [x] Combine --lockfile with explicit package names
+- [x] Skip comments, flags, blank lines in requirements.txt
+- [x] Handle malformed input gracefully with clear errors
+- [x] All tests pass, clippy clean, fmt clean

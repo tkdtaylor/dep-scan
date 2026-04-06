@@ -9,12 +9,12 @@ Implement a local SQLite cache for storing scan results so already-scanned packa
 
 ## Acceptance criteria
 
-- [ ] src/cache.rs: `Cache` struct wrapping rusqlite Connection
-- [ ] Schema: `scanned_packages(name TEXT, version TEXT, registry TEXT, result TEXT, scanned_at TEXT, PRIMARY KEY(name, version, registry))`
-- [ ] `Cache::new(path)` creates/opens DB and auto-creates table
-- [ ] `lookup(name, version, registry)` returns cached result or None
-- [ ] `insert(name, version, registry, result)` upserts a cache entry
-- [ ] `invalidate(name, version, registry)` removes a cache entry
-- [ ] `clear()` removes all entries
-- [ ] Tests use in-memory SQLite (`:memory:`)
-- [ ] All tests pass, clippy clean, fmt clean
+- [x] src/cache.rs: `Cache` struct wrapping rusqlite Connection
+- [x] Schema: `scanned_packages(name TEXT, version TEXT, registry TEXT, result TEXT, scanned_at TEXT, PRIMARY KEY(name, version, registry))`
+- [x] `Cache::new(path)` creates/opens DB and auto-creates table
+- [x] `lookup(name, version, registry)` returns cached result or None
+- [x] `insert(name, version, registry, result)` upserts a cache entry
+- [x] `invalidate(name, version, registry)` removes a cache entry
+- [x] `clear()` removes all entries
+- [x] Tests use in-memory SQLite (`:memory:`)
+- [x] All tests pass, clippy clean, fmt clean

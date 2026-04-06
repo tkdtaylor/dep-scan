@@ -9,13 +9,13 @@ Initialize the Rust project with Cargo.toml containing all dependencies from ADR
 
 ## Acceptance criteria
 
-- [ ] Cargo.toml exists with all dependencies (clap, tokio, reqwest, serde, serde_json, rusqlite, toml, anyhow, thiserror, chrono)
-- [ ] Dev-dependencies: wiremock, assert_cmd, predicates, tempfile
-- [ ] src/main.rs compiles and runs
-- [ ] `cargo build` succeeds
-- [ ] `cargo test` succeeds (no tests yet, but no errors)
-- [ ] `cargo clippy` passes with no warnings
-- [ ] `cargo fmt --check` passes
+- [x] Cargo.toml exists with all dependencies (clap, tokio, reqwest, serde, serde_json, rusqlite, toml, anyhow, thiserror, chrono)
+- [x] Dev-dependencies: wiremock, assert_cmd, predicates, tempfile
+- [x] src/main.rs compiles and runs
+- [x] `cargo build` succeeds
+- [x] `cargo test` succeeds (no tests yet, but no errors)
+- [x] `cargo clippy` passes with no warnings
+- [x] `cargo fmt --check` passes
 
 ## Notes
 

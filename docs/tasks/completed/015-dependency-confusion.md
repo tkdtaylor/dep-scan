@@ -9,11 +9,11 @@ Warn when a public package name matches patterns typically used for internal/pri
 
 ## Acceptance criteria
 
-- [ ] src/policy/dependency_confusion.rs: `DependencyConfusionPolicy` implements `Policy`
-- [ ] Check package name against configurable internal namespace patterns
-- [ ] Default patterns: `internal-`, `private-`, `corp-`
-- [ ] Warn if match found
-- [ ] Config: `[dependency_confusion]` section with `internal_prefixes` list
-- [ ] Pure string matching, no external data needed
-- [ ] Tests: matching names, non-matching, custom prefixes
-- [ ] All tests pass, clippy clean, fmt clean
+- [x] src/policy/dependency_confusion.rs: `DependencyConfusionPolicy` implements `Policy`
+- [x] Check package name against configurable internal namespace patterns
+- [x] Default patterns: `internal-`, `private-`, `corp-`
+- [x] Warn if match found
+- [x] Config: `[dependency_confusion]` section with `internal_prefixes` list
+- [x] Pure string matching, no external data needed
+- [x] Tests: matching names, non-matching, custom prefixes
+- [x] All tests pass, clippy clean, fmt clean
