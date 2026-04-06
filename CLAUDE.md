@@ -133,13 +133,6 @@ These are excuses agents use to skip steps. Don't fall for them.
 
 ### Skills
 - **code-scanner** — scan third-party dependencies and packages for malicious code before integrating them. Directly relevant since dep-scan is a security tool that should eat its own dog food. Trigger: "scan this package for vulnerabilities"
-- **reverse-engineer** — analyze suspicious binaries or compiled packages in a sandboxed Ghidra container. Useful for investigating flagged dependencies. Trigger: "reverse engineer this binary"
-
-### MCP servers
-- **github** — read/write PRs, issues, and code search without leaving Claude. Install: `claude mcp add github -e GITHUB_TOKEN=<token> npx @modelcontextprotocol/server-github`
-- **fetch** — pull registry API docs, OSV specs, and package metadata pages on demand. Install: `claude mcp add fetch npx @modelcontextprotocol/server-fetch`
-
-### Skills (additional)
 - **simplify** — review changed code for over-engineering, dead code, and reuse opportunities after heavy implementation sprints. Trigger: "simplify this" or "review these changes"
 
 ### Hooks
