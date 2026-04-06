@@ -165,7 +165,8 @@ This gives you a `.dep-scan.toml` you can check into your repo so the whole team
 # Before running your package manager, check what you're about to add
 dep-scan check express body-parser cors --registry npm
 dep-scan check requests flask sqlalchemy --registry pypi
-dep-scan check serde tokio clap --registry crates          dep-scan check github.com/gorilla/mux --registry go        
+dep-scan check serde tokio clap --registry crates
+dep-scan check github.com/gorilla/mux --registry go
 # Or just use the wrappers — they scan automatically
 npmds install express body-parser cors
 pipds install requests flask sqlalchemy
@@ -195,7 +196,8 @@ dep-scan provides drop-in wrapper commands that scan every package before instal
 # These work exactly like the real commands, but scan before installing
 npmds install express body-parser cors
 pipds install requests flask sqlalchemy
-cargods add serde tokio          gods get github.com/some/module  
+cargods add serde tokio
+gods get github.com/some/module
 # All other subcommands pass through unchanged
 npmds test
 pipds list
@@ -385,7 +387,8 @@ If you want to make `npmds`/`pipds` the **only** way to install packages on a sy
 # Redirect all package managers to their dep-scan wrappers
 alias npm='npmds'
 alias pip='pipds'
-alias cargo='cargods'   alias go='gods'         
+alias cargo='cargods'
+alias go='gods'         
 # To bypass: use the full path or unset the alias
 #   /usr/bin/npm install something
 #   unalias npm && npm install something

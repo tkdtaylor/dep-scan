@@ -35,6 +35,10 @@
 | 022 | Popularity policy + v0.3 integration tests | 022-popularity-integration-test-spec.md | 11/11 | Done |
 | 023 | Lockfile parser | 023-lockfile-parser-test-spec.md | 32/32 | Done |
 | 024 | Install subcommand | 024-install-subcommand-test-spec.md | 6/6 | Done |
+| 025 | GitHub Actions CI workflow | 025-ci-workflow-test-spec.md | ✅ | Done |
+| 026 | GitHub Actions release workflow | 026-release-workflow-test-spec.md | ✅ | Done |
+| 027 | Install script | 027-install-script-test-spec.md | ✅ | Done |
+| 028 | v1.0 polish and release | 028-v1-polish-test-spec.md | ✅ | Done |
 
 ## Status key
 

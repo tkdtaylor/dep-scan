@@ -4,6 +4,10 @@ version = "1.0.0"
 edition = "2024"
 description = "A cross-platform CLI tool that scans dependencies for supply chain attacks before installation"
 license = "MIT"
+repository = "https://github.com/tkdtaylor/dep-scan"
+homepage = "https://github.com/tkdtaylor/dep-scan"
+keywords = ["security", "supply-chain", "dependency-scanning", "npm", "pypi"]
+categories = ["command-line-utilities", "development-tools"]
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
