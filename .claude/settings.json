@@ -1,6 +1,13 @@
 {
   "permissions": {
-    "allow": ["Bash(*)", "Read", "Write", "Edit", "Glob", "Grep"],
+    "allow": [
+      "Bash(*)",
+      "Read",
+      "Write",
+      "Edit",
+      "Glob",
+      "Grep"
+    ],
     "ask": [
       "Bash(sudo:*)",
       "Bash(rm -rf:*)",
@@ -19,6 +26,21 @@
           {
             "type": "command",
             "command": "python3 \"${CLAUDE_PROJECT_DIR:-.}\"/.claude/scripts/protect-secrets.py",
+            "timeout": 5
+          }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PROJECT_DIR:-.}\"/.claude/scripts/block-no-verify.py",
+            "timeout": 5
+          },
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PROJECT_DIR:-.}\"/.claude/scripts/protect-checkout.py",
             "timeout": 5
           }
         ]
