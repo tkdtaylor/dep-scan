@@ -8,8 +8,16 @@ Adapted from dixus/claudeframework.
 """
 
 import json
+import os
 import re
 import sys
+
+sys.dont_write_bytecode = True  # Don't litter .claude/scripts/ with __pycache__/
+
+sys.path.insert(0, os.path.dirname(__file__))
+from _hook_utils import check_gate
+
+check_gate(__file__, "minimal")
 
 # Files that should never be written by an AI agent inside a project.
 # .env is intentionally NOT blocked — it's gitignored and needs to be

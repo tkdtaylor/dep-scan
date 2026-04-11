@@ -19,6 +19,8 @@ Inspired by run-with-flags.js from everything-claude-code.
 import os
 import sys
 
+sys.dont_write_bytecode = True  # Don't litter .claude/scripts/ with __pycache__/
+
 PROFILES = {
     "minimal": 0,
     "standard": 1,

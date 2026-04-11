@@ -11,7 +11,14 @@ Adapted from dixus/claudeframework.
 import json
 import os
 import sys
+
+sys.dont_write_bytecode = True  # Don't litter .claude/scripts/ with __pycache__/
 from pathlib import Path
+
+sys.path.insert(0, os.path.dirname(__file__))
+from _hook_utils import check_gate
+
+check_gate(__file__, "standard")
 
 
 def main():

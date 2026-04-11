@@ -13,6 +13,16 @@ task-based workflow. When Claude exits plan mode, this script:
 Only activates in create-project structured projects (detected via docs/tasks/).
 """
 
+import os
+import sys
+
+sys.dont_write_bytecode = True  # Don't litter .claude/scripts/ with __pycache__/
+
+sys.path.insert(0, os.path.dirname(__file__))
+from _hook_utils import check_gate
+
+check_gate(__file__, "standard")
+
 import json
 import os
 import re
