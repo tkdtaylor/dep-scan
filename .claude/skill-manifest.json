@@ -25,7 +25,7 @@
       },
       ".claude/agents/qa.md": {
         "template": "assets/templates/tech/.claude/agents/qa.md",
-        "installed_hash": "de97e7baa5e4c1f0a2edd72a21daa46a995b47496c275a137b2f08f57caf7676",
+        "installed_hash": "8371c777e11217d6e7455348eb79f71a0c1c34c3bc4db8b6fa80e665cac25ce2",
         "template_hash": "06279d83623af5a03bec945de5ab3da15ceb77d17647b854875c3c7c1747edd9"
       },
       ".claude/agents/security-auditor.md": {
@@ -40,12 +40,12 @@
       },
       ".claude/agents/task-executor.md": {
         "template": "assets/templates/tech/.claude/agents/task-executor.md",
-        "installed_hash": "74184984f13306c843d632d54b9d84c8b269ed947dfbed9a3f23b671f2098a83",
+        "installed_hash": "dff2e4b4b567a8b9b32e49824cba2732d12248070cbabf9c9974eb3c17a7d5bf",
         "template_hash": "e29eb5f9151f73af69515c39b18e0a31c70cd0b0ab1193ffff8e6176086d898a"
       },
       ".claude/agents/task-planner.md": {
         "template": "assets/templates/tech/.claude/agents/task-planner.md",
-        "installed_hash": "92cae543efa4d1aa67038b52a725cea8c3792964766d44106360eb83391f00d7",
+        "installed_hash": "6a188904d5eacedad7d58ccc18bb36ae55b25c91860ab7265272ab71370e2439",
         "template_hash": "504f15e11e6f149ef54dcf53d2776def35fb97377bde874d879435c436b0ca13"
       },
       ".claude/scripts/_hook_utils.py": {
@@ -130,7 +130,7 @@
       },
       ".claude/scripts/spec-coverage-check.py": {
         "template": "assets/templates/tech/.claude/scripts/spec-coverage-check.py",
-        "installed_hash": "f24683221fd1347335198aaa273b2b852ebd8a949f1c2b324d89a72d3e16febd",
+        "installed_hash": "da8fc8c12960413fbd2fadeddac19e017240c0c34b26da1c2dc46b2203cd1cbd",
         "template_hash": "f24683221fd1347335198aaa273b2b852ebd8a949f1c2b324d89a72d3e16febd"
       },
       ".claude/scripts/strategic-compact.py": {

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """PreToolUse hook for Bash — block `git commit` when the active task's
-test spec has TC-NNN-XX assertions that don't appear in any test file.
+test spec has T-NNN-XX (or TC-NNN-XX) assertions that don't appear in any
+test file.
 
 This is the cheap, mechanical version of spec-adherence checking. It catches
 the "smoke test where spec asks for assertion" failure mode (see
@@ -30,9 +31,9 @@ from _hook_utils import check_gate
 
 check_gate(__file__, "standard")
 
-# TC marker patterns we recognize in test specs.
-# Examples: TC-001, TC-369-01, TC-369-A1
-TC_MARKER_RE = re.compile(r"\bTC-\d+(?:-[A-Za-z0-9]+)?\b")
+# Test-case marker patterns we recognize in test specs.
+# Examples: TC-001, TC-369-01, TC-369-A1, T-005-01, T-005-A1
+TC_MARKER_RE = re.compile(r"\b(?:TC|T)-\d+(?:-[A-Za-z0-9]+)?\b")
 
 # Task file naming: NNN-slug.md (zero-padded sequential ID)
 TASK_NAME_RE = re.compile(r"^(\d{3,})-")

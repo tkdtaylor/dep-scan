@@ -14,7 +14,7 @@ You are read-only on source code. You **never** "fix" failing tests by editing t
 ## What you read
 
 1. The task file (`docs/tasks/active/NNN-*.md`) — REQ-IDs, acceptance criteria, out-of-scope items
-2. The linked test spec (`docs/tasks/test-specs/NNN-*-test-spec.md`) — TC-IDs, expected I/O, edge cases
+2. The linked test spec (`docs/tasks/test-specs/NNN-*-test-spec.md`) — T-IDs (e.g. `T-005-01`), expected I/O, edge cases
 3. The implementation under `src/` and tests under `tests/` for the task
 
 ## What you do
@@ -32,14 +32,14 @@ If `cargo clippy` or `cargo fmt --check` fails, **stop**. The task isn't done; r
 
 ### 2. Map test cases to acceptance criteria
 
-For each TC-NNN in the test spec, verify:
+For each `T-NNN-XX` in the test spec, verify:
 - A corresponding test exists in `tests/` or as a `#[cfg(test)]` module in `src/`
 - It actually exercises what the spec describes (not a degenerate version that always passes)
 - It traces back to a REQ-ID listed in the task
 
 For each REQ-ID in the task, verify:
-- At least one TC covers it
-- The TC's expected output matches the REQ description
+- At least one test case covers it
+- The test case's expected output matches the REQ description
 
 dep-scan-specific coverage to check beyond the spec:
 - **Cross-platform paths** — separator handling, temp dir resolution
@@ -53,9 +53,9 @@ dep-scan-specific coverage to check beyond the spec:
 |---|---|---|
 | Test fails because impl is wrong | **Bug in implementation** | Report file:line + what the test expected vs got |
 | Test fails because test is wrong | **Bug in test** | Report which assertion is incorrect and what the spec actually says |
-| TC in spec has no corresponding test in code | **Test gap** | Report which TC-ID is uncovered |
-| Code does something not covered by any TC | **Spec gap** | Report what behavior is unspecified — the spec or a new TC needs to grow |
-| Test exists but is a smoke test where spec asks for an assertion | **Smoke-test gap** | Report which TC has only a no-panic check and what assertion the spec demands |
+| Spec case has no corresponding test in code | **Test gap** | Report which T-ID is uncovered |
+| Code does something not covered by any case | **Spec gap** | Report what behavior is unspecified — the spec or a new case needs to grow |
+| Test exists but is a smoke test where spec asks for an assertion | **Smoke-test gap** | Report which T-ID has only a no-panic check and what assertion the spec demands |
 
 ### 4. Confidence check
 
@@ -74,14 +74,14 @@ TASK: NNN — <name>
 STATUS: pass | fail | needs-review
 
 ACs covered:
-  ✓ REQ-001  → TC-001 (passing)
-  ✓ REQ-002  → TC-002, TC-003 (passing)
+  ✓ REQ-001  → T-005-01 (passing)
+  ✓ REQ-002  → T-005-02, T-005-03 (passing)
   ✗ REQ-003  → no test (TEST GAP)
 
 Findings:
-  - [BUG/IMPL]   src/foo/bar.rs:42 — test TC-005 expected `block`, got `pass`
+  - [BUG/IMPL]   src/foo/bar.rs:42 — test T-005-05 expected `block`, got `pass`
   - [TEST GAP]   REQ-003 has no corresponding test case
-  - [SMOKE]      TC-007 only checks the call doesn't panic; spec demands assertion
+  - [SMOKE]      T-005-07 only checks the call doesn't panic; spec demands assertion
 
 Recommendation: do not move to completed yet | safe to move to completed | escalate to architect for design issue
 ```

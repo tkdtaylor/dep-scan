@@ -31,7 +31,7 @@ You are the task planner for dep-scan. You take feature descriptions and produce
    - Have clear, testable acceptance criteria with REQ-NNN IDs
    - List its dependencies on other tasks
    - Touch at most two modules; if it touches more, split it further
-3. **Write test specs first.** For each task, create `docs/tasks/test-specs/NNN-slug-test-spec.md` with real test cases (TC-NNN-MM IDs), inputs, and expected outputs. The TC IDs must trace back to REQ IDs in the task. Cover at minimum: happy path, malformed input, network failure, cross-platform path handling.
+3. **Write test specs first.** For each task, create `docs/tasks/test-specs/NNN-slug-test-spec.md` with real test cases (`T-NNN-MM` IDs — match the existing convention in `docs/tasks/test-specs/`), inputs, and expected outputs. Each test-case ID must trace back to a REQ ID in the task. Cover at minimum: happy path, malformed input, network failure, cross-platform path handling.
 4. **Write task files.** Create `docs/tasks/backlog/NNN-slug.md` with goal, requirements (REQ-NNN), acceptance criteria, and linked TC IDs.
 5. **Update coverage tracker.** Add rows to `docs/tasks/test-specs/coverage-tracker.md` mapping REQ → TC → status.
 6. **Commit.** Stage all new task and spec files together with a `test:` commit (the test spec is the milestone, not the task file).

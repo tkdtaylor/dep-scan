@@ -40,15 +40,17 @@ dep-scan check express --registry npm --json
 
 ## What it detects
 
-dep-scan runs **6 security policies** against every package:
+dep-scan runs **8 security policies** against every package:
 
 | Policy | What it catches | Default |
 |--------|----------------|---------|
 | **Age** | Packages published less than 48 hours ago | Block |
 | **Install scripts** | Malicious `postinstall`/`preinstall` scripts (eval, child_process, subprocess) | Block |
+| **Obfuscation** | Heavily encoded or unreadable install scripts (base64 blobs, hex strings, eval-of-string) | Block |
 | **Typosquatting** | Names suspiciously similar to popular packages (e.g. `expresss` vs `express`) | Warn/Block |
 | **Vulnerability** | Known CVEs via [OSV.dev](https://osv.dev) (free, no API key) | Block |
 | **Maintainer change** | Added/removed maintainers since last scan; full takeover detection | Warn/Block |
+| **Popularity** | Packages with very low download counts (configurable threshold) | Warn |
 | **Dependency confusion** | Internal-looking package names on public registries | Warn |
 
 ## Exit codes
@@ -68,7 +70,7 @@ dep-scan config init    # creates .dep-scan.toml in current directory
 dep-scan config show    # prints effective configuration
 ```
 
-Example `.dep-scan.toml`:
+Example `.dep-scan.toml` (matches `dep-scan config init` output):
 
 ```toml
 min_package_age_hours = 48
@@ -76,19 +78,25 @@ min_package_age_hours = 48
 [registries]
 npm_url = "https://registry.npmjs.org"
 pypi_url = "https://pypi.org"
+crates_url = "https://crates.io"
+go_proxy_url = "https://proxy.golang.org"
 
 [policies]
-check_min_age = true
-check_install_scripts = true
-check_maintainer_changes = true
 check_typosquatting = true
+check_install_scripts = true
+check_min_age = true
+check_maintainer_changes = true
 check_vulnerabilities = true
+check_obfuscation = true
 
 [osv]
 osv_url = "https://api.osv.dev"
 
 [dependency_confusion]
 internal_prefixes = ["internal-", "private-", "corp-"]
+
+[popularity]
+min_downloads = 1000
 ```
 
 All settings can be overridden via environment variables:
@@ -98,6 +106,8 @@ All settings can be overridden via environment variables:
 | `DEP_SCAN_MIN_AGE` | `min_package_age_hours` |
 | `DEP_SCAN_NPM_URL` | `registries.npm_url` |
 | `DEP_SCAN_PYPI_URL` | `registries.pypi_url` |
+| `DEP_SCAN_CRATES_URL` | `registries.crates_url` |
+| `DEP_SCAN_GO_PROXY_URL` | `registries.go_proxy_url` |
 | `DEP_SCAN_OSV_URL` | `osv.osv_url` |
 | `DEP_SCAN_CACHE_PATH` | `cache_path` |
 
@@ -116,19 +126,23 @@ All settings can be overridden via environment variables:
 $ dep-scan check expresss internal-utils --registry npm
 
 Package              Version      Age        Result
-expresss             0.0.0        84401h     WARN: Package 'expresss' is similar to popular package 'express' (distance: 0.12)
+expresss             0.0.0        85259h     WARN: Package 'expresss' is similar to popular package 'express' (distance: 0.12)
   age: pass
   install_scripts: pass
+  obfuscation: pass
   maintainer_change: pass
   typosquatting: WARN — Package 'expresss' is similar to popular package 'express' (distance: 0.12)
   vulnerability: pass
+  popularity: pass
   dependency_confusion: pass
-internal-utils       0.1.0        891h       WARN: Package 'internal-utils' matches internal namespace pattern 'internal-' — possible dependency confusion
+internal-utils       0.1.0        1749h      WARN: Package 'internal-utils' matches internal namespace pattern 'internal-' — possible dependency confusion
   age: pass
   install_scripts: pass
+  obfuscation: pass
   maintainer_change: pass
   typosquatting: pass
   vulnerability: pass
+  popularity: pass
   dependency_confusion: WARN — Package 'internal-utils' matches internal namespace pattern 'internal-' — possible dependency confusion
 ```
 
@@ -139,7 +153,7 @@ The easiest way to use dep-scan is to add it at the start of a project, before a
 ### 1. Install dep-scan
 
 ```bash
-# Build from source (Rust 1.75+ required)
+# Build from source (Rust 1.85+ required — uses 2024 edition)
 git clone https://github.com/tkdtaylor/dep-scan.git
 cd dep-scan
 cargo build --release
@@ -178,6 +192,27 @@ dep-scan check $(cat requirements.txt | grep -v '^#') --registry pypi --json
 ### 4. Ongoing use
 
 Run `dep-scan check` any time you add a new dependency. The local SQLite cache means repeat checks are instant — only new or changed packages hit the registry.
+
+---
+
+## Installing packages with dep-scan
+
+For one-off installs, the built-in `dep-scan install` subcommand scans first and then invokes the underlying package manager only if every policy passes:
+
+```bash
+# Scan, then install if clean
+dep-scan install express body-parser cors --registry npm
+dep-scan install requests flask sqlalchemy --registry pypi
+dep-scan install serde tokio clap --registry crates
+dep-scan install github.com/gorilla/mux --registry go
+
+# Override a block (e.g. for an internal package you've vetted)
+dep-scan install internal-utils --registry npm --force
+```
+
+`--registry` accepts `npm`, `pypi`, `crates`, or `go`. `--force` proceeds with the install even when policies block — use it sparingly. Without `--force`, a policy violation aborts before the package manager runs.
+
+For ongoing use across an existing workflow, the wrappers below are better — they intercept your normal `npm install` / `pip install` / `cargo add` / `go get` calls without changing your habits.
 
 ---
 
@@ -439,6 +474,8 @@ alias go='gods'
 
 ```yaml
 # GitHub Actions example
+- uses: actions/checkout@v4
+
 - name: Install dep-scan
   run: cargo install --path .  # or download pre-built binary
 
@@ -473,7 +510,7 @@ DEP_SCAN_SKIP=1 gods get something
 
 ## Building from source
 
-Requires Rust 1.75+ (uses native async traits).
+Requires Rust 1.85+ (the crate uses the 2024 edition).
 
 ```bash
 git clone https://github.com/tkdtaylor/dep-scan.git

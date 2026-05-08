@@ -30,6 +30,10 @@ cargo clippy            # lint
 cargo fmt --check       # check formatting
 cargo fmt               # auto-format
 
+# Repo-state guards (idempotent, exit 0 on clean state)
+scripts/check-task-state.sh           # fail if a task file is tracked in two of {backlog, active, completed}
+scripts/verify-worktree-isolation.sh  # check parallel sub-agents aren't sharing a worktree (run before/after parallel agent dispatches that write code)
+
 # Docker (run from host, outside the container)
 docker run --rm -it \
   -v dep-scan-workspace:/app \
@@ -141,6 +145,10 @@ These are excuses agents use to skip steps. Don't fall for them.
 ### Agents
 - **architect** — review designs, CLI structure, and data flow against the architecture. Invoke: "use the architect agent to review this design"
 - **task-planner** — break features into scoped tasks with test specs. Invoke: "use the task-planner to break down [feature]"
-- **qa** — verify implementations against test specs, find coverage gaps. Invoke: "use the qa agent on task NNN"
-- **security-auditor** — audit dep-scan's own code for injection, TOCTOU, and bypass risks. Critical since this is a security tool handling adversarial input. Invoke: "use the security-auditor on [module]"
+- **task-executor** — execute a single task end-to-end (read spec, implement, test, commit). Ephemeral context. Invoke: `use task-executor — task: docs/tasks/backlog/NNN-name.md, spec: docs/tasks/test-specs/NNN-name-test-spec.md`
+- **qa** — verify implementations against test specs, find coverage gaps. Read-only on source. Invoke: "use the qa agent on task NNN"
+- **spec-verifier** — assertion-by-assertion check that the implementation matches the spec; last gate before commit. Complements qa. Invoke: "use the spec-verifier on task NNN"
+- **code-reviewer** — review changed files against architecture, conventions, and the test spec before commit. Invoke: "use the code-reviewer on these changes"
+- **security-auditor** — audit dep-scan's own code for injection, TOCTOU, regex DoS, and bypass risks. Critical since this is a security tool handling adversarial input. Invoke: "use the security-auditor on [module]"
+- **dependency-auditor** — audit `Cargo.toml`/`Cargo.lock` for outdated, CVE-flagged, abandoned, or unused crates. dep-scan eating its own dog food. Invoke: "use the dependency-auditor"
 - **docs-writer** — generate or update README sections, CLI help text, docstrings, and changelog entries from actual source code. Invoke: "use the docs-writer to document [module or feature]"

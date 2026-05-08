@@ -62,9 +62,9 @@ Before writing the commit, run all three checks below from a fresh shell. Captur
 1. `cargo test` → final summary line (`test result: ok. N passed; M failed; ...`)
 2. `cargo clippy --all-targets --all-features -- -D warnings` → exit code 0 (no warnings escalated to errors)
 3. `cargo fmt --check` → exit code 0 (no formatting drift)
-4. Spec-marker grep — every TC marker in the spec must be referenced by a real assertion in tests, not just a smoke call:
+4. Spec-marker grep — every `T-NNN-XX` marker in the spec must be referenced by a real assertion in tests, not just a smoke call:
    ```bash
-   for marker in $(grep -oE "TC-[0-9]+(-[A-Za-z0-9]+)?" docs/tasks/test-specs/<NNN>-*.md | sort -u); do
+   for marker in $(grep -oE "T-[0-9]+-[0-9]+" docs/tasks/test-specs/<NNN>-*.md | sort -u); do
      if ! grep -rq "$marker" tests/ src/; then echo "MISSING: $marker"; fi
    done
    ```
