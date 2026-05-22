@@ -93,6 +93,7 @@
 | 075 | Add `examples/` directory | 075-examples-directory-test-spec.md | 0/13 | ❌ |
 | 076 | Add `CONTRIBUTING.md` | 076-contributing-md-test-spec.md | 0/10 | ❌ |
 | 077 | Add `CODE_OF_CONDUCT.md` (Contributor Covenant 2.1) | 077-code-of-conduct-test-spec.md | 0/8 | ❌ |
+| 078 | Lockfile scanner uses pinned versions, not registry "latest" | 078-lockfile-pinned-version-propagation-test-spec.md | 0/18 | ❌ |
 
 ## Status key
 
