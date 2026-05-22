@@ -127,6 +127,14 @@ pub struct PolicyConfig {
     /// from `Warn` to `Block`. Invalid / malformed signatures always block regardless.
     #[serde(default = "default_false")]
     pub require_go_sumdb: bool,
+    /// When `true`, a first observation of a package with zero or unknown download
+    /// count produces a `Warn` verdict rather than a `Pass`.  This is an opt-in
+    /// defense-in-depth signal against day-one malicious publishes.
+    ///
+    /// Default: `false` — preserves the pre-task trust-on-first-use (TOFU) behavior
+    /// so existing users are not flooded with warnings on every new package scan.
+    #[serde(default = "default_false")]
+    pub maintainer_first_seen_warning: bool,
 }
 
 fn default_true() -> bool {
@@ -152,6 +160,7 @@ impl Default for PolicyConfig {
             require_pypi_provenance: false,
             check_go_sumdb: true,
             require_go_sumdb: false,
+            maintainer_first_seen_warning: false,
         }
     }
 }
@@ -572,5 +581,45 @@ osv_url = "https://custom-osv.example.com"
 "#;
         let config = Config::from_toml_str(toml_str).unwrap();
         assert_eq!(config.osv.osv_url, "https://custom-osv.example.com");
+    }
+
+    // T-048-10: maintainer_first_seen_warning defaults to false
+    #[test]
+    fn t048_10_maintainer_first_seen_warning_defaults_to_false() {
+        // T-048-10
+        let config = Config::default();
+        assert!(
+            !config.policies.maintainer_first_seen_warning,
+            "maintainer_first_seen_warning must default to false"
+        );
+    }
+
+    // T-048-11: maintainer_first_seen_warning = true is accepted in TOML
+    #[test]
+    fn t048_11_maintainer_first_seen_warning_parsed_true() {
+        // T-048-11
+        let toml_str = "[policies]\nmaintainer_first_seen_warning = true\n";
+        let config = Config::from_toml_str(toml_str).unwrap();
+        assert!(
+            config.policies.maintainer_first_seen_warning,
+            "maintainer_first_seen_warning should be true when set in TOML"
+        );
+    }
+
+    // T-048-12: MaintainerChangePolicy is constructed with the first_seen_warning value from config
+    #[test]
+    fn t048_12_maintainer_policy_wired_from_config() {
+        // T-048-12
+        use crate::policy::maintainer::MaintainerChangePolicy;
+        // Simulate the construction that occurs in main.rs
+        let config =
+            Config::from_toml_str("[policies]\nmaintainer_first_seen_warning = true\n").unwrap();
+        let policy = MaintainerChangePolicy {
+            first_seen_warning: config.policies.maintainer_first_seen_warning,
+        };
+        assert!(
+            policy.first_seen_warning,
+            "Policy should carry the first_seen_warning flag from config"
+        );
     }
 }

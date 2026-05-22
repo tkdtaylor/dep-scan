@@ -294,7 +294,9 @@ async fn run_check(
         policies.push(Box::new(ObfuscationPolicy));
     }
     if config.policies.check_maintainer_changes {
-        policies.push(Box::new(MaintainerChangePolicy));
+        policies.push(Box::new(MaintainerChangePolicy {
+            first_seen_warning: config.policies.maintainer_first_seen_warning,
+        }));
     }
     if config.policies.check_typosquatting {
         policies.push(Box::new(TyposquattingPolicy::with_defaults()));
