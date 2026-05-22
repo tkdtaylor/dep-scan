@@ -63,7 +63,7 @@
 | 046 | verify_hash algorithm-prefix case normalization | 046-verify-hash-case-normalization-test-spec.md | 16/16 | ✅ |
 | 047 | Cache I/O error surfacing | 047-cache-io-error-surfacing-test-spec.md | 12/12 | ✅ |
 | 048 | Maintainer policy trust-on-first-use warning | 048-maintainer-first-seen-warning-test-spec.md | 14/14 | ✅ |
-| 049 | PyPI Simple Index strict content-type enforcement | 049-pypi-simple-index-content-type-test-spec.md | 11/11 | ✅ |
+| 049 | PyPI Simple Index strict content-type enforcement | 049-pypi-simple-index-content-type-test-spec.md | 16/16 | ✅ |
 | 050 | parse_tlog_entries missing-field diagnostics | 050-tlog-entry-missing-field-diagnostics-test-spec.md | 17/17 | ✅ |
 
 | 051 | Install-script false-positive reduction (L-3 + L-4) | 051-install-script-false-positive-reduction-test-spec.md | 19/19 | ✅ |
