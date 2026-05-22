@@ -80,7 +80,7 @@
 | 062 | Single-parse refactor for verify_rekor_checkpoint_impl (N-L-4) | 062-single-parse-rekor-checkpoint-test-spec.md | 16/16 | ✅ |
 | 063 | Reject empty note_text in signed_note::parse (N-L-5) | 063-signed-note-empty-text-rejection-test-spec.md | 13/13 | ✅ |
 | 064 | Add `cargo audit` step to CI | 064-cargo-audit-in-ci-test-spec.md | 8/8 | ✅ |
-| 065 | Multi-OS test matrix in CI | 065-multi-os-ci-matrix-test-spec.md | 0/8 | ❌ |
+| 065 | Multi-OS test matrix in CI | 065-multi-os-ci-matrix-test-spec.md | 8/8 | ✅ |
 | 066 | Pin MSRV (1.88) in CI test job | 066-msrv-pin-in-ci-test-spec.md | 0/8 | ❌ |
 | 067 | Dog-food — dep-scan scans its own `Cargo.lock` in CI | 067-dogfood-own-cargo-lock-test-spec.md | 0/10 | ❌ |
 | 068 | Sign release artifacts with cosign / sigstore | 068-sign-releases-with-cosign-test-spec.md | 0/10 | ❌ |

@@ -1,6 +1,6 @@
 # Task 065 — Multi-OS test matrix in CI
 
-**Status:** backlog
+**Status:** completed
 **Depends on:** none
 **Source:** post-v1.2.0 holistic review (Tier A #3)
 **Touches:** `.github/workflows/ci.yml`
