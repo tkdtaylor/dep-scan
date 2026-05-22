@@ -80,11 +80,13 @@ These limits are documented so callers don't over-trust the feature.
 | 1 | 029 — Capture content hash in cache | Schema column, registry-client digest extraction, cache write path |
 | 2 | 030 — Verify content hash on cache hit | Read path, mismatch handling, re-scan trigger, fail-closed semantics |
 | 3 | 031 — Close TOCTOU window for pip via `--require-hashes` | Pass verified hash through to pip install via a synthetic requirements file |
-| 4 | 032 — npm provenance attestation verification | Out-of-band trust root for npm via sigstore |
+| 4 | 032 — npm provenance attestation verification | Out-of-band trust root for npm via sigstore (partial Fulcio chain — hardened by 035) |
 | 5 | 033 — PyPI sigstore attestation verification (PEP 740) | Out-of-band trust root for PyPI via sigstore (reuses 032's verification helper) |
-| 6 | 034 — Go checksum database cross-check | Out-of-band trust root for Go via the sumdb transparency log |
-| 7 | (waiting on upstream) 035 — crates.io provenance | Sigstore integration on crates.io's roadmap but not GA as of 2026-05 |
-| 8 | (deferred) `--paranoid` byte-level verification | Download artifact, hash locally — defense in depth against metadata/bytes inconsistency (not a lying-registry fix) |
+| 6 | 034 — Go checksum database signature verification | Out-of-band trust root for Go via Ed25519-signed sumdb tree head |
+| 7 | 035 — Full Fulcio root chain verification | Replaces structural Fulcio OID check with real cryptographic chain walk against embedded Fulcio roots; closes the "forge a Fulcio-OID cert" gap left open by 032/033 |
+| 8 | 036 — Rekor inclusion proof verification | Verifies the signing event was committed to Rekor and `integratedTime` falls inside the leaf cert's validity window; closes the "replay an expired Fulcio cert" gap. Together with 035, delivers full sigstore semantics |
+| 9 | (waiting on upstream) 037 — crates.io provenance | Sigstore integration on crates.io's roadmap but not GA as of 2026-05 |
+| 10 | (deferred) `--paranoid` byte-level verification | Download artifact, hash locally — defense in depth against metadata/bytes inconsistency (not a lying-registry fix) |
 
 ## Consequences
 
