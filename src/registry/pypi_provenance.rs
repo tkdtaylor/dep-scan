@@ -409,13 +409,24 @@ impl PyPiProvenanceClient {
             .await
             .map_err(|e| RegistryError::NetworkError(e.to_string()))?;
 
-        // If the server returned HTML (not JSON v1), treat as "legacy mirror" —
-        // return Ok(None) so the caller can degrade to a Warn.
-        if !content_type.contains("application/vnd.pypi.simple.v1+json") {
-            // Try parsing as JSON anyway (some mirrors send JSON without the strict content-type).
-            if serde_json::from_slice::<serde_json::Value>(&body).is_err() {
-                return Ok(None); // HTML or non-JSON → legacy mirror
-            }
+        // Strict content-type enforcement (REQ-049-02, REQ-049-03):
+        // Only accept responses that explicitly advertise the PEP 691 JSON v1
+        // media type.  A missing or wrong content-type (including generic
+        // `application/json` or an HTML type) is treated as a legacy mirror.
+        //
+        // Security rationale: a hostile mirror or a compromised CDN terminator
+        // that strips the content-type header can serve a crafted JSON payload
+        // that passes a lenient parse check.  Accepting such responses would
+        // allow an attacker to inject an attacker-controlled file list.  The
+        // `starts_with` check allows an optional `; charset=utf-8` suffix while
+        // still requiring the exact PEP 691 type prefix.
+        //
+        // NOTE: The previous JSON-fallback path
+        //   `if serde_json::from_slice::<serde_json::Value>(&body).is_err() { return Ok(None); }`
+        // has been intentionally removed.  That path accepted correctly-shaped
+        // JSON regardless of content-type, enabling the attack described above.
+        if !content_type.starts_with("application/vnd.pypi.simple.v1+json") {
+            return Ok(None); // Wrong or missing content-type → treat as legacy mirror
         }
 
         parse_simple_index(&body).map(Some)
@@ -814,11 +825,10 @@ mod tests {
         Mock::given(method("GET"))
             .and(path("/simple/requests/"))
             .and(AcceptsJsonV1)
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .insert_header("content-type", "application/vnd.pypi.simple.v1+json")
-                    .set_body_string(simple_index_without_provenance()),
-            )
+            .respond_with(ResponseTemplate::new(200).set_body_raw(
+                simple_index_without_provenance().as_bytes(),
+                "application/vnd.pypi.simple.v1+json",
+            ))
             .expect(1)
             .mount(&server)
             .await;
@@ -853,11 +863,10 @@ mod tests {
 
         Mock::given(method("GET"))
             .and(path("/simple/requests/"))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .insert_header("content-type", "application/vnd.pypi.simple.v1+json")
-                    .set_body_string(simple_index_with_provenance(&provenance_url)),
-            )
+            .respond_with(ResponseTemplate::new(200).set_body_raw(
+                simple_index_with_provenance(&provenance_url).as_bytes(),
+                "application/vnd.pypi.simple.v1+json",
+            ))
             .mount(&server)
             .await;
 
@@ -895,11 +904,10 @@ mod tests {
 
         Mock::given(method("GET"))
             .and(path("/simple/requests/"))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .insert_header("content-type", "application/vnd.pypi.simple.v1+json")
-                    .set_body_string(simple_index_without_provenance()),
-            )
+            .respond_with(ResponseTemplate::new(200).set_body_raw(
+                simple_index_without_provenance().as_bytes(),
+                "application/vnd.pypi.simple.v1+json",
+            ))
             .mount(&server)
             .await;
 
@@ -962,11 +970,10 @@ mod tests {
 
         Mock::given(method("GET"))
             .and(path("/simple/requests/"))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .insert_header("content-type", "application/vnd.pypi.simple.v1+json")
-                    .set_body_string(simple_index_with_provenance(&provenance_url)),
-            )
+            .respond_with(ResponseTemplate::new(200).set_body_raw(
+                simple_index_with_provenance(&provenance_url).as_bytes(),
+                "application/vnd.pypi.simple.v1+json",
+            ))
             .mount(&server)
             .await;
 
@@ -991,11 +998,10 @@ mod tests {
 
         Mock::given(method("GET"))
             .and(path("/simple/requests/"))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .insert_header("content-type", "application/vnd.pypi.simple.v1+json")
-                    .set_body_string(simple_index_with_provenance(&provenance_url)),
-            )
+            .respond_with(ResponseTemplate::new(200).set_body_raw(
+                simple_index_with_provenance(&provenance_url).as_bytes(),
+                "application/vnd.pypi.simple.v1+json",
+            ))
             .mount(&server)
             .await;
 
@@ -1357,11 +1363,10 @@ mod tests {
 
         wiremock::Mock::given(wiremock::matchers::method("GET"))
             .and(wiremock::matchers::path("/simple/flask/"))
-            .respond_with(
-                wiremock::ResponseTemplate::new(200)
-                    .insert_header("content-type", "application/vnd.pypi.simple.v1+json")
-                    .set_body_string(simple_index_with_provenance(evil_provenance_url)),
-            )
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_raw(
+                simple_index_with_provenance(evil_provenance_url).as_bytes(),
+                "application/vnd.pypi.simple.v1+json",
+            ))
             .mount(&server)
             .await;
 
@@ -1379,6 +1384,340 @@ mod tests {
     }
 
     // T-039-16 is implicit — all T-033-xx tests above still pass (regression).
+
+    // -----------------------------------------------------------------------
+    // T-049: Strict content-type enforcement for fetch_simple_index
+    // -----------------------------------------------------------------------
+
+    /// Minimal valid PEP 691 JSON body (no provenance URL).
+    fn simple_index_json() -> &'static str {
+        r#"{
+            "meta": {"api-version": "1.0"},
+            "name": "requests",
+            "files": [
+                {
+                    "filename": "requests-2.31.0.tar.gz",
+                    "url": "https://files.pythonhosted.org/packages/requests-2.31.0.tar.gz",
+                    "digests": {"sha256": "abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890"}
+                }
+            ]
+        }"#
+    }
+
+    // T-049-01: Response with correct content-type is parsed successfully.
+    #[tokio::test]
+    async fn t049_01_correct_content_type_accepted() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/simple/requests/"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(
+                simple_index_json().as_bytes(),
+                "application/vnd.pypi.simple.v1+json",
+            ))
+            .mount(&server)
+            .await;
+
+        let client = PyPiProvenanceClient::new(server.uri());
+        let result = client.fetch_simple_index("requests").await;
+        assert!(
+            result.is_ok(),
+            "T-049-01: expected Ok, got: {:?}",
+            result.err()
+        );
+        let files = result.unwrap();
+        assert!(files.is_some(), "T-049-01: expected Some(files), got None");
+        let files = files.unwrap();
+        assert!(!files.is_empty(), "T-049-01: expected non-empty file list");
+        assert_eq!(
+            files[0].filename, "requests-2.31.0.tar.gz",
+            "T-049-01: expected first file to be requests-2.31.0.tar.gz"
+        );
+    }
+
+    // T-049-02: Response with content-type containing charset parameter is accepted.
+    #[tokio::test]
+    async fn t049_02_charset_suffix_accepted() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/simple/requests/"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(
+                simple_index_json().as_bytes(),
+                "application/vnd.pypi.simple.v1+json; charset=utf-8",
+            ))
+            .mount(&server)
+            .await;
+
+        let client = PyPiProvenanceClient::new(server.uri());
+        let result = client.fetch_simple_index("requests").await;
+        assert!(
+            result.is_ok(),
+            "T-049-02: expected Ok, got: {:?}",
+            result.err()
+        );
+        let files = result.unwrap();
+        assert!(
+            files.is_some(),
+            "T-049-02: expected Some(files) for charset-suffixed content-type"
+        );
+    }
+
+    // T-049-03: Response with HTML content-type returns Ok(None) even when body is valid JSON.
+    #[tokio::test]
+    async fn t049_03_html_content_type_returns_none() {
+        let server = MockServer::start().await;
+
+        // Attacker-style bypass attempt: valid JSON body, but HTML content-type.
+        Mock::given(method("GET"))
+            .and(path("/simple/requests/"))
+            .respond_with(
+                // Use set_body_raw so the content-type is actually text/html, not
+                // text/plain (set_body_string always overrides content-type to text/plain).
+                ResponseTemplate::new(200)
+                    .set_body_raw(simple_index_json().as_bytes(), "text/html"),
+            )
+            .mount(&server)
+            .await;
+
+        let client = PyPiProvenanceClient::new(server.uri());
+        let result = client.fetch_simple_index("requests").await;
+        assert!(
+            result.is_ok(),
+            "T-049-03: expected Ok, got: {:?}",
+            result.err()
+        );
+        assert!(
+            result.unwrap().is_none(),
+            "T-049-03: expected None for HTML content-type even with JSON body"
+        );
+    }
+
+    // T-049-04: Response with no content-type header returns Ok(None).
+    #[tokio::test]
+    async fn t049_04_absent_content_type_returns_none() {
+        let server = MockServer::start().await;
+
+        // No Content-Type header — body is valid JSON.
+        // Use set_body_bytes: unlike set_body_string, it does not set self.mime,
+        // so wiremock sends no Content-Type header at all.
+        Mock::given(method("GET"))
+            .and(path("/simple/requests/"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(simple_index_json().as_bytes()))
+            .mount(&server)
+            .await;
+
+        let client = PyPiProvenanceClient::new(server.uri());
+        let result = client.fetch_simple_index("requests").await;
+        assert!(
+            result.is_ok(),
+            "T-049-04: expected Ok, got: {:?}",
+            result.err()
+        );
+        assert!(
+            result.unwrap().is_none(),
+            "T-049-04: expected None when content-type header is absent"
+        );
+    }
+
+    // T-049-05: Response with `application/json` (generic JSON, not PEP 691) returns Ok(None).
+    #[tokio::test]
+    async fn t049_05_generic_json_content_type_returns_none() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/simple/requests/"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_raw(simple_index_json().as_bytes(), "application/json"),
+            )
+            .mount(&server)
+            .await;
+
+        let client = PyPiProvenanceClient::new(server.uri());
+        let result = client.fetch_simple_index("requests").await;
+        assert!(
+            result.is_ok(),
+            "T-049-05: expected Ok, got: {:?}",
+            result.err()
+        );
+        assert!(
+            result.unwrap().is_none(),
+            "T-049-05: expected None for generic application/json content-type"
+        );
+    }
+
+    // T-049-06: Response with `application/vnd.pypi.simple.v1+html` returns Ok(None).
+    #[tokio::test]
+    async fn t049_06_html_variant_returns_none() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/simple/requests/"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(
+                b"<html><body><a href=\"/pkg\">pkg-1.0.tar.gz</a></body></html>",
+                "application/vnd.pypi.simple.v1+html",
+            ))
+            .mount(&server)
+            .await;
+
+        let client = PyPiProvenanceClient::new(server.uri());
+        let result = client.fetch_simple_index("requests").await;
+        assert!(
+            result.is_ok(),
+            "T-049-06: expected Ok, got: {:?}",
+            result.err()
+        );
+        assert!(
+            result.unwrap().is_none(),
+            "T-049-06: expected None for application/vnd.pypi.simple.v1+html content-type"
+        );
+    }
+
+    // T-049-07: Response with completely wrong content-type (e.g. `image/png`) returns Ok(None).
+    #[tokio::test]
+    async fn t049_07_wrong_content_type_returns_none() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/simple/requests/"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_raw(simple_index_json().as_bytes(), "image/png"),
+            )
+            .mount(&server)
+            .await;
+
+        let client = PyPiProvenanceClient::new(server.uri());
+        let result = client.fetch_simple_index("requests").await;
+        assert!(
+            result.is_ok(),
+            "T-049-07: expected Ok, got: {:?}",
+            result.err()
+        );
+        assert!(
+            result.unwrap().is_none(),
+            "T-049-07: expected None for image/png content-type"
+        );
+    }
+
+    // T-049-08: 404 response still returns Ok(Some([])) regardless of content-type.
+    #[tokio::test]
+    async fn t049_08_404_returns_empty_list() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/simple/requests/"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+
+        let client = PyPiProvenanceClient::new(server.uri());
+        let result = client.fetch_simple_index("requests").await;
+        assert!(
+            result.is_ok(),
+            "T-049-08: expected Ok for 404, got: {:?}",
+            result.err()
+        );
+        let files = result.unwrap();
+        assert!(
+            files.is_some(),
+            "T-049-08: expected Some([]) for 404, got None"
+        );
+        assert!(
+            files.unwrap().is_empty(),
+            "T-049-08: expected empty list for 404"
+        );
+    }
+
+    // T-049-09: 500 response returns Err.
+    #[tokio::test]
+    async fn t049_09_500_returns_error() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/simple/requests/"))
+            .respond_with(
+                ResponseTemplate::new(500)
+                    .insert_header("content-type", "application/vnd.pypi.simple.v1+json")
+                    .set_body_string(simple_index_json()),
+            )
+            .mount(&server)
+            .await;
+
+        let client = PyPiProvenanceClient::new(server.uri());
+        let result = client.fetch_simple_index("requests").await;
+        assert!(
+            result.is_err(),
+            "T-049-09: expected Err for 500 response, got: {:?}",
+            result.ok()
+        );
+        assert!(
+            matches!(result, Err(RegistryError::NetworkError(_))),
+            "T-049-09: expected NetworkError for 500 response"
+        );
+    }
+
+    // T-049-10: Valid JSON with correct content-type but malformed PEP 691 structure.
+    #[tokio::test]
+    async fn t049_10_correct_content_type_malformed_pep691_body() {
+        let server = MockServer::start().await;
+
+        // Valid JSON but not a PEP 691 file list (missing "files" key).
+        Mock::given(method("GET"))
+            .and(path("/simple/requests/"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(
+                b"{\"error\": \"not found\"}",
+                "application/vnd.pypi.simple.v1+json",
+            ))
+            .mount(&server)
+            .await;
+
+        let client = PyPiProvenanceClient::new(server.uri());
+        let result = client.fetch_simple_index("requests").await;
+        // Content-type gate passes, then parse_simple_index runs; "files" key missing → Err.
+        // The test documents both possible outcomes (Err or Ok(Some([]))) so the
+        // implementer is aware; parse_simple_index currently returns Err for missing "files".
+        assert!(
+            result.is_err() || matches!(result, Ok(Some(_))),
+            "T-049-10: expected Err or Ok(Some(_)) for malformed PEP 691 body"
+        );
+    }
+
+    // T-049-11: Code-review assertion — the JSON fallback is removed.
+    // This is verified structurally by T-049-03 and T-049-04: both return Ok(None)
+    // even when the body is valid JSON (the old fallback would have proceeded to
+    // parse_simple_index for valid-JSON bodies regardless of content-type).
+    // The test below is a pure-code-path check that exercises the exact scenario
+    // the fallback guarded: valid JSON + wrong content-type → Ok(None).
+    #[tokio::test]
+    async fn t049_11_json_fallback_removed_valid_json_wrong_ct_returns_none() {
+        let server = MockServer::start().await;
+
+        // Body is perfectly valid PEP 691 JSON but content-type is text/plain.
+        Mock::given(method("GET"))
+            .and(path("/simple/requests/"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_raw(simple_index_json().as_bytes(), "text/plain"),
+            )
+            .mount(&server)
+            .await;
+
+        let client = PyPiProvenanceClient::new(server.uri());
+        let result = client.fetch_simple_index("requests").await;
+        // The old fallback would have returned Ok(Some(files)) here.
+        // After the fix, the strict check fires and returns Ok(None).
+        assert!(
+            result.is_ok(),
+            "T-049-11: expected Ok, got: {:?}",
+            result.err()
+        );
+        assert!(
+            result.unwrap().is_none(),
+            "T-049-11: JSON fallback must be gone — valid JSON with wrong content-type must return None"
+        );
+    }
 
     // T-039-17: Custom PyPI registry URL accepted by validator (enterprise devpi).
     #[test]
@@ -1406,14 +1745,10 @@ mod tests {
         Mock::given(method("GET"))
             .and(path("/simple/requests/"))
             .respond_with(
-                ResponseTemplate::new(200)
-                    .insert_header("content-type", "text/html")
-                    .set_body_string(
-                        r#"<!DOCTYPE html>
-<html><body>
-<a href="/packages/requests-2.31.0.tar.gz#sha256=abcd">requests-2.31.0.tar.gz</a>
-</body></html>"#,
-                    ),
+                ResponseTemplate::new(200).set_body_raw(
+                    b"<!DOCTYPE html>\n<html><body>\n<a href=\"/packages/requests-2.31.0.tar.gz#sha256=abcd\">requests-2.31.0.tar.gz</a>\n</body></html>",
+                    "text/html",
+                ),
             )
             .mount(&server)
             .await;

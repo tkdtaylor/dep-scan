@@ -268,18 +268,21 @@ async fn full_scan_package_with_attestation_is_verified() {
         .mount(&server)
         .await;
 
-    // PEP 691 Simple Index endpoint
+    // PEP 691 Simple Index endpoint — use set_body_raw so the content-type is
+    // exactly application/vnd.pypi.simple.v1+json (set_body_string overrides to text/plain).
     Mock::given(method("GET"))
         .and(path("/simple/requests/"))
         .respond_with(
-            ResponseTemplate::new(200)
-                .insert_header("content-type", "application/vnd.pypi.simple.v1+json")
-                .set_body_string(simple_index_json_with_provenance(
+            ResponseTemplate::new(200).set_body_raw(
+                simple_index_json_with_provenance(
                     "requests",
                     "2.31.0",
                     FAKE_SHA256_HEX,
                     &provenance_url,
-                )),
+                )
+                .as_bytes(),
+                "application/vnd.pypi.simple.v1+json",
+            ),
         )
         .mount(&server)
         .await;
@@ -287,11 +290,10 @@ async fn full_scan_package_with_attestation_is_verified() {
     // PEP 740 provenance URL — returns a bundle with matching sha256 but stub sig
     Mock::given(method("GET"))
         .and(path("/provenance/requests/2.31.0/requests-2.31.0.tar.gz"))
-        .respond_with(
-            ResponseTemplate::new(200)
-                .insert_header("content-type", "application/json")
-                .set_body_string(provenance_json_stub(FAKE_SHA256_HEX)),
-        )
+        .respond_with(ResponseTemplate::new(200).set_body_raw(
+            provenance_json_stub(FAKE_SHA256_HEX).as_bytes(),
+            "application/json",
+        ))
         .mount(&server)
         .await;
 
@@ -339,15 +341,10 @@ async fn full_scan_package_without_attestation_warns_by_default() {
     // Simple Index returns no provenance URL
     Mock::given(method("GET"))
         .and(path("/simple/requests/"))
-        .respond_with(
-            ResponseTemplate::new(200)
-                .insert_header("content-type", "application/vnd.pypi.simple.v1+json")
-                .set_body_string(simple_index_json_no_provenance(
-                    "requests",
-                    "2.31.0",
-                    FAKE_SHA256_HEX,
-                )),
-        )
+        .respond_with(ResponseTemplate::new(200).set_body_raw(
+            simple_index_json_no_provenance("requests", "2.31.0", FAKE_SHA256_HEX).as_bytes(),
+            "application/vnd.pypi.simple.v1+json",
+        ))
         .mount(&server)
         .await;
 
@@ -394,15 +391,10 @@ async fn full_scan_require_pypi_provenance_true_blocks_missing_attestation() {
 
     Mock::given(method("GET"))
         .and(path("/simple/requests/"))
-        .respond_with(
-            ResponseTemplate::new(200)
-                .insert_header("content-type", "application/vnd.pypi.simple.v1+json")
-                .set_body_string(simple_index_json_no_provenance(
-                    "requests",
-                    "2.31.0",
-                    FAKE_SHA256_HEX,
-                )),
-        )
+        .respond_with(ResponseTemplate::new(200).set_body_raw(
+            simple_index_json_no_provenance("requests", "2.31.0", FAKE_SHA256_HEX).as_bytes(),
+            "application/vnd.pypi.simple.v1+json",
+        ))
         .mount(&server)
         .await;
 
@@ -456,14 +448,16 @@ async fn full_scan_tampered_attestation_blocks_regardless_of_require_setting() {
     Mock::given(method("GET"))
         .and(path("/simple/requests/"))
         .respond_with(
-            ResponseTemplate::new(200)
-                .insert_header("content-type", "application/vnd.pypi.simple.v1+json")
-                .set_body_string(simple_index_json_with_provenance(
+            ResponseTemplate::new(200).set_body_raw(
+                simple_index_json_with_provenance(
                     "requests",
                     "2.31.0",
                     FAKE_SHA256_HEX,
                     &provenance_url,
-                )),
+                )
+                .as_bytes(),
+                "application/vnd.pypi.simple.v1+json",
+            ),
         )
         .mount(&server)
         .await;
@@ -471,11 +465,10 @@ async fn full_scan_tampered_attestation_blocks_regardless_of_require_setting() {
     // "Tampered" bundle: the stub cert chain will fail crypto verification
     Mock::given(method("GET"))
         .and(path("/provenance/requests/2.31.0/requests-2.31.0.tar.gz"))
-        .respond_with(
-            ResponseTemplate::new(200)
-                .insert_header("content-type", "application/json")
-                .set_body_string(provenance_json_stub(FAKE_SHA256_HEX)),
-        )
+        .respond_with(ResponseTemplate::new(200).set_body_raw(
+            provenance_json_stub(FAKE_SHA256_HEX).as_bytes(),
+            "application/json",
+        ))
         .mount(&server)
         .await;
 
@@ -522,14 +515,10 @@ async fn legacy_mirror_html_only_warns() {
     Mock::given(method("GET"))
         .and(path("/simple/requests/"))
         .respond_with(
-            ResponseTemplate::new(200)
-                .insert_header("content-type", "text/html")
-                .set_body_string(
-                    r#"<!DOCTYPE html>
-<html><body>
-<a href="/packages/requests-2.31.0.tar.gz#sha256=abcdef">requests-2.31.0.tar.gz</a>
-</body></html>"#,
-                ),
+            ResponseTemplate::new(200).set_body_raw(
+                b"<!DOCTYPE html>\n<html><body>\n<a href=\"/packages/requests-2.31.0.tar.gz#sha256=abcdef\">requests-2.31.0.tar.gz</a>\n</body></html>",
+                "text/html",
+            ),
         )
         .mount(&server)
         .await;
