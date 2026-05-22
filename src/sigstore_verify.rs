@@ -909,21 +909,19 @@ pub fn verify_rekor_checkpoint_impl(
     key_name: &str,
     pem_pubkey: &str,
 ) -> Result<(), RekorError> {
-    match signed_note::verify_ecdsa_p256(envelope, key_name, pem_pubkey) {
-        NoteVerifyOutcome::Valid => {}
-        NoteVerifyOutcome::Invalid { reason } => {
-            return Err(RekorError::TreeHeadSignatureInvalid(reason));
-        }
-    }
+    // REQ-062-01, REQ-062-02: verify_ecdsa_p256 now returns Ok(ParsedNote) on
+    // success, so the caller can reuse the parsed result directly.  No second
+    // call to signed_note::parse is needed (T-062-06).
+    let parsed =
+        signed_note::verify_ecdsa_p256(envelope, key_name, pem_pubkey).map_err(|o| match o {
+            NoteVerifyOutcome::Invalid { reason } => RekorError::TreeHeadSignatureInvalid(reason),
+            NoteVerifyOutcome::Valid => unreachable!("Ok variant returned as Err"),
+        })?;
 
-    // Delegate note-text extraction to signed_note::parse (REQ-044-03).
-    // verify_ecdsa_p256 also calls parse internally; the second call is
-    // acceptable given the small size of checkpoint envelopes.
     // Rekor's note has 3 lines of metadata:
     //   line 0: "<origin> - <log_id>"
     //   line 1: "<tree_size>"
     //   line 2: "<root_hash_base64>"
-    let parsed = signed_note::parse(envelope).map_err(RekorError::TreeHeadSignatureInvalid)?;
     let lines: Vec<&str> = parsed.note_text.lines().collect();
     if lines.len() < 3 {
         return Err(RekorError::TreeHeadSignatureInvalid(format!(
