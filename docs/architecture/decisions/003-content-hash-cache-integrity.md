@@ -43,10 +43,30 @@ Stored as a single TEXT column `content_hash` on `scanned_packages`, formatted `
 
 At install time, the install subcommand re-reads the same digest field from the registry and compares against the stored hash. Mismatch ⇒ invalidate the cache row and re-run the full scan pipeline. This catches the republish and mirror-substitution scenarios. Local tampering of the cache row is *partially* mitigated — an attacker has to mutate the hash column consistently with whatever they expect the registry to serve, raising the bar without claiming full integrity.
 
+### Secure default
+
+Verification is **always on** and **fail-closed**. There is no flag to skip it. Any failure to obtain a comparable registry digest during a cache hit triggers a re-scan:
+
+| Cached hash | Registry hash | Action |
+|-------------|---------------|--------|
+| `Some(a)`   | `Some(a)`     | Honor cache |
+| `Some(a)`   | `Some(b)`     | Invalidate row, re-scan |
+| `Some(a)`   | `None`        | Invalidate row, re-scan (registry stopped publishing a digest is itself suspicious) |
+| `None`      | `Some(b)`     | Invalidate row, re-scan (legacy pre-029 row — upgrade in place) |
+| `None`      | `None`        | **Re-scan** — both-None is *not* honored, because an attacker who controls the registry can engineer this state to permanently defeat verification |
+| `Some(a)`   | fetch fails   | Re-scan (network, parse, version-not-found, malformed digest — all treated as failure-to-verify) |
+
+`--force` on `install` bypasses *verdicts* (a user choosing to install despite a policy violation), but does **not** bypass verification. A hash mismatch always re-scans; the user can `--force` past the resulting verdict if they choose. This prevents an attacker who knows a previous `pass` was cached from substituting bytes and riding past `--force` without re-evaluation.
+
 ### What this does *not* defend against
 
-- A compromised registry that lies consistently across scan and install (same false digest both times). Mitigating that requires fetching the artifact and hashing the bytes locally; deferred behind a future `--paranoid` flag.
-- A local attacker with write access to the cache DB *and* knowledge of the published digest. Full row-level HMAC with a per-installation key would address this; out of scope for v1.1.
+- **Lying-registry / consistently-false digest.** A compromised registry that returns the same false digest at scan time and verification time. Mitigation requires fetching the artifact and hashing the bytes locally; deferred behind a future `--paranoid` flag.
+- **Local cache DB tampering.** A local attacker with write access to the cache DB *and* knowledge of the published digest can flip `block`→`pass` and set `content_hash` to match. Full row-level HMAC with a per-installation key would address this; out of scope for v1.1 because that attacker has broader capabilities than just the cache file.
+- **TOCTOU between verification and package-manager fetch.** dep-scan verifies, then exec's `npm`/`pip`/`cargo`/`go` which fetches independently. A registry republish in that narrow window evades us. Per-package-manager status:
+  - npm verifies `dist.integrity` itself ⇒ safe by default
+  - cargo verifies registry `cksum` ⇒ safe by default
+  - Go verifies `h1:` against `go.sum` ⇒ safe when `go.sum` exists
+  - **pip does NOT verify hashes unless `--require-hashes` is set** ⇒ insecure by default; addressed in task 031, which passes the verified hash through as a synthetic `--require-hashes` requirements file.
 
 These limits are documented so callers don't over-trust the feature.
 
@@ -55,8 +75,9 @@ These limits are documented so callers don't over-trust the feature.
 | Priority | Task | Scope |
 |----------|------|-------|
 | 1 | 029 — Capture content hash in cache | Schema column, registry-client digest extraction, cache write path |
-| 2 | 030 — Verify content hash on install | Read path, mismatch handling, re-scan trigger |
-| 3 | (deferred) `--paranoid` byte-level verification | Download artifact, hash locally, compare against registry-published digest |
+| 2 | 030 — Verify content hash on cache hit | Read path, mismatch handling, re-scan trigger, fail-closed semantics |
+| 3 | 031 — Close TOCTOU window for pip via `--require-hashes` | Pass verified hash through to pip install via a synthetic requirements file |
+| 4 | (deferred) `--paranoid` byte-level verification | Download artifact, hash locally, compare against registry-published digest (addresses lying-registry case) |
 
 ## Consequences
 
