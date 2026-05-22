@@ -123,7 +123,6 @@ impl Cache {
     }
 
     /// Remove a single cache entry.  No-op if the entry does not exist.
-    #[allow(dead_code)]
     pub fn invalidate(&self, name: &str, version: &str, registry: &str) -> Result<()> {
         self.conn.execute(
             "DELETE FROM scanned_packages WHERE name = ?1 AND version = ?2 AND registry = ?3",

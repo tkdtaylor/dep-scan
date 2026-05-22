@@ -1,6 +1,6 @@
 # Task 030 — Verify content hash on cache hit
 
-**Status:** backlog
+**Status:** completed
 **Depends on:** 029
 
 ## Objective
@@ -33,19 +33,19 @@ On any `Reverify` outcome: `cache.invalidate(name, "latest", registry)`, log a o
 
 ## Acceptance criteria
 
-- [ ] `run_check` cache-hit branch fetches metadata and compares `content_hash` before returning the cached result
-- [ ] All `Reverify` cases from the decision table invalidate the cache row via `Cache::invalidate` and fall through to the full scan
-- [ ] **Both-None is fail-closed:** when cached hash and registry hash are both `None`, the cache is *not* honored — a re-scan runs
-- [ ] After a successful re-scan, the resulting cache row contains the *new* hash (closes the verify loop)
-- [ ] Verification has no opt-out flag (no `--skip-cache-verify` or equivalent in this task)
-- [ ] Verbose output distinguishes: `cache hit (verified)`, `cache hash mismatch — re-scanning`
-- [ ] Non-verbose output stays quiet on the happy path; mismatch always prints a one-line notice to stderr
-- [ ] `--force` on install does not bypass the verification step (only verdicts)
-- [ ] Registry fetch errors during verification surface identically to the cache-miss path (no new failure modes; consistent fail-closed)
-- [ ] Integration test: cache populated with hash A, registry returns hash B, `dep-scan check` re-scans and produces a fresh verdict
-- [ ] Integration test: cache populated with hash A, registry returns hash A, `dep-scan check` returns cached result and does NOT execute policy logic
-- [ ] No new public API surface; no schema change (all schema work was in 029)
-- [ ] All tests pass, `cargo clippy` clean, `cargo fmt --check` clean
+- [x] `run_check` cache-hit branch fetches metadata and compares `content_hash` before returning the cached result
+- [x] All `Reverify` cases from the decision table invalidate the cache row via `Cache::invalidate` and fall through to the full scan
+- [x] **Both-None is fail-closed:** when cached hash and registry hash are both `None`, the cache is *not* honored — a re-scan runs
+- [x] After a successful re-scan, the resulting cache row contains the *new* hash (closes the verify loop)
+- [x] Verification has no opt-out flag (no `--skip-cache-verify` or equivalent in this task)
+- [x] Verbose output distinguishes: `cache hit (verified)`, `cache hash mismatch — re-scanning`
+- [x] Non-verbose output stays quiet on the happy path; mismatch always prints a one-line notice to stderr
+- [x] `--force` on install does not bypass the verification step (only verdicts)
+- [x] Registry fetch errors during verification surface identically to the cache-miss path (no new failure modes; consistent fail-closed)
+- [x] Integration test: cache populated with hash A, registry returns hash B, `dep-scan check` re-scans and produces a fresh verdict
+- [x] Integration test: cache populated with hash A, registry returns hash A, `dep-scan check` returns cached result and does NOT execute policy logic
+- [x] No new public API surface; no schema change (all schema work was in 029)
+- [x] All tests pass, `cargo clippy` clean, `cargo fmt --check` clean
 
 ## Out of scope
 

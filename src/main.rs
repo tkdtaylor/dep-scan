@@ -36,6 +36,35 @@ use registry::pypi::PyPiRegistry;
 use registry::{Registry, RegistryType};
 use types::ScanContext;
 
+/// Decision returned by `verify_hash` for a cache-hit entry.
+#[derive(Debug, PartialEq)]
+enum HashVerifyDecision {
+    /// Both hashes match — the cached verdict is safe to reuse.
+    HonorCache,
+    /// The hashes differ, a hash is missing from either side, or the registry
+    /// fetch failed — the cache row must be invalidated and the package
+    /// re-scanned.
+    Reverify,
+}
+
+/// Decide whether to honor a cached verdict based on the content hash pair.
+///
+/// Implements the decision table from ADR 003 § "Secure default":
+///
+/// | Cached hash | Registry hash | Decision      |
+/// |-------------|---------------|---------------|
+/// | Some(a)     | Some(a)       | HonorCache    |
+/// | Some(a)     | Some(b)       | Reverify      |
+/// | Some(a)     | None          | Reverify      |
+/// | None        | Some(b)       | Reverify      |
+/// | None        | None          | Reverify (fail-closed) |
+fn verify_hash(cached: Option<&str>, registry: Option<&str>) -> HashVerifyDecision {
+    match (cached, registry) {
+        (Some(c), Some(r)) if c == r => HashVerifyDecision::HonorCache,
+        _ => HashVerifyDecision::Reverify,
+    }
+}
+
 /// The result of checking a single package, suitable for JSON serialization.
 #[derive(Debug, Serialize)]
 struct CheckResult {
@@ -215,32 +244,11 @@ async fn run_check(
             eprintln!("Checking {pkg_name} on {reg_type}...");
         }
 
-        // Check cache first
         let reg_str = reg_type.to_string();
-        if let Ok(Some(entry)) = cache.lookup(pkg_name, "latest", &reg_str) {
-            if verbose {
-                eprintln!("Cache hit for {pkg_name}");
-            }
-            // Reconstruct result from cache
-            let cached_result = entry.result.clone();
-            let is_failure = cached_result == "block" || cached_result == "warn";
-            if is_failure {
-                has_failure = true;
-            }
-            results.push(CheckResult {
-                package: pkg_name.clone(),
-                version: "cached".to_string(),
-                registry: reg_str.clone(),
-                age_hours: None,
-                result: cached_result,
-                reason: Some("cached result".to_string()),
-                policies: vec![],
-            });
-            continue;
-        }
 
-        // Query registry
-        let metadata = match reg_type {
+        // Fetch metadata from the registry.  This is shared between the
+        // verification step (cache-hit) and the full scan path (cache-miss).
+        let fetch_result = match reg_type {
             RegistryType::Npm => {
                 let client = NpmRegistry::new(config.registries.npm_url.clone());
                 client.get_metadata(pkg_name, None).await
@@ -262,7 +270,52 @@ async fn run_check(
             }
         };
 
-        let metadata = match metadata {
+        // Check cache — if there is a hit, verify the content hash before honoring it.
+        if let Ok(Some(entry)) = cache.lookup(pkg_name, "latest", &reg_str) {
+            match &fetch_result {
+                Ok(fresh_meta) => {
+                    let decision = verify_hash(
+                        entry.content_hash.as_deref(),
+                        fresh_meta.content_hash.as_deref(),
+                    );
+                    if decision == HashVerifyDecision::HonorCache {
+                        if verbose {
+                            eprintln!("cache hit (verified) for {pkg_name}");
+                        }
+                        // Reconstruct result from cache — hash matches, verdict is trustworthy.
+                        let cached_result = entry.result.clone();
+                        let is_failure = cached_result == "block" || cached_result == "warn";
+                        if is_failure {
+                            has_failure = true;
+                        }
+                        results.push(CheckResult {
+                            package: pkg_name.clone(),
+                            version: "cached".to_string(),
+                            registry: reg_str.clone(),
+                            age_hours: None,
+                            result: cached_result,
+                            reason: Some("cached result".to_string()),
+                            policies: vec![],
+                        });
+                        continue;
+                    } else {
+                        // Hash mismatch (or both None) — invalidate and fall through to re-scan.
+                        eprintln!("cache hash mismatch for {pkg_name}; re-scanning");
+                        let _ = cache.invalidate(pkg_name, "latest", &reg_str);
+                        // `fetch_result` is already the fresh metadata; the full scan below
+                        // will reuse it without making an extra network call.
+                    }
+                }
+                Err(_) => {
+                    // Registry fetch failed — cannot verify; invalidate and fall through to
+                    // the error path below, which will surface the same error consistently.
+                    eprintln!("cache hash mismatch for {pkg_name}; re-scanning");
+                    let _ = cache.invalidate(pkg_name, "latest", &reg_str);
+                }
+            }
+        }
+
+        let metadata = match fetch_result {
             Ok(m) => m,
             Err(e) => {
                 has_error = true;
@@ -491,5 +544,65 @@ async fn run_install(
         Ok(0)
     } else {
         Ok(status.code().unwrap_or(1))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // T-030-01: Matching hashes → honor cache
+    #[test]
+    fn verify_hash_matching_hashes_honor_cache() {
+        let decision = verify_hash(Some("sha256:aaaa"), Some("sha256:aaaa"));
+        assert_eq!(
+            decision,
+            HashVerifyDecision::HonorCache,
+            "matching hashes should produce HonorCache"
+        );
+    }
+
+    // T-030-02: Mismatched hashes → reverify
+    #[test]
+    fn verify_hash_mismatched_hashes_reverify() {
+        let decision = verify_hash(Some("sha256:aaaa"), Some("sha256:bbbb"));
+        assert_eq!(
+            decision,
+            HashVerifyDecision::Reverify,
+            "mismatched hashes should produce Reverify"
+        );
+    }
+
+    // T-030-03: Legacy NULL cached hash → reverify
+    #[test]
+    fn verify_hash_legacy_null_cached_reverify() {
+        let decision = verify_hash(None, Some("sha256:bbbb"));
+        assert_eq!(
+            decision,
+            HashVerifyDecision::Reverify,
+            "None cached hash (legacy row) should produce Reverify"
+        );
+    }
+
+    // T-030-04: Registry stopped publishing digest → reverify
+    #[test]
+    fn verify_hash_registry_none_reverify() {
+        let decision = verify_hash(Some("sha256:aaaa"), None);
+        assert_eq!(
+            decision,
+            HashVerifyDecision::Reverify,
+            "None registry hash should produce Reverify"
+        );
+    }
+
+    // T-030-05: Both None → reverify (fail-closed)
+    #[test]
+    fn verify_hash_both_none_reverify_fail_closed() {
+        let decision = verify_hash(None, None);
+        assert_eq!(
+            decision,
+            HashVerifyDecision::Reverify,
+            "both-None should produce Reverify (fail-closed)"
+        );
     }
 }

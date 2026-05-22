@@ -65,6 +65,39 @@ fn npm_json(name: &str, version: &str, hours_ago: i64) -> String {
     )
 }
 
+/// npm JSON response with a dist.integrity field (SRI format).
+fn npm_json_with_integrity(name: &str, version: &str, hours_ago: i64, integrity: &str) -> String {
+    let published = chrono::Utc::now() - chrono::TimeDelta::hours(hours_ago);
+    let ts = published.to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    format!(
+        r#"{{
+    "name": "{name}",
+    "description": "A test package",
+    "dist-tags": {{ "latest": "{version}" }},
+    "versions": {{
+        "{version}": {{
+            "name": "{name}",
+            "version": "{version}",
+            "description": "A test package",
+            "repository": {{
+                "type": "git",
+                "url": "git+https://github.com/test/{name}.git"
+            }},
+            "dist": {{
+                "integrity": "{integrity}"
+            }}
+        }}
+    }},
+    "time": {{
+        "{version}": "{ts}"
+    }},
+    "maintainers": [
+        {{ "name": "testuser", "email": "test@example.com" }}
+    ]
+}}"#
+    )
+}
+
 // T-009-01: Check passing package exits 0
 // Setup: wiremock returns npm JSON for package published 72h ago
 // Run: dep-scan check old-package --registry npm
@@ -227,10 +260,12 @@ async fn check_multiple_packages_mixed_results_exits_1() {
         .stdout(predicate::str::contains("BLOCK"));
 }
 
-// T-009-05: Cache hit skips registry query
-// Setup: pre-populate cache with result for "cached-pkg"
-// Run: dep-scan check cached-pkg --registry npm
-// Expected: no HTTP request made to wiremock, result from cache used
+// T-009-05: Cache hit with verified hash uses cached result
+//
+// Task 030 changed the semantics: a cache hit now always makes one registry
+// call (for content-hash verification) before deciding whether to honor the
+// cache.  When the cached hash matches the registry hash, the cached verdict
+// is returned without running the full policy pipeline.
 #[tokio::test]
 async fn cache_hit_skips_registry_query() {
     let server = MockServer::start().await;
@@ -238,32 +273,48 @@ async fn cache_hit_skips_registry_query() {
     let cache_path = tmp.path().join("cache.db");
     let config = write_config(&server.uri(), cache_path.to_str().unwrap());
 
-    // Pre-populate the cache
+    // Pre-populate the cache with a known content_hash.
+    // "sha512-AAEC" → bytes [0x00,0x01,0x02] → dep-scan normalized: "sha512:000102"
+    let hash = "sha512:000102";
     {
         let cache = rusqlite::Connection::open(&cache_path).unwrap();
         cache
             .execute_batch(
                 "CREATE TABLE IF NOT EXISTS scanned_packages (
-                    name       TEXT NOT NULL,
-                    version    TEXT NOT NULL,
-                    registry   TEXT NOT NULL,
-                    result     TEXT NOT NULL,
-                    scanned_at TEXT NOT NULL,
+                    name         TEXT NOT NULL,
+                    version      TEXT NOT NULL,
+                    registry     TEXT NOT NULL,
+                    result       TEXT NOT NULL,
+                    scanned_at   TEXT NOT NULL,
+                    content_hash TEXT,
                     PRIMARY KEY (name, version, registry)
                 );",
             )
             .unwrap();
         cache
             .execute(
-                "INSERT INTO scanned_packages (name, version, registry, result, scanned_at)
-                 VALUES ('cached-pkg', 'latest', 'npm', 'pass', '2025-01-01T00:00:00Z')",
-                [],
+                "INSERT INTO scanned_packages
+                 (name, version, registry, result, scanned_at, content_hash)
+                 VALUES ('cached-pkg', 'latest', 'npm', 'pass', '2025-01-01T00:00:00Z', ?1)",
+                rusqlite::params![hash],
             )
             .unwrap();
     }
 
-    // Do NOT mount any wiremock mock — if the CLI makes a request, wiremock
-    // will not match and the request will fail.
+    // Mount a wiremock endpoint that returns the same hash — cache will be honored.
+    Mock::given(method("GET"))
+        .and(path("/cached-pkg"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_string(npm_json_with_integrity(
+                "cached-pkg",
+                "1.0.0",
+                72,
+                "sha512-AAEC",
+            )),
+        )
+        .expect(1) // exactly ONE metadata call: the verification fetch
+        .mount(&server)
+        .await;
 
     dep_scan()
         .args([
@@ -277,20 +328,14 @@ async fn cache_hit_skips_registry_query() {
         .assert()
         .code(0)
         .stdout(predicate::str::contains("cached-pkg"));
-
-    // Verify no requests were made to wiremock
-    let received = server.received_requests().await.unwrap();
-    assert!(
-        received.is_empty(),
-        "Expected no HTTP requests (cache hit), but got {}",
-        received.len()
-    );
 }
 
-// T-009-06: New results are cached (second run uses cache)
-// Setup: wiremock returns npm JSON, empty cache
-// Run: dep-scan check fresh-pkg --registry npm twice
-// Expected: second run uses cache (verify wiremock received only 1 request)
+// T-009-06: New results are cached (second run verifies hash and uses cache)
+//
+// Task 030: a cache hit now always makes one verification fetch.  When the
+// registry returns the same hash that was cached, the verdict is reused.
+// Total requests: first run = 2 (metadata + install_scripts),
+// second run = 1 (verification fetch only; HonorCache skips install_scripts).
 #[tokio::test]
 async fn new_results_are_cached() {
     let server = MockServer::start().await;
@@ -298,17 +343,22 @@ async fn new_results_are_cached() {
     let cache_path = tmp.path().join("cache.db");
     let config = write_config(&server.uri(), cache_path.to_str().unwrap());
 
+    // Use a JSON that includes dist.integrity so the cache stores a hash and
+    // the second run can verify and honor the cache.
     Mock::given(method("GET"))
         .and(path("/fresh-pkg"))
-        .respond_with(ResponseTemplate::new(200).set_body_string(npm_json(
-            "fresh-pkg",
-            "1.0.0",
-            72,
-        )))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_string(npm_json_with_integrity(
+                "fresh-pkg",
+                "1.0.0",
+                72,
+                "sha512-AAEC",
+            )),
+        )
         .mount(&server)
         .await;
 
-    // First run: should query registry
+    // First run: queries registry (metadata) + install scripts = 2 requests.
     dep_scan()
         .args([
             "--config",
@@ -322,7 +372,7 @@ async fn new_results_are_cached() {
         .code(0)
         .stdout(predicate::str::contains("pass"));
 
-    // Second run: should use cache (cache key is name + "latest" + registry)
+    // Second run: one verification fetch (HonorCache), no install_scripts fetch.
     dep_scan()
         .args([
             "--config",
@@ -335,13 +385,12 @@ async fn new_results_are_cached() {
         .assert()
         .code(0);
 
-    // Verify only 2 requests were made to wiremock on the first run:
-    // 1 for metadata + 1 for install scripts. The second run should use cache.
+    // Total: 2 (first run) + 1 (second run verification) = 3.
     let received = server.received_requests().await.unwrap();
     assert_eq!(
         received.len(),
-        2,
-        "Expected exactly 2 HTTP requests on first run (metadata + install scripts), got {}",
+        3,
+        "Expected 3 HTTP requests total (2 first run + 1 verification), got {}",
         received.len()
     );
 }
