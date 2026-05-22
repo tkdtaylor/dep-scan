@@ -69,3 +69,58 @@ jobs:
       - uses: rustsec/audit-check@v2
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
+
+  dogfood:
+    name: Dog-food (dep-scan scans its own Cargo.lock)
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build dep-scan
+        run: cargo build --release
+
+      - name: Scan own Cargo.lock
+        run: |
+          ./target/release/dep-scan check \
+            --lockfile Cargo.lock \
+            --lockfile-type crates \
+            --json \
+            2>/dev/null \
+            > /tmp/dogfood.json || true
+
+          # Parse results and enforce policy:
+          #   - block verdicts  → fail the job
+          #   - warn verdicts   → emit ::warning:: annotations (no failure)
+          python3 - <<'PYEOF'
+          import json, sys
+
+          with open("/tmp/dogfood.json") as f:
+              packages = json.load(f)
+
+          if not isinstance(packages, list):
+              packages = packages.get("packages", [])
+
+          blocks = [p for p in packages if p.get("result") == "block"]
+          warns  = [p for p in packages if p.get("result") == "warn"]
+
+          for w in warns:
+              name   = w.get("package", w.get("name", "unknown"))
+              reason = w.get("reason") or "warn verdict"
+              print(f"::warning file=Cargo.lock::pkg={name} reason={reason}")
+
+          if blocks:
+              for b in blocks:
+                  name   = b.get("package", b.get("name", "unknown"))
+                  reason = b.get("reason") or "block verdict"
+                  print(f"::error file=Cargo.lock::pkg={name} reason={reason}", file=sys.stderr)
+              print(f"dep-scan: {len(blocks)} block verdict(s) in own Cargo.lock — see errors above",
+                    file=sys.stderr)
+              sys.exit(1)
+
+          print(f"dep-scan: dog-food passed — {len(warns)} warn(s), 0 block(s)")
+          PYEOF

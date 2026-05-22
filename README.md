@@ -40,6 +40,8 @@ dep-scan check express --registry npm --json
 
 ## What it detects
 
+dep-scan eats its own dog food: every CI run scans dep-scan's own `Cargo.lock` with the same heuristics it applies to user projects, so any new transitive dependency that fails dep-scan's policies is caught before merge.
+
 dep-scan runs **11 security policies** against every package:
 
 | Policy | What it catches | Default |
