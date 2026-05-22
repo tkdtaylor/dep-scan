@@ -60,7 +60,10 @@ Verification is **always on** and **fail-closed**. There is no flag to skip it. 
 
 ### What this does *not* defend against
 
-- **Lying-registry / consistently-false digest.** A compromised registry that returns the same false digest at scan time and verification time. Mitigation requires fetching the artifact and hashing the bytes locally; deferred behind a future `--paranoid` flag.
+The two layers above defend against an attacker who controls **what bytes the registry serves** but not **whether the registry's metadata is truthful about those bytes**. The threats below are out of scope for content-hash verification and require different mechanisms.
+
+- **Consistently-lying registry.** A compromised registry that publishes a false digest *and* serves bytes that hash to it — the registry is internally consistent, so any verification that compares registry metadata against itself (or against bytes-as-the-registry-serves-them) passes. No in-band mechanism defends against this. The fix is **out-of-band attestation**: cryptographic provenance signed by the build environment (npm provenance, PyPI sigstore attestations, Go's checksum database) verified against a trust root independent of the registry. Queued as task 032.
+- **Metadata/bytes inconsistency.** A narrower threat: registry metadata says `sha256:X`, but the tarball actually hashes to `Y` (e.g., a compromised CDN node serves different bytes than the metadata server claims). This is *defense in depth* over registry-published digests and is what a future `--paranoid` flag would address by downloading the artifact and hashing locally. The cost is bandwidth — 10×–1000× per scan, since today we fetch metadata only. Deferred because (a) npm/cargo/Go re-verify the registry-published digest at install time anyway, narrowing the additional value to "catch inconsistency before exec'ing the package manager", and (b) the published incidents in this space (event-stream, ua-parser-js, etc.) were credential-compromise / republish attacks, which 029+030 already handle.
 - **Local cache DB tampering.** A local attacker with write access to the cache DB *and* knowledge of the published digest can flip `block`→`pass` and set `content_hash` to match. Full row-level HMAC with a per-installation key would address this; out of scope for v1.1 because that attacker has broader capabilities than just the cache file.
 - **TOCTOU between verification and package-manager fetch.** dep-scan verifies, then exec's `npm`/`pip`/`cargo`/`go` which fetches independently. A registry republish in that narrow window evades us. Per-package-manager status:
   - npm verifies `dist.integrity` itself ⇒ safe by default
@@ -77,7 +80,8 @@ These limits are documented so callers don't over-trust the feature.
 | 1 | 029 — Capture content hash in cache | Schema column, registry-client digest extraction, cache write path |
 | 2 | 030 — Verify content hash on cache hit | Read path, mismatch handling, re-scan trigger, fail-closed semantics |
 | 3 | 031 — Close TOCTOU window for pip via `--require-hashes` | Pass verified hash through to pip install via a synthetic requirements file |
-| 4 | (deferred) `--paranoid` byte-level verification | Download artifact, hash locally, compare against registry-published digest (addresses lying-registry case) |
+| 4 | 032 — Verify provenance attestations | Out-of-band trust root for lying-registry defense (npm provenance, PyPI sigstore) |
+| 5 | (deferred) `--paranoid` byte-level verification | Download artifact, hash locally — defense in depth against metadata/bytes inconsistency (not a lying-registry fix) |
 
 ## Consequences
 
