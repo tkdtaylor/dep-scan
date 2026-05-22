@@ -480,7 +480,7 @@ mod tests {
         assert!(metadata.published_at.is_none());
     }
 
-    // Additional: requesting a specific version
+    // T-006-09: requesting a specific version
     #[tokio::test]
     async fn fetch_specific_version() {
         let server = MockServer::start().await;
@@ -501,7 +501,7 @@ mod tests {
         assert_eq!(published.to_rfc3339(), "2023-05-03T11:30:00+00:00");
     }
 
-    // Additional: requesting a non-existent version
+    // T-006-10: requesting a non-existent version returns NotFound
     #[tokio::test]
     async fn fetch_nonexistent_version_returns_not_found() {
         let server = MockServer::start().await;
@@ -523,7 +523,7 @@ mod tests {
         }
     }
 
-    // Additional: author-only (no maintainer) -> maintainers has just the author
+    // T-006-11: author-only maintainers list
     #[tokio::test]
     async fn author_only_maintainers_list() {
         let server = MockServer::start().await;
@@ -540,7 +540,7 @@ mod tests {
         assert_eq!(metadata.maintainers, vec!["Kenneth Reitz"]);
     }
 
-    // Additional: repository_url falls back to home_page when project_urls is null
+    // T-006-12: repository_url falls back to home_page when project_urls is null
     #[tokio::test]
     async fn repository_url_falls_back_to_home_page() {
         let json = r#"{

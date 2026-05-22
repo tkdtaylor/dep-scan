@@ -1,6 +1,6 @@
 # dep-scan
 
-A cross-platform CLI tool that intercepts and scans every dependency before installation. Detects supply chain attacks — typosquatting, malicious install scripts, suspicious maintainer changes, known vulnerabilities — and enforces configurable policies like minimum package age.
+A cross-platform CLI tool that intercepts and scans every dependency before installation. Detects supply chain attacks — typosquatting, malicious install scripts, suspicious maintainer changes, known vulnerabilities — verifies cryptographic provenance (sigstore for npm + PyPI, sum.golang.org for Go), and enforces configurable policies like minimum package age. Cache entries are content-addressed and fail-closed on hash mismatch — a republished tarball under the same version triggers a re-scan.
 
 Local-first, fast, open source. Single Rust binary with no runtime dependencies.
 
@@ -40,7 +40,7 @@ dep-scan check express --registry npm --json
 
 ## What it detects
 
-dep-scan runs **8 security policies** against every package:
+dep-scan runs **11 security policies** against every package:
 
 | Policy | What it catches | Default |
 |--------|----------------|---------|
@@ -52,6 +52,13 @@ dep-scan runs **8 security policies** against every package:
 | **Maintainer change** | Added/removed maintainers since last scan; full takeover detection | Warn/Block |
 | **Popularity** | Packages with very low download counts (configurable threshold) | Warn |
 | **Dependency confusion** | Internal-looking package names on public registries | Warn |
+| **npm provenance** | Sigstore-verified SLSA attestation (Fulcio chain walk + Rekor inclusion + cert-validity window). Defends against a lying npm registry. | Warn (missing) / Block (invalid) |
+| **PyPI provenance** | PEP 740 sigstore attestation, same verification as npm with sha256 subject digests. Defends against a lying PyPI registry. | Warn (missing) / Block (invalid) |
+| **Go sumdb** | Ed25519 signature verification of `sum.golang.org` signed-tree-head responses. Defends against a lying Go module proxy. | Warn (missing) / Block (invalid) |
+
+### Cache integrity (always on)
+
+Every cached verdict is content-addressed. On a cache hit, dep-scan re-fetches the registry's published digest (`dist.integrity` / `digests.sha256` / `cksum` / `h1:`) and compares it to the stored hash. Mismatch ⇒ invalidate the cache row and re-scan from scratch. There is no flag to skip this check. The both-`None` case (registry stopped publishing a digest, and the cache row was a pre-029 row) is fail-closed — re-scan, never honor. See [ADR 003](docs/architecture/decisions/003-content-hash-cache-integrity.md) for the threat model.
 
 ## Exit codes
 
@@ -80,6 +87,7 @@ npm_url = "https://registry.npmjs.org"
 pypi_url = "https://pypi.org"
 crates_url = "https://crates.io"
 go_proxy_url = "https://proxy.golang.org"
+go_sum_db_url = "https://sum.golang.org"
 
 [policies]
 check_typosquatting = true
@@ -88,6 +96,12 @@ check_min_age = true
 check_maintainer_changes = true
 check_vulnerabilities = true
 check_obfuscation = true
+check_npm_provenance = true
+require_npm_provenance = false
+check_pypi_provenance = true
+require_pypi_provenance = false
+check_go_sumdb = true
+require_go_sumdb = false
 
 [osv]
 osv_url = "https://api.osv.dev"
@@ -99,6 +113,8 @@ internal_prefixes = ["internal-", "private-", "corp-"]
 min_downloads = 1000
 ```
 
+The `require_*` knobs escalate a missing-attestation `Warn` into a `Block`. Most packages don't publish provenance yet, so the defaults are `Warn` to avoid a false-positive flood. Invalid attestations always `Block` regardless of these flags.
+
 All settings can be overridden via environment variables:
 
 | Variable | Overrides |
@@ -108,6 +124,7 @@ All settings can be overridden via environment variables:
 | `DEP_SCAN_PYPI_URL` | `registries.pypi_url` |
 | `DEP_SCAN_CRATES_URL` | `registries.crates_url` |
 | `DEP_SCAN_GO_PROXY_URL` | `registries.go_proxy_url` |
+| `DEP_SCAN_GO_SUM_DB_URL` | `registries.go_sum_db_url` |
 | `DEP_SCAN_OSV_URL` | `osv.osv_url` |
 | `DEP_SCAN_CACHE_PATH` | `cache_path` |
 
@@ -115,10 +132,10 @@ All settings can be overridden via environment variables:
 
 | Registry | Flag | Status | Attack vectors scanned |
 |----------|------|--------|----------------------|
-| **npm** | `--registry npm` | Full support | install scripts (`postinstall`, `preinstall`), typosquatting, age, CVEs, maintainer changes |
-| **PyPI** | `--registry pypi` | Full support | `setup.py` hooks, typosquatting, age, CVEs, maintainer changes |
+| **npm** | `--registry npm` | Full support | install scripts (`postinstall`, `preinstall`), obfuscation, typosquatting, age, CVEs, maintainer changes, popularity, sigstore provenance (SLSA + Rekor) |
+| **PyPI** | `--registry pypi` | Full support | `setup.py` hooks, typosquatting, age, CVEs, maintainer changes, popularity, PEP 740 sigstore attestations |
 | **crates.io** | `--registry crates` | Full support | typosquatting, age, CVEs, maintainer changes, popularity |
-| **Go modules** | `--registry go` | Full support | typosquatting, age, CVEs |
+| **Go modules** | `--registry go` | Full support | typosquatting, age, CVEs, sumdb signed-tree-head verification |
 
 ## Example output
 
@@ -184,9 +201,17 @@ dep-scan check github.com/gorilla/mux --registry go
 # Or just use the wrappers — they scan automatically
 npmds install express body-parser cors
 pipds install requests flask sqlalchemy
+cargods add serde tokio
+gods get github.com/gorilla/mux
+
+# Scan everything in a lockfile in one go
+dep-scan check --lockfile package-lock.json --lockfile-type npm
+dep-scan check --lockfile requirements.txt --lockfile-type pip
+dep-scan check --lockfile Cargo.lock --lockfile-type cargo
+dep-scan check --lockfile go.sum --lockfile-type go
 
 # In CI/CD — fail the build on any policy violation
-dep-scan check $(cat requirements.txt | grep -v '^#') --registry pypi --json
+dep-scan check --lockfile package-lock.json --lockfile-type npm --json
 ```
 
 ### 4. Ongoing use
@@ -522,7 +547,7 @@ cargo build --release
 ## Development
 
 ```bash
-cargo test              # run all tests (262 tests)
+cargo test              # run all tests
 cargo clippy            # lint
 cargo fmt --check       # check formatting
 ```
@@ -533,6 +558,7 @@ See [docs/architecture/overview.md](docs/architecture/overview.md) for system de
 
 - [ADR 001](docs/architecture/decisions/001-language-choice.md) — Rust as implementation language
 - [ADR 002](docs/architecture/decisions/002-detection-strategy.md) — v0.2 detection strategy and external data sources
+- [ADR 003](docs/architecture/decisions/003-content-hash-cache-integrity.md) — content-hash cache integrity, sigstore + sumdb provenance verification
 
 ## License
 

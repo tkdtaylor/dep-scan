@@ -22,18 +22,18 @@
 | 009 | Check subcommand integration | 009-check-integration-test-spec.md | 8/8 | Done |
 | 010 | ScanContext + multi-policy pipeline | 010-multi-policy-pipeline-test-spec.md | 11/11 | Done |
 | 011 | OSV.dev vulnerability client + policy | 011-osv-vulnerability-test-spec.md | 10/10 | Done |
-| 012 | Install script extraction + analysis | 012-install-script-analysis-test-spec.md | 12/12 | Done |
-| 013 | Typosquatting detection | 013-typosquatting-test-spec.md | 20/20 | Done |
+| 012 | Install script extraction + analysis | 012-install-script-analysis-test-spec.md | 10/10 | Done |
+| 013 | Typosquatting detection | 013-typosquatting-test-spec.md | 13/13 | Done |
 | 014 | Maintainer change detection | 014-maintainer-change-test-spec.md | 9/9 | Done |
-| 015 | Dependency confusion heuristics | 015-dependency-confusion-test-spec.md | 11/11 | Done |
+| 015 | Dependency confusion heuristics | 015-dependency-confusion-test-spec.md | 7/7 | Done |
 | 016 | v0.2 integration tests | 016-v2-integration-test-spec.md | 7/7 | Done |
 | 017 | RegistryType expansion + config | 017-registry-type-expansion-test-spec.md | 7/7 | Done |
-| 018 | crates.io registry client | 018-crates-registry-client-test-spec.md | 11/11 | Done |
-| 019 | Go module proxy client | 019-go-module-registry-test-spec.md | 11/11 | Done |
+| 018 | crates.io registry client | 018-crates-registry-test-spec.md | 8/8 | Done |
+| 019 | Go module proxy client | 019-go-module-registry-test-spec.md | 7/7 | Done |
 | 020 | Popular package lists for crates.io + Go | 020-popular-crates-go-test-spec.md | 7/7 | Done |
 | 021 | Obfuscation detection policy | 021-obfuscation-detection-test-spec.md | 11/11 | Done |
-| 022 | Popularity policy + v0.3 integration tests | 022-popularity-integration-test-spec.md | 11/11 | Done |
-| 023 | Lockfile parser | 023-lockfile-parser-test-spec.md | 32/32 | Done |
+| 022 | Popularity policy + v0.3 integration tests | 022-popularity-integration-test-spec.md | 8/8 | Done |
+| 023 | Lockfile parser | 023-lockfile-parser-test-spec.md | 10/10 | Done |
 | 024 | Install subcommand | 024-install-subcommand-test-spec.md | 6/6 | Done |
 | 025 | GitHub Actions CI workflow | 025-ci-workflow-test-spec.md | ✅ | Done |
 | 026 | GitHub Actions release workflow | 026-release-workflow-test-spec.md | ✅ | Done |
