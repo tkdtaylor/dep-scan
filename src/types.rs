@@ -69,6 +69,12 @@ pub struct ScanContext {
     /// attestation, populated by `main.rs` after policy evaluation for
     /// persisting to `scanned_packages.provenance_identity`.
     pub provenance_identity: Option<String>,
+    /// Result of fetching and parsing the Go checksum database entry (task 034).
+    ///
+    /// `None` means the sumdb was not queried (non-Go package or policy disabled).
+    /// `Some(GoSumDbResult::NotInSumDb)` means the module is not in the sumdb (404).
+    /// `Some(GoSumDbResult::Entry(..))` means the entry was parsed successfully.
+    pub go_sumdb_result: Option<crate::policy::go_sumdb::GoSumDbResult>,
 }
 
 impl ScanContext {
@@ -84,6 +90,7 @@ impl ScanContext {
             pypi_attestation: None,
             pypi_provenance_fetch_error: None,
             provenance_identity: None,
+            go_sumdb_result: None,
         }
     }
 }
@@ -281,6 +288,7 @@ mod tests {
             pypi_attestation: None,
             pypi_provenance_fetch_error: None,
             provenance_identity: None,
+            go_sumdb_result: None,
         };
 
         assert_eq!(ctx.metadata, meta);

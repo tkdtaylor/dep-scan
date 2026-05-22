@@ -1,6 +1,6 @@
 # Task 034 — Go checksum database signature verification
 
-**Status:** backlog
+**Status:** completed
 **Depends on:** 010 (policy framework), 019 (Go module client), 029 (h1 fetch from sumdb)
 
 ## Re-scoping note (2026-05-21)
@@ -41,20 +41,27 @@ go_sum_db_url = "https://sum.golang.org"       # already configurable per task 0
 
 ## Acceptance criteria
 
-- [ ] `src/policy/go_sumdb.rs`: `GoSumDbPolicy` implementing `Policy`
-- [ ] Lookup response parser refactored or replaced: returns `SumDbEntry { h1_module, h1_gomod, signed_tree_head }` instead of just an `Option<String>` h1
-- [ ] sum.golang.org Ed25519 public key embedded as a build-time constant (no runtime download — the key is the trust root)
-- [ ] Ed25519 verification uses an established crate (`ed25519-dalek` preferred — common in the ecosystem; pin to a stable version)
-- [ ] 404 from sumdb ⇒ `Warn` by default, `Block` when `require_go_sumdb = true`
-- [ ] Invalid signature ⇒ `Block` unconditionally — config does not silence
-- [ ] Malformed body (missing tree head, partial response) ⇒ treated as invalid signature (Block)
-- [ ] Valid signature + h1 present ⇒ `Pass`, persists `"sum.golang.org"` to `provenance_identity`
-- [ ] `GOSUMDB` environment variable is not read anywhere in this task's code
-- [ ] Policy wired into the pipeline behind `config.policies.check_go_sumdb` (default true)
-- [ ] Unit tests cover the parser (well-formed, 404, 500, malformed, mismatch in module/version), Ed25519 verification (valid, tampered sig, wrong-key sig), and policy decision logic
-- [ ] Integration tests against wiremock sumdb: valid response → Pass; 404 → Warn (exit 1) / Block when required (exit 1); invalid sig → Block (exit 1); non-Go registries unaffected
-- [ ] Only Go is in scope; npm and PyPI paths unchanged
-- [ ] All tests pass, `cargo clippy` clean, `cargo fmt --check` clean
+- [x] `src/policy/go_sumdb.rs`: `GoSumDbPolicy` implementing `Policy`
+- [x] Lookup response parser in `src/policy/go_sumdb.rs::parse_lookup_response` returns `SumDbEntry { h1_module, h1_gomod, signed_tree_head }` with the full signed-note block intact
+- [x] sum.golang.org Ed25519 public key embedded as a `const &str`: `SUMDB_PUBLIC_KEY_STR = "sum.golang.org+033de0ae+Ac4zctda0e5eza+HJyk9SxEdh+s3Ux18htTTAD8OuAn8"` ([src/policy/go_sumdb.rs:83-84](../../../src/policy/go_sumdb.rs#L83-L84)) — source documented inline
+- [x] Ed25519 verification via `ed25519-dalek` (pinned in `Cargo.toml`)
+- [x] 404 from sumdb ⇒ `Warn` by default, `Block` when `require_go_sumdb = true`
+- [x] Invalid signature ⇒ `Block` unconditionally — config does not silence (T-034-13)
+- [x] Malformed body ⇒ treated as Block (T-034-14)
+- [x] Valid signature + h1 present ⇒ `Pass`, persists `"sum.golang.org"` to `provenance_identity` (T-034-10)
+- [x] `GOSUMDB` env var is not consulted anywhere — verified by static check (T-034-15)
+- [x] Policy wired into the pipeline behind `config.policies.check_go_sumdb` (default true)
+- [x] `SumDbVerifier` trait + `MockVerifier` used in tests for dependency injection; real ed25519 path exercised by unit tests T-034-06/07/08
+- [x] Integration tests in `tests/go_sumdb_integration.rs` cover valid (Pass), 404 (Warn / Block when required), invalid sig (unconditional Block), configurable URL, non-Go unaffected (T-034-17 through T-034-22)
+- [x] Only Go is in scope; npm and PyPI paths unchanged
+- [x] 380 tests pass, `cargo clippy` clean, `cargo fmt --check` clean
+
+## Implementation notes
+
+- Re-scope per the top-of-file note was honored: no proxy-vs-sumdb h1 comparison; the policy verifies the Ed25519 signature on the signed-note block returned by sum.golang.org.
+- `SumDbClient::fetch_entry` returns a `GoSumDbResult` enum (`Entry` / `NotInSumDb` / `NetworkError` / `ParseError`) — explicit modeling avoids the "Option swallowing errors" anti-pattern that the original `fetch_h1_hash` had.
+- The `SumDbVerifier` trait mirrors the `SigstoreVerifier` pattern from task 032 — enables clean mocking in unit tests without compromising the production crypto path.
+- Pinned key source: Go distribution's `cmd/go/internal/modfetch/sumdb/keys.go`. Documented in the module-level docstring with rotation guidance.
 
 ## Out of scope
 

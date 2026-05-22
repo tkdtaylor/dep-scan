@@ -1,5 +1,6 @@
 pub mod crates;
 pub mod go;
+pub mod go_sumdb;
 pub mod npm;
 pub mod npm_attestation;
 pub mod pypi;

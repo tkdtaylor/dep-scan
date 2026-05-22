@@ -41,6 +41,8 @@ check_typosquatting = true
 check_vulnerabilities = true
 check_obfuscation = true
 check_npm_provenance = false
+check_pypi_provenance = false
+check_go_sumdb = false
 
 [osv]
 osv_url = "{osv_url}"

@@ -29,8 +29,12 @@ p256 = { version = "0.13", features = ["ecdsa"] }
 x509-parser = "0.16"
 # sha2 for computing digests (already transitively pulled in by many deps)
 sha2 = "0.10"
+# Task 034 — Go sumdb Ed25519 signature verification
+ed25519-dalek = { version = "2.2.0", features = ["rand_core"] }
 
 [dev-dependencies]
+# Ed25519 key generation for tests (uses OsRng from the rand crate ecosystem)
+rand_core = { version = "0.6", features = ["getrandom"] }
 wiremock = "0.6"
 assert_cmd = "2"
 predicates = "3"

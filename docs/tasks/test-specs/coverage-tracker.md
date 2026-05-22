@@ -44,7 +44,7 @@
 | 031 | Pip --require-hashes passthrough | 031-pip-require-hashes-passthrough-test-spec.md | 13/13 | ✅ |
 | 032 | npm provenance attestation verification | 032-npm-provenance-verification-test-spec.md | 21/21 | ✅ |
 | 033 | PyPI sigstore attestation verification (PEP 740) | 033-pypi-provenance-verification-test-spec.md | 22/22 | ✅ |
-| 034 | Go checksum database signature verification | 034-go-sumdb-cross-check-test-spec.md | 0/22 | ❌ |
+| 034 | Go checksum database signature verification | 034-go-sumdb-cross-check-test-spec.md | 22/22 | ✅ |
 
 ## Status key
 

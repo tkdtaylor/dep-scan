@@ -116,6 +116,17 @@ pub struct PolicyConfig {
     /// `Warn` to `Block`. Invalid attestations always block regardless.
     #[serde(default = "default_false")]
     pub require_pypi_provenance: bool,
+    /// Check Go modules against the Go checksum database (sum.golang.org) signature
+    /// verification policy (task 034).
+    ///
+    /// When `true`, the policy fetches the sumdb lookup response and verifies
+    /// the Ed25519 tree-head signature against the pinned sum.golang.org public key.
+    #[serde(default = "default_true")]
+    pub check_go_sumdb: bool,
+    /// When `true`, a module not found in the Go checksum database (404) escalates
+    /// from `Warn` to `Block`. Invalid / malformed signatures always block regardless.
+    #[serde(default = "default_false")]
+    pub require_go_sumdb: bool,
 }
 
 fn default_true() -> bool {
@@ -139,6 +150,8 @@ impl Default for PolicyConfig {
             require_npm_provenance: false,
             check_pypi_provenance: true,
             require_pypi_provenance: false,
+            check_go_sumdb: true,
+            require_go_sumdb: false,
         }
     }
 }

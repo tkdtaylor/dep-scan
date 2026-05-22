@@ -23,6 +23,7 @@ use config::Config;
 use osv::{OsvClient, registry_to_ecosystem};
 use policy::age::AgePolicy;
 use policy::dependency_confusion::DependencyConfusionPolicy;
+use policy::go_sumdb::{GoSumDbPolicy, RealSumDbVerifier};
 use policy::install_script::InstallScriptPolicy;
 use policy::maintainer::MaintainerChangePolicy;
 use policy::npm_provenance::{NpmProvenancePolicy, extract_provenance_identity};
@@ -34,6 +35,7 @@ use policy::vulnerability::VulnerabilityPolicy;
 use policy::{Policy, PolicyDetail, aggregate_results};
 use registry::crates::CratesRegistry;
 use registry::go::GoRegistry;
+use registry::go_sumdb::SumDbClient;
 use registry::npm::NpmRegistry;
 use registry::npm_attestation::NpmAttestationClient;
 use registry::pypi::PyPiRegistry;
@@ -254,6 +256,16 @@ async fn run_check(
         )));
     }
 
+    // Go checksum database signature verification (Go only; wired per-package in the scan loop).
+    // Non-Go packages get go_sumdb_result = None, so the policy returns Pass for them.
+    if config.policies.check_go_sumdb {
+        use std::sync::Arc;
+        policies.push(Box::new(GoSumDbPolicy::new(
+            config.policies.require_go_sumdb,
+            Arc::new(RealSumDbVerifier),
+        )));
+    }
+
     // Create OSV client for vulnerability lookups
     let osv_client = if config.policies.check_vulnerabilities {
         Some(OsvClient::new(config.osv.osv_url.clone()))
@@ -342,7 +354,7 @@ async fn run_check(
             }
         }
 
-        let metadata = match fetch_result {
+        let mut metadata = match fetch_result {
             Ok(m) => m,
             Err(e) => {
                 has_error = true;
@@ -440,6 +452,37 @@ async fn run_check(
                 (None, None)
             };
 
+        // Fetch Go checksum database signed entry (Go only).
+        // The sumdb URL is configurable for testing and private mirrors.
+        // GOSUMDB=off from the environment is intentionally NOT consulted —
+        // dep-scan uses check_go_sumdb in its own config (T-034-15).
+        //
+        // The h1: content hash is extracted from the GoSumDbResult here and
+        // set on `metadata.content_hash` to avoid a duplicate HTTP call
+        // (GoRegistry::get_metadata no longer fetches the sumdb directly).
+        let go_sumdb_result = if config.policies.check_go_sumdb && reg_type == RegistryType::Go {
+            // Fetch sumdb for Go modules when the policy is enabled.
+            // The h1: content hash is extracted from the entry here and
+            // set on `metadata.content_hash`.
+            // GOSUMDB=off from the environment is intentionally NOT consulted (T-034-15).
+            let sumdb_client = SumDbClient::new(config.registries.go_sum_db_url.clone());
+            Some(
+                sumdb_client
+                    .fetch_entry(&metadata.name, &metadata.version)
+                    .await,
+            )
+        } else {
+            None
+        };
+
+        // Extract the h1: content hash from the Go sumdb entry (if available) and
+        // populate `metadata.content_hash`.  This avoids the duplicate HTTP call
+        // that would result from having `GoRegistry::get_metadata` also fetch the
+        // sumdb (task 034 refactor).
+        if let Some(crate::policy::go_sumdb::GoSumDbResult::Entry(ref entry)) = go_sumdb_result {
+            metadata.content_hash = Some(entry.h1_module.clone());
+        }
+
         // Build scan context and enrich
         let mut ctx = ScanContext::from_metadata(metadata.clone());
         ctx.install_scripts = install_scripts;
@@ -448,6 +491,7 @@ async fn run_check(
         ctx.npm_attestation_fetch_error = npm_attestation_fetch_error;
         ctx.pypi_attestation = pypi_attestation;
         ctx.pypi_provenance_fetch_error = pypi_provenance_fetch_error;
+        ctx.go_sumdb_result = go_sumdb_result;
 
         // Query OSV for known vulnerabilities
         if let Some(ref osv) = osv_client {
@@ -505,6 +549,16 @@ async fn run_check(
         {
             ctx.provenance_identity =
                 extract_pypi_provenance_identity(bundle, algo, hex, &RealSigstoreVerifier);
+        }
+
+        // Persist "sum.golang.org" as the provenance identity for Go modules that passed
+        // sumdb signature verification (task 034).
+        if config.policies.check_go_sumdb && reg_type == RegistryType::Go && result_str == "pass" {
+            // Only set if the sumdb check actually contributed to the pass result.
+            // If go_sumdb_result is Some(Entry(..)), the signature was verified.
+            if let Some(crate::policy::go_sumdb::GoSumDbResult::Entry(_)) = &ctx.go_sumdb_result {
+                ctx.provenance_identity = Some("sum.golang.org".to_string());
+            }
         }
 
         // Record current maintainers in cache for future comparisons

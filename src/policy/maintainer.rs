@@ -93,6 +93,7 @@ mod tests {
             pypi_attestation: None,
             pypi_provenance_fetch_error: None,
             provenance_identity: None,
+            go_sumdb_result: None,
         }
     }
 

@@ -7,11 +7,15 @@ use crate::types::PackageMetadata;
 
 /// Go module proxy client.
 ///
-/// Fetches package metadata from a Go module proxy (default: proxy.golang.org)
-/// and optionally cross-checks the `h1:` hash from the Go checksum database
-/// (default: sum.golang.org). Both URLs are configurable.
+/// Fetches package metadata from a Go module proxy (default: proxy.golang.org).
+/// The Go checksum database (sum.golang.org) is now handled by `SumDbClient`
+/// in `registry::go_sumdb` (task 034), called once from `main.rs` to avoid
+/// duplicate HTTP calls.
 pub struct GoRegistry {
     base_url: String,
+    /// Retained for backward compatibility with the `GoRegistry::new` constructor;
+    /// the actual sumdb lookup is now performed by `SumDbClient` in main.rs.
+    #[allow(dead_code)]
     sum_db_url: String,
     client: Client,
 }
@@ -31,7 +35,7 @@ struct GoVersionInfo {
 /// are replaced with `!` followed by the lowercase letter.
 /// For example, `github.com/Azure/go-autorest` becomes
 /// `github.com/!azure/go-autorest`.
-fn encode_module_path(module: &str) -> String {
+pub fn encode_module_path(module: &str) -> String {
     module
         .chars()
         .map(|c| {
@@ -57,41 +61,6 @@ impl GoRegistry {
             sum_db_url,
             client: Client::new(),
         }
-    }
-
-    /// Fetch the `h1:` content hash for a module version from the Go checksum database.
-    ///
-    /// The sum DB returns lines in the format:
-    /// ```
-    /// <module> <version>/go.mod h1:<base64>
-    /// <module> <version> h1:<base64>
-    /// ```
-    /// This method extracts the `h1:` hash from the line that matches
-    /// `<module> <version> h1:...` (i.e., the zip hash, not the go.mod hash).
-    ///
-    /// Returns `None` on any error (network, parse, not found) — failure to
-    /// obtain a hash is non-fatal at scan time.
-    async fn fetch_h1_hash(&self, module: &str, version: &str) -> Option<String> {
-        let encoded = encode_module_path(module);
-        let url = format!("{}/lookup/{}@{}", self.sum_db_url, encoded, version);
-
-        let response = self.client.get(&url).send().await.ok()?;
-        if !response.status().is_success() {
-            return None;
-        }
-
-        let body = response.text().await.ok()?;
-        // Find the line matching "<module> <version> h1:<base64>" (not the go.mod line)
-        body.lines()
-            .find(|line| {
-                let parts: Vec<&str> = line.splitn(3, ' ').collect();
-                parts.len() == 3
-                    && parts[0] == module
-                    && parts[1] == version
-                    && parts[2].starts_with("h1:")
-            })
-            .and_then(|line| line.splitn(3, ' ').nth(2))
-            .map(|h| h.to_string())
     }
 
     /// Fetch the version list for a module from the proxy.
@@ -201,8 +170,12 @@ impl Registry for GoRegistry {
             .parse::<DateTime<Utc>>()
             .map_err(|e| RegistryError::ParseError(format!("invalid Time field: {e}")))?;
 
-        // Fetch h1: hash from the checksum database (non-fatal if unavailable).
-        let content_hash = self.fetch_h1_hash(name, &resolved_version).await;
+        // Note: the h1: content hash is obtained from the Go checksum database
+        // (sum.golang.org) by `SumDbClient` in main.rs when `check_go_sumdb`
+        // is enabled.  The `content_hash` field is populated there from the
+        // `GoSumDbResult::Entry` to avoid making two identical HTTP calls to
+        // the sumdb.  When `check_go_sumdb` is disabled, `content_hash`
+        // remains `None`.
 
         Ok(PackageMetadata {
             name: name.to_string(),
@@ -212,7 +185,7 @@ impl Registry for GoRegistry {
             maintainers: vec![],  // Go proxy doesn't provide maintainer info
             downloads: None,      // Go proxy doesn't provide download counts
             repository_url: None, // Could infer from module path but keeping simple
-            content_hash,
+            content_hash: None,   // Populated from GoSumDbResult in main.rs (task 034)
         })
     }
 }
@@ -521,47 +494,51 @@ mod tests {
         );
     }
 
-    // T-029-09: Go module client extracts h1 hash from sum DB
+    // T-029-09: Go module h1 hash comes from the Go checksum database.
+    //
+    // NOTE (task 034 refactor): `GoRegistry::get_metadata` no longer fetches the
+    // sumdb directly to avoid duplicate HTTP calls. The h1 hash is now extracted
+    // from `GoSumDbResult::Entry` in `main.rs` via `SumDbClient` (a single fetch).
+    // This test verifies that the sumdb lookup via `SumDbClient` returns the
+    // correct h1 hash from the lookup response.
     #[tokio::test]
-    async fn go_extracts_h1_hash_from_sum_db() {
-        let proxy_server = MockServer::start().await;
+    async fn go_sumdb_client_extracts_h1_hash() {
+        use crate::policy::go_sumdb::GoSumDbResult;
+        use crate::registry::go_sumdb::SumDbClient;
+
         let sumdb_server = MockServer::start().await;
 
-        // Module proxy: list and info
-        Mock::given(method("GET"))
-            .and(path("/github.com/test/hashmodule/@v/list"))
-            .respond_with(ResponseTemplate::new(200).set_body_string("v1.2.3\n"))
-            .mount(&proxy_server)
-            .await;
+        // Full sumdb lookup body with signed note (parser requires it)
+        let sum_db_body = concat!(
+            "github.com/test/hashmodule v1.2.3 h1:c29zZWtyb3BlcnR5\n",
+            "github.com/test/hashmodule v1.2.3/go.mod h1:AAAA\n",
+            "\n",
+            "go.sum database tree\n",
+            "12345\n",
+            "c29zZWtyb3BlcnR5\n",
+            "\n",
+            "\u{2014} sum.golang.org ZZZZ\n",
+        );
 
-        Mock::given(method("GET"))
-            .and(path("/github.com/test/hashmodule/@v/v1.2.3.info"))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .set_body_string(r#"{"Version":"v1.2.3","Time":"2024-05-01T00:00:00Z"}"#),
-            )
-            .mount(&proxy_server)
-            .await;
-
-        // Sum DB: lookup endpoint returns sum DB lines
-        // Format: "<module> <version>/go.mod h1:<base64>\n<module> <version> h1:<base64>"
-        let sum_db_body = "github.com/test/hashmodule v1.2.3/go.mod h1:AAAA\ngithub.com/test/hashmodule v1.2.3 h1:c29zZWtyb3BlcnR5";
         Mock::given(method("GET"))
             .and(path("/lookup/github.com/test/hashmodule@v1.2.3"))
             .respond_with(ResponseTemplate::new(200).set_body_string(sum_db_body))
             .mount(&sumdb_server)
             .await;
 
-        let registry = GoRegistry::new(proxy_server.uri(), sumdb_server.uri());
-        let meta = registry
-            .get_metadata("github.com/test/hashmodule", None)
-            .await
-            .unwrap();
+        let client = SumDbClient::new(sumdb_server.uri());
+        let result = client
+            .fetch_entry("github.com/test/hashmodule", "v1.2.3")
+            .await;
 
-        assert_eq!(
-            meta.content_hash,
-            Some("h1:c29zZWtyb3BlcnR5".to_string()),
-            "content_hash should be the h1 hash from the sum DB"
-        );
+        match result {
+            GoSumDbResult::Entry(entry) => {
+                assert_eq!(
+                    entry.h1_module, "h1:c29zZWtyb3BlcnR5",
+                    "T-029-09: content_hash should be the h1 hash from the sum DB"
+                );
+            }
+            other => panic!("T-029-09: expected Entry, got {:?}", other),
+        }
     }
 }
