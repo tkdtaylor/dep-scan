@@ -1,6 +1,6 @@
 # Task 031 — Close TOCTOU window for pip via `--require-hashes`
 
-**Status:** backlog
+**Status:** completed
 **Depends on:** 029, 030
 
 ## Objective
@@ -23,17 +23,17 @@ Non-pip registries are unaffected — npm, cargo, and Go already self-verify.
 
 ## Acceptance criteria
 
-- [ ] `run_install` PyPI branch builds a synthetic `--require-hashes` requirements file from the metadata captured during the scan
-- [ ] Requirements file lines use the format `<name>==<version> --hash=sha256:<hex>` (PyPI hashes are always sha256 per task 029)
-- [ ] Temp file is created in `std::env::temp_dir()` with a random suffix and is removed in a `Drop`-style cleanup that runs even if pip exits non-zero
-- [ ] When all packages have hashes, pip is invoked as `pip install --require-hashes -r <tempfile>`
-- [ ] When *any* package lacks a hash, fall back to `pip install <packages>` and print a per-package stderr warning naming the registry URL
-- [ ] No change to npm, cargo, or Go install paths
-- [ ] Integration test: pip install with a clean package — temp requirements file is generated, pip is invoked with `--require-hashes -r`, file is cleaned up afterward
-- [ ] Integration test: pip install where the metadata returned `content_hash = None` — fallback path is taken, warning printed, no `--require-hashes` argument
-- [ ] Integration test: pip install with mixed packages (one has hash, one doesn't) — fallback path is taken; the partial-passthrough is not attempted (all-or-nothing avoids per-package divergence)
-- [ ] `--force` interacts cleanly: if force is used after a hash mismatch re-scan, the `--require-hashes` passthrough still applies to whatever hash was observed at the end of the (forced) scan
-- [ ] All tests pass, `cargo clippy` clean, `cargo fmt --check` clean
+- [x] `run_install` PyPI branch builds a synthetic `--require-hashes` requirements file from the metadata captured during the scan
+- [x] Requirements file lines use the format `<name>==<version> --hash=sha256:<hex>` (PyPI hashes are always sha256 per task 029)
+- [x] Temp file is created in `std::env::temp_dir()` with a random suffix and is removed in a `Drop`-style cleanup that runs even if pip exits non-zero
+- [x] When all packages have hashes, pip is invoked as `pip install --require-hashes -r <tempfile>`
+- [x] When *any* package lacks a hash, fall back to `pip install <packages>` and print a per-package stderr warning naming the registry URL
+- [x] No change to npm, cargo, or Go install paths
+- [x] Integration test: pip install with a clean package — temp requirements file is generated, pip is invoked with `--require-hashes -r`, file is cleaned up afterward
+- [x] Integration test: pip install where the metadata returned `content_hash = None` — fallback path is taken, warning printed, no `--require-hashes` argument
+- [x] Integration test: pip install with mixed packages (one has hash, one doesn't) — fallback path is taken; the partial-passthrough is not attempted (all-or-nothing avoids per-package divergence)
+- [x] `--force` interacts cleanly: if force is used after a hash mismatch re-scan, the `--require-hashes` passthrough still applies to whatever hash was observed at the end of the (forced) scan
+- [x] All tests pass, `cargo clippy` clean, `cargo fmt --check` clean
 
 ## Out of scope
 

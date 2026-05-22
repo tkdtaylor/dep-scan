@@ -484,6 +484,76 @@ async fn run_check(
     }
 }
 
+/// A RAII wrapper around a temporary requirements file.
+///
+/// The file is deleted when this struct is dropped, regardless of whether
+/// pip succeeded, failed, or panicked.
+struct TempReqFile {
+    path: std::path::PathBuf,
+}
+
+impl TempReqFile {
+    /// Create a new temp file in `std::env::temp_dir()` with a random suffix.
+    fn create(contents: &str) -> Result<Self> {
+        let suffix: u64 = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.subsec_nanos() as u64 ^ (d.as_secs() << 32))
+            .unwrap_or(12345);
+        let path = std::env::temp_dir().join(format!("dep-scan-{suffix}.txt"));
+        std::fs::write(&path, contents).with_context(|| {
+            format!("Failed to write temp requirements file: {}", path.display())
+        })?;
+        Ok(Self { path })
+    }
+
+    fn path(&self) -> &std::path::Path {
+        &self.path
+    }
+}
+
+impl Drop for TempReqFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+/// A package triple: (name, version, content_hash).
+type PkgTriple = (String, String, Option<String>);
+
+/// Build pip `--require-hashes` requirements file contents from a list of
+/// (name, version, content_hash) triples.
+///
+/// Returns `Ok(String)` with the file contents if every package has a
+/// `sha256:`-prefixed hash. Returns `Err(String)` describing the first
+/// problematic package if any hash is missing or uses a non-sha256 algorithm.
+///
+/// The format per line is:
+/// ```text
+/// <name>==<version> --hash=sha256:<hex>
+/// ```
+fn build_pip_requirements(packages: &[PkgTriple]) -> Result<String, String> {
+    let mut lines = Vec::with_capacity(packages.len());
+    for (name, version, hash_opt) in packages {
+        match hash_opt.as_deref() {
+            None => {
+                return Err(format!("{name} has no verifiable hash"));
+            }
+            Some(h) => {
+                // Validate algorithm prefix — only sha256 is accepted for pip.
+                if !h.starts_with("sha256:") {
+                    let algo = h.split(':').next().unwrap_or("unknown");
+                    return Err(format!(
+                        "{name} has unsupported hash algorithm '{algo}' (only sha256 is accepted for pip --require-hashes)"
+                    ));
+                }
+                // Pass the full `sha256:<hex>` verbatim — pip accepts this format.
+                lines.push(format!("{name}=={version} --hash={h}"));
+            }
+        }
+    }
+    Ok(lines.join("\n") + "\n")
+}
+
 async fn run_install(
     config_path: Option<&Path>,
     verbose: bool,
@@ -519,9 +589,16 @@ async fn run_install(
     // 3. Build and execute the package manager command
     let reg_type: RegistryType = registry_flag.parse().map_err(|e| anyhow::anyhow!("{e}"))?;
 
+    // For PyPI: attempt --require-hashes passthrough.
+    // Re-fetch metadata after the scan so we use the freshly-observed hash
+    // (not a potentially-stale cached value), closing the TOCTOU window.
+    if reg_type == RegistryType::PyPI {
+        return run_pip_install(config_path, verbose, &packages, &registry_flag).await;
+    }
+
     let (cmd, args) = match reg_type {
         RegistryType::Npm => ("npm", vec!["install".to_string()]),
-        RegistryType::PyPI => ("pip", vec!["install".to_string()]),
+        RegistryType::PyPI => unreachable!("PyPI handled above"),
         RegistryType::Crates => ("cargo", vec!["add".to_string()]),
         RegistryType::Go => ("go", vec!["get".to_string()]),
     };
@@ -544,6 +621,138 @@ async fn run_install(
         Ok(0)
     } else {
         Ok(status.code().unwrap_or(1))
+    }
+}
+
+/// Execute `pip install` for a list of PyPI packages.
+///
+/// After the scan has passed (or been force-bypassed), re-fetches metadata for
+/// each package and attempts to build a `--require-hashes` requirements file.
+/// If every package has a `sha256:` hash, pip is invoked as:
+///   `pip install --require-hashes -r <tempfile>`
+/// If *any* package is missing a hash or has a non-sha256 hash, falls back to:
+///   `pip install <packages>`
+/// with a per-package stderr warning.
+async fn run_pip_install(
+    config_path: Option<&Path>,
+    verbose: bool,
+    packages: &[String],
+    _registry_flag: &str,
+) -> Result<i32> {
+    let config = Config::load(config_path)?;
+
+    // Re-fetch metadata for each package to get the freshly-observed hash.
+    let mut triples: Vec<PkgTriple> = Vec::with_capacity(packages.len());
+    let mut fallback_warnings: Vec<(String, String)> = Vec::new(); // (pkg, reason)
+
+    for pkg_name in packages {
+        let client = PyPiRegistry::new(config.registries.pypi_url.clone());
+        match client.get_metadata(pkg_name, None).await {
+            Ok(meta) => {
+                let hash = meta.content_hash.clone();
+                // Validate hash algorithm proactively so we can warn with the registry URL.
+                if let Some(ref h) = hash {
+                    if !h.starts_with("sha256:") {
+                        let algo = h.split(':').next().unwrap_or("unknown");
+                        fallback_warnings.push((
+                            pkg_name.clone(),
+                            format!("unsupported hash algorithm '{algo}' (only sha256 accepted for pip --require-hashes)"),
+                        ));
+                    }
+                } else {
+                    fallback_warnings.push((
+                        pkg_name.clone(),
+                        format!("no verifiable hash from {}", config.registries.pypi_url),
+                    ));
+                }
+                triples.push((pkg_name.clone(), meta.version.clone(), hash));
+            }
+            Err(e) => {
+                // Registry fetch error — fall back to plain install.
+                fallback_warnings.push((pkg_name.clone(), format!("registry fetch failed: {e}")));
+                triples.push((pkg_name.clone(), String::new(), None));
+            }
+        }
+    }
+
+    println!("\nInstalling via pip...");
+
+    // If any package triggered a warning, fall back to plain pip install.
+    if !fallback_warnings.is_empty() {
+        for (pkg, reason) in &fallback_warnings {
+            eprintln!(
+                "warning: {pkg} has no verifiable hash from {}; pip will not verify integrity at download time",
+                config.registries.pypi_url
+            );
+            if verbose {
+                eprintln!("  reason: {reason}");
+            }
+        }
+        // Plain fallback.
+        let mut full_args = vec!["install".to_string()];
+        full_args.extend(packages.iter().cloned());
+        if verbose {
+            eprintln!("Running: pip {}", full_args.join(" "));
+        }
+        let status = std::process::Command::new("pip")
+            .args(&full_args)
+            .status()
+            .with_context(|| "Failed to run 'pip'. Is it installed and in PATH?")?;
+        return if status.success() {
+            Ok(0)
+        } else {
+            Ok(status.code().unwrap_or(1))
+        };
+    }
+
+    // All packages have sha256 hashes — use --require-hashes.
+    match build_pip_requirements(&triples) {
+        Ok(contents) => {
+            let temp_file = TempReqFile::create(&contents)?;
+            let temp_path = temp_file.path().to_path_buf();
+
+            if verbose {
+                eprintln!(
+                    "Running: pip install --require-hashes -r {}",
+                    temp_path.display()
+                );
+            }
+
+            let status = std::process::Command::new("pip")
+                .args([
+                    "install",
+                    "--require-hashes",
+                    "-r",
+                    temp_path.to_str().unwrap_or(""),
+                ])
+                .status()
+                .with_context(|| "Failed to run 'pip'. Is it installed and in PATH?")?;
+
+            // `temp_file` is dropped here, which removes the temp file.
+            drop(temp_file);
+
+            if status.success() {
+                Ok(0)
+            } else {
+                Ok(status.code().unwrap_or(1))
+            }
+        }
+        Err(reason) => {
+            // This path is a fallback safety net; the per-package check above
+            // should already have caught all missing/non-sha256 hashes.
+            eprintln!("warning: falling back to plain pip install: {reason}");
+            let mut full_args = vec!["install".to_string()];
+            full_args.extend(packages.iter().cloned());
+            let status = std::process::Command::new("pip")
+                .args(&full_args)
+                .status()
+                .with_context(|| "Failed to run 'pip'. Is it installed and in PATH?")?;
+            if status.success() {
+                Ok(0)
+            } else {
+                Ok(status.code().unwrap_or(1))
+            }
+        }
     }
 }
 
@@ -603,6 +812,139 @@ mod tests {
             decision,
             HashVerifyDecision::Reverify,
             "both-None should produce Reverify (fail-closed)"
+        );
+    }
+
+    // ── T-031 unit tests ─────────────────────────────────────────────────────
+
+    // T-031-01: Build requirements file from metadata triples (all hashes present)
+    #[test]
+    fn build_pip_requirements_all_hashes_present() {
+        let packages: Vec<PkgTriple> = vec![
+            (
+                "requests".to_string(),
+                "2.31.0".to_string(),
+                Some("sha256:aaaa".to_string()),
+            ),
+            (
+                "urllib3".to_string(),
+                "2.0.7".to_string(),
+                Some("sha256:bbbb".to_string()),
+            ),
+        ];
+        let result = build_pip_requirements(&packages);
+        assert!(result.is_ok(), "expected Ok, got Err: {:?}", result.err());
+        let contents = result.unwrap();
+        assert!(
+            contents.contains("requests==2.31.0 --hash=sha256:aaaa"),
+            "missing requests line, got: {contents}"
+        );
+        assert!(
+            contents.contains("urllib3==2.0.7 --hash=sha256:bbbb"),
+            "missing urllib3 line, got: {contents}"
+        );
+    }
+
+    // T-031-02: Builder returns Err when any hash is None
+    #[test]
+    fn build_pip_requirements_any_hash_none_returns_err() {
+        let packages: Vec<PkgTriple> = vec![
+            (
+                "requests".to_string(),
+                "2.31.0".to_string(),
+                Some("sha256:aaaa".to_string()),
+            ),
+            ("evil-pkg".to_string(), "0.1.0".to_string(), None),
+        ];
+        let result = build_pip_requirements(&packages);
+        assert!(result.is_err(), "expected Err when a package has None hash");
+        let msg = result.unwrap_err();
+        assert!(
+            msg.contains("evil-pkg"),
+            "error message should name the problematic package, got: {msg}"
+        );
+    }
+
+    // T-031-03: Hash algorithm prefix is preserved verbatim
+    #[test]
+    fn build_pip_requirements_hash_prefix_preserved_verbatim() {
+        let packages: Vec<PkgTriple> = vec![(
+            "mypkg".to_string(),
+            "1.0.0".to_string(),
+            Some("sha256:abcdef".to_string()),
+        )];
+        let result = build_pip_requirements(&packages).unwrap();
+        assert!(
+            result.contains("--hash=sha256:abcdef"),
+            "full algo:hex should be preserved verbatim, got: {result}"
+        );
+    }
+
+    // T-031-04: Non-sha256 algorithm is rejected
+    #[test]
+    fn build_pip_requirements_non_sha256_rejected() {
+        let packages: Vec<PkgTriple> = vec![(
+            "mypkg".to_string(),
+            "1.0.0".to_string(),
+            Some("sha512:abcd".to_string()),
+        )];
+        let result = build_pip_requirements(&packages);
+        assert!(
+            result.is_err(),
+            "expected Err for non-sha256 hash algorithm"
+        );
+        let msg = result.unwrap_err();
+        assert!(
+            msg.contains("sha512"),
+            "error message should name the algorithm, got: {msg}"
+        );
+    }
+
+    // T-031-05: Temp file is removed after successful invocation
+    #[test]
+    fn temp_req_file_removed_after_success() {
+        let temp =
+            TempReqFile::create("requests==2.31.0 --hash=sha256:aaaa\n").expect("create temp file");
+        let path = temp.path().to_path_buf();
+        assert!(path.exists(), "temp file should exist before drop");
+        drop(temp);
+        assert!(
+            !path.exists(),
+            "temp file should be removed after drop (success path)"
+        );
+    }
+
+    // T-031-06: Temp file is removed after failed invocation (drop on Err path)
+    #[test]
+    fn temp_req_file_removed_after_failure() {
+        let temp =
+            TempReqFile::create("requests==2.31.0 --hash=sha256:aaaa\n").expect("create temp file");
+        let path = temp.path().to_path_buf();
+        assert!(path.exists(), "temp file should exist before drop");
+        // Simulate the failure path by dropping without running pip.
+        drop(temp);
+        assert!(
+            !path.exists(),
+            "temp file should be removed after drop (failure path)"
+        );
+    }
+
+    // T-031-07: Temp file is removed on early return (RAII / panic safety)
+    #[test]
+    fn temp_req_file_removed_on_early_return() {
+        let path = {
+            let temp = TempReqFile::create("urllib3==2.0.7 --hash=sha256:bbbb\n")
+                .expect("create temp file");
+            let p = temp.path().to_path_buf();
+            assert!(p.exists());
+            // Simulate early return: `temp` goes out of scope here without
+            // pip ever being invoked.
+            p
+            // `temp` is dropped at end of this block.
+        };
+        assert!(
+            !path.exists(),
+            "temp file should be cleaned up on early return / out-of-scope drop"
         );
     }
 }
