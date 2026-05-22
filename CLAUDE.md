@@ -30,6 +30,9 @@ cargo run -- <args>     # run the CLI
 cargo clippy            # lint
 cargo fmt --check       # check formatting
 cargo fmt               # auto-format
+cargo audit             # audit dependencies for known RustSec advisories
+                        # To suppress an advisory, add an [advisories.ignore] entry in
+                        # .cargo/audit.toml with a justification comment — never use --ignore on the CLI
 
 # Repo-state guards (idempotent, exit 0 on clean state)
 scripts/check-task-state.sh           # fail if a task file is tracked in two of {backlog, active, completed}
