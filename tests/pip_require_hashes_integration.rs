@@ -592,7 +592,8 @@ exit 0
 // T-031-12: --force after hash-mismatch re-scan still uses --require-hashes
 // with the new hash (not the stale cached one).
 //
-// Pre-populate cache with (pkg, "latest", pypi, "pass", content_hash="sha256:aaaa")
+// Pre-populate cache with (pkg, "1.0.0", pypi, "pass", content_hash="sha256:aaaa")
+// (Task 038: cache key uses the resolved version, not the literal "latest".)
 // wiremock returns metadata with digests.sha256 = "bbbb" and a fresh published_at
 // (fails age policy — forces the re-scan path).
 // Run: dep-scan install pkg --registry pypi --force
@@ -608,10 +609,11 @@ async fn force_after_hash_mismatch_rescan_uses_new_hash() {
     let db_str = db_path.to_str().unwrap();
 
     // Seed with stale hash "sha256:aaaa" and result "pass".
+    // Key by resolved version "1.0.0" (not "latest") per task 038.
     seed_cache(
         db_str,
         "force-pkg",
-        "latest",
+        "1.0.0",
         "pypi",
         "pass",
         Some("sha256:aaaa"),

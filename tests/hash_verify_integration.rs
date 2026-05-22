@@ -3,6 +3,10 @@
 /// These tests use assert_cmd + wiremock to run the full binary against a
 /// controlled HTTP mock server and a real (file-backed) SQLite cache, so every
 /// layer of the stack is exercised.
+///
+/// T-038-12: Task 030 hash-verify behavior is preserved with the new resolved-version
+/// cache key (task 038).  All tests in this file use the concrete version string
+/// (e.g. "1.0.0") as the cache key — they will fail if the binary reverts to "latest".
 use std::io::Write;
 
 use assert_cmd::Command;
@@ -181,7 +185,8 @@ const HASH_B: &str = "sha512:01";
 
 // T-030-06: Cache hit with matching hash skips re-scan
 //
-// Pre-populate cache with (pkg, "latest", npm, "pass", content_hash=HASH_A).
+// Pre-populate cache with (pkg, "1.0.0", npm, "pass", content_hash=HASH_A).
+// (Task 038: cache key uses the resolved version, not the literal "latest".)
 // wiremock returns dist.integrity = SRI_A (parses to HASH_A — matches).
 // Run: dep-scan check pkg --registry npm --verbose
 // Expected: exit 0, output contains "cache hit (verified)", wiremock observes
@@ -196,7 +201,7 @@ async fn cache_hit_with_matching_hash_skips_rescan() {
     seed_cache(
         db_str,
         "verify-hit-pkg",
-        "latest",
+        "1.0.0", // resolved version from registry, not "latest" (task 038)
         "npm",
         "pass",
         Some(HASH_A),
@@ -254,7 +259,7 @@ async fn cache_hit_with_mismatched_hash_invalidates_and_rescans() {
     seed_cache(
         db_str,
         "verify-mismatch-pkg",
-        "latest",
+        "1.0.0", // resolved version from registry, not "latest" (task 038)
         "npm",
         "pass",
         Some(HASH_A),
@@ -293,7 +298,7 @@ async fn cache_hit_with_mismatched_hash_invalidates_and_rescans() {
         ));
 
     // After re-scan the cache row should carry the new hash (HASH_B).
-    let stored = read_cached_hash(db_str, "verify-mismatch-pkg", "latest", "npm");
+    let stored = read_cached_hash(db_str, "verify-mismatch-pkg", "1.0.0", "npm");
     assert_eq!(
         stored,
         Some(HASH_B.to_string()),
@@ -319,7 +324,7 @@ async fn cache_hit_mismatch_rescan_blocks() {
     seed_cache(
         db_str,
         "verify-block-pkg",
-        "latest",
+        "1.0.0", // resolved version from registry, not "latest" (task 038)
         "npm",
         "pass", // stale cached pass
         Some(HASH_A),
@@ -366,6 +371,8 @@ async fn cache_hit_mismatch_rescan_blocks() {
 // Run: dep-scan check pkg --registry npm --verbose
 // Expected: exit 0, verbose output shows "cache hash mismatch — re-scanning",
 // post-run the row has content_hash = HASH_B.
+//
+// (Task 038: the row is keyed by the resolved version "1.0.0", not "latest".)
 #[tokio::test]
 async fn legacy_cache_row_null_hash_triggers_rescan() {
     let server = MockServer::start().await;
@@ -373,8 +380,8 @@ async fn legacy_cache_row_null_hash_triggers_rescan() {
     let db_path = tmp.path().join("cache.db");
     let db_str = db_path.to_str().unwrap();
 
-    // Seed with NULL content_hash (legacy row).
-    seed_cache(db_str, "verify-legacy-pkg", "latest", "npm", "pass", None);
+    // Seed with NULL content_hash (pre-029 row, keyed by the resolved version).
+    seed_cache(db_str, "verify-legacy-pkg", "1.0.0", "npm", "pass", None);
 
     let config = write_config(&server.uri(), db_str);
 
@@ -408,7 +415,7 @@ async fn legacy_cache_row_null_hash_triggers_rescan() {
         ));
 
     // The re-scan should have stored the new hash.
-    let stored = read_cached_hash(db_str, "verify-legacy-pkg", "latest", "npm");
+    let stored = read_cached_hash(db_str, "verify-legacy-pkg", "1.0.0", "npm");
     assert_eq!(
         stored,
         Some(HASH_B.to_string()),
@@ -435,7 +442,7 @@ async fn both_hashes_none_fail_closed_rescans() {
     seed_cache(
         db_str,
         "verify-both-none-pkg",
-        "latest",
+        "1.0.0", // resolved version from registry, not "latest" (task 038)
         "npm",
         "pass",
         None, // cached hash = NULL
@@ -474,7 +481,7 @@ async fn both_hashes_none_fail_closed_rescans() {
 
     // Cache row is refreshed (scanned_at updated) — result should still be "pass"
     // (package is 72h old, passes age policy). content_hash remains None.
-    let stored_result = read_cached_result(db_str, "verify-both-none-pkg", "latest", "npm");
+    let stored_result = read_cached_result(db_str, "verify-both-none-pkg", "1.0.0", "npm");
     assert_eq!(
         stored_result,
         Some("pass".to_string()),
@@ -500,7 +507,7 @@ async fn registry_fetch_failure_falls_through_to_error() {
     seed_cache(
         db_str,
         "verify-error-pkg",
-        "latest",
+        "1.0.0", // resolved version from registry, not "latest" (task 038)
         "npm",
         "pass",
         Some(HASH_A),
@@ -549,7 +556,7 @@ async fn install_force_does_not_bypass_verification() {
     seed_cache(
         db_str,
         "verify-force-pkg",
-        "latest",
+        "1.0.0", // resolved version from registry, not "latest" (task 038)
         "npm",
         "pass", // stale cached pass
         Some(HASH_A),
@@ -614,11 +621,11 @@ async fn verify_loop_closes_second_run_is_clean_hit() {
     let db_path = tmp.path().join("cache.db");
     let db_str = db_path.to_str().unwrap();
 
-    // Seed with HASH_A (stale).
+    // Seed with HASH_A (stale, keyed by resolved version per task 038).
     seed_cache(
         db_str,
         "verify-loop-pkg",
-        "latest",
+        "1.0.0", // resolved version from registry, not "latest" (task 038)
         "npm",
         "pass",
         Some(HASH_A),
@@ -656,8 +663,8 @@ async fn verify_loop_closes_second_run_is_clean_hit() {
             "cache hash mismatch for verify-loop-pkg; re-scanning",
         ));
 
-    // Confirm cache now holds HASH_B.
-    let stored = read_cached_hash(db_str, "verify-loop-pkg", "latest", "npm");
+    // Confirm cache now holds HASH_B (keyed by resolved version per task 038).
+    let stored = read_cached_hash(db_str, "verify-loop-pkg", "1.0.0", "npm");
     assert_eq!(
         stored,
         Some(HASH_B.to_string()),

@@ -329,46 +329,47 @@ async fn run_check(
         };
 
         // Check cache — if there is a hit, verify the content hash before honoring it.
-        if let Ok(Some(entry)) = cache.lookup(pkg_name, "latest", &reg_str) {
-            match &fetch_result {
-                Ok(fresh_meta) => {
-                    let decision = verify_hash(
-                        entry.content_hash.as_deref(),
-                        fresh_meta.content_hash.as_deref(),
-                    );
-                    if decision == HashVerifyDecision::HonorCache {
-                        if verbose {
-                            eprintln!("cache hit (verified) for {pkg_name}");
-                        }
-                        // Reconstruct result from cache — hash matches, verdict is trustworthy.
-                        let cached_result = entry.result.clone();
-                        let is_failure = cached_result == "block" || cached_result == "warn";
-                        if is_failure {
-                            has_failure = true;
-                        }
-                        results.push(CheckResult {
-                            package: pkg_name.clone(),
-                            version: "cached".to_string(),
-                            registry: reg_str.clone(),
-                            age_hours: None,
-                            result: cached_result,
-                            reason: Some("cached result".to_string()),
-                            policies: vec![],
-                        });
-                        continue;
-                    } else {
-                        // Hash mismatch (or both None) — invalidate and fall through to re-scan.
-                        eprintln!("cache hash mismatch for {pkg_name}; re-scanning");
-                        let _ = cache.invalidate(pkg_name, "latest", &reg_str);
-                        // `fetch_result` is already the fresh metadata; the full scan below
-                        // will reuse it without making an extra network call.
+        //
+        // We key by the resolved version from the registry (metadata.version), not by
+        // the literal string "latest".  This closes the cross-version aliasing window
+        // described in task 038 (H-2 security finding): a `pass` verdict cached under
+        // "latest" could otherwise apply to a future different tarball at the same tag.
+        //
+        // If the registry fetch failed there is no resolved version, so we skip the
+        // cache lookup entirely and fall through to the error path below (REQ-038-06).
+        if let Ok(fresh_meta) = &fetch_result {
+            let resolved_version = &fresh_meta.version;
+            if let Ok(Some(entry)) = cache.lookup(pkg_name, resolved_version, &reg_str) {
+                let decision = verify_hash(
+                    entry.content_hash.as_deref(),
+                    fresh_meta.content_hash.as_deref(),
+                );
+                if decision == HashVerifyDecision::HonorCache {
+                    if verbose {
+                        eprintln!("cache hit (verified) for {pkg_name}");
                     }
-                }
-                Err(_) => {
-                    // Registry fetch failed — cannot verify; invalidate and fall through to
-                    // the error path below, which will surface the same error consistently.
+                    // Reconstruct result from cache — hash matches, verdict is trustworthy.
+                    let cached_result = entry.result.clone();
+                    let is_failure = cached_result == "block" || cached_result == "warn";
+                    if is_failure {
+                        has_failure = true;
+                    }
+                    results.push(CheckResult {
+                        package: pkg_name.clone(),
+                        version: "cached".to_string(),
+                        registry: reg_str.clone(),
+                        age_hours: None,
+                        result: cached_result,
+                        reason: Some("cached result".to_string()),
+                        policies: vec![],
+                    });
+                    continue;
+                } else {
+                    // Hash mismatch (or both None) — invalidate and fall through to re-scan.
                     eprintln!("cache hash mismatch for {pkg_name}; re-scanning");
-                    let _ = cache.invalidate(pkg_name, "latest", &reg_str);
+                    let _ = cache.invalidate(pkg_name, resolved_version, &reg_str);
+                    // `fetch_result` is already the fresh metadata; the full scan below
+                    // will reuse it without making an extra network call.
                 }
             }
         }
@@ -585,10 +586,10 @@ async fn run_check(
             let _ = cache.record_maintainers(pkg_name, &reg_str, &metadata.maintainers);
         }
 
-        // Store in cache using "latest" as version key to match lookup
+        // Store in cache using the resolved version string as the key (REQ-038-02).
         let _ = cache.insert(
             pkg_name,
-            "latest",
+            &metadata.version,
             &reg_str,
             &result_str,
             metadata.content_hash.as_deref(),

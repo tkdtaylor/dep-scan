@@ -296,7 +296,7 @@ async fn cache_hit_skips_registry_query() {
             .execute(
                 "INSERT INTO scanned_packages
                  (name, version, registry, result, scanned_at, content_hash)
-                 VALUES ('cached-pkg', 'latest', 'npm', 'pass', '2025-01-01T00:00:00Z', ?1)",
+                 VALUES ('cached-pkg', '1.0.0', 'npm', 'pass', '2025-01-01T00:00:00Z', ?1)",
                 rusqlite::params![hash],
             )
             .unwrap();
