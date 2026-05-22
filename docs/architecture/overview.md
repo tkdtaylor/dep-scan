@@ -47,16 +47,23 @@ A separate `maintainer_history` table caches `(name, registry) → maintainers` 
 ## Data flow
 
 ```
-User runs: npmds install express
-  → npmds wrapper extracts package names
-  → dep-scan check express --registry npm
+User runs: dep-scan install express --registry npm
+  → Validate inputs (fail-closed before any network or subprocess call):
+      → Reject any package-name token starting with `-` (task 037),
+        so an attacker-supplied name can't be re-interpreted as a flag
+        by the wrapped package manager.
+      → For --registry go: validate each module path against the Go
+        module-path grammar (task 041) — no `..`, no `?`/`#`/spaces,
+        etc. — before URL composition in registry/go.rs.
+  → run_check (same path used by `dep-scan check`):
     → Load config (.dep-scan.toml + env + CLI flags)
-    → Fetch metadata from npm registry
-    → Cache lookup (name, "latest", npm)
+    → Fetch metadata from npm registry → resolved version, e.g. "5.0.1"
+    → Cache lookup (name, <resolved version>, npm)        # task 038
       → Hit: compare cached content_hash vs registry-served digest
-          → match  → honor cached verdict (short-circuit)
-          → differ → invalidate row, re-scan
-          → either-None → fail-closed, re-scan
+          → match            → honor cached verdict (short-circuit)
+          → differ           → invalidate row, re-scan
+          → cached sha1:*    → re-scan unconditionally (task 040)
+          → either-None      → fail-closed, re-scan
       → Miss: continue to scan
     → Run policy pipeline against PackageMetadata + ScanContext:
         age → install_scripts → obfuscation → maintainer_change →
@@ -66,15 +73,26 @@ User runs: npmds install express
     → For npm/PyPI: sigstore_verify runs the Fulcio chain walk →
       DSSE signature verification → Rekor inclusion proof →
       integratedTime falls inside leaf cert validity window
+      For PyPI the provenance URL is validated against host/scheme/IP
+      rules before being fetched (task 039).
     → For Go: go_sumdb verifies the signed-note tree head against
       the pinned Ed25519 sum.golang.org key
-    → Cache result (with content_hash and provenance_identity)
+    → Cache result keyed on (name, <resolved version>, registry)
+      with content_hash and provenance_identity (sha1-only npm rows
+      store content_hash = NULL per task 040)
     → Format output (table or JSON)
     → Exit 0 (pass) or 1 (warn/block)
-  → If exit 0: npmds runs `npm install express` (pip variant uses
-    --require-hashes passthrough to close the TOCTOU window)
-  → If exit 1: npmds blocks the install
+  → If exit 0: scan-and-exec the wrapped package manager
+      → `npm install express`, `cargo add express`, `go get …`
+      → pip variant writes the verified hash to a temp file with
+        `tempfile::NamedTempFile` (task 042 — CSPRNG suffix,
+        O_CREAT|O_EXCL, mode 0600) and passes it through with
+        `pip install --require-hashes` (task 031) to close the
+        TOCTOU window between scan and install
+  → If exit 1: abort before the package manager runs
 ```
+
+`dep-scan check` follows the same pipeline minus the trailing install step. The optional shell wrappers (`npmds` / `pipds` / `cargods` / `gods` — see [the README](../../README.md#wrapping-package-managers) for installation snippets) intercept the bare package-manager call, extract names, and delegate to `dep-scan check` before exec'ing the real tool. They are user-provided shims, not separate binaries.
 
 ## External dependencies (network)
 
@@ -88,6 +106,8 @@ User runs: npmds install express
 | sum.golang.org | Signed `h1:` hashes for Go modules | configurable; key pinned at build time |
 
 All registry URLs are configurable via `.dep-scan.toml` for testing and enterprise registries. The sumdb URL is configurable but the sumdb public key is hardcoded — rotation requires a dep-scan release.
+
+**No sigstore network calls at runtime.** The Fulcio root chain and Rekor signing key are embedded at build time (see *Embedded trust roots* below). Sigstore attestations themselves arrive in-band — bundled with the npm provenance JSON and PyPI integrity endpoint responses — so verification happens entirely offline once the registry metadata is fetched.
 
 ## Embedded trust roots (build-time)
 

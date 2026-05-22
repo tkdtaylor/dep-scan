@@ -17,7 +17,7 @@ This mirrors the GitHub Actions cache poisoning class of attack: a lookup keyed 
 
 ## Constraints
 
-- **No new runtime deps beyond what's already transitive.** Hashing uses `sha2` / `sha1` (already pulled in by registry-client dependencies).
+- **No new runtime deps beyond what's already transitive.** dep-scan does not compute hashes locally for cache-integrity purposes — it parses the digest the registry publishes (`dist.integrity` for npm, `digests.sha256` for PyPI, etc.). `sha2` is pulled in transitively by the sigstore verification path; no `sha1` crate is needed because npm `dist.shasum` is consumed as an opaque string (and, post-task-040, never trust-gates the cache).
 - **No extra network round trips on the happy path.** Package metadata responses already carry the registry's published digest; we read it from the same fetch we already do.
 - **Backwards compatible.** Existing cache rows must remain valid — no destructive migration. Hash-less rows are treated as "needs re-verification".
 - **Registry-agnostic column.** A single TEXT column stores a normalized `<algo>:<hex>` string so npm sha512, PyPI sha256, crates.io sha256, and Go module h1 hashes coexist.
@@ -32,12 +32,14 @@ When a registry client fetches metadata for a `(name, version)`, it extracts the
 
 | Registry  | Field                                                   | Stored as          |
 |-----------|---------------------------------------------------------|--------------------|
-| npm       | `dist.integrity` (preferred), `dist.shasum` fallback    | `sha512:<hex>` / `sha1:<hex>` |
+| npm       | `dist.integrity` (preferred); `dist.shasum` *captured for informational use only*, never as a cache trust gate (task 040) | `sha512:<hex>` — `sha1:` is captured at the registry boundary then **NULLed on cache write** |
 | PyPI      | `digests.sha256` of the sdist (else first wheel)        | `sha256:<hex>`     |
 | crates.io | `cksum`                                                 | `sha256:<hex>`     |
 | Go        | `h1:` hash from the sum DB                              | `h1:<base64>`      |
 
 Stored as a single TEXT column `content_hash` on `scanned_packages`, formatted `<algo>:<hex>`. The selection rule for multi-file releases (PyPI sdist vs wheels) lives in the registry client so the choice is deterministic per-package.
+
+**Format note.** For npm, the registry returns `dist.integrity` as a [Subresource Integrity](https://www.w3.org/TR/SRI/) string (`sha512-<base64>`). The registry client decodes the base64 to lowercase hex before storing, so cross-registry comparisons against the same `content_hash` column behave consistently.
 
 **Layer 2 — Verify on install.** (Task 030, follow-up)
 
@@ -54,7 +56,10 @@ Verification is **always on** and **fail-closed**. There is no flag to skip it. 
 | `Some(a)`   | `None`        | Invalidate row, re-scan (registry stopped publishing a digest is itself suspicious) |
 | `None`      | `Some(b)`     | Invalidate row, re-scan (legacy pre-029 row — upgrade in place) |
 | `None`      | `None`        | **Re-scan** — both-None is *not* honored, because an attacker who controls the registry can engineer this state to permanently defeat verification |
+| `Some("sha1:..." )` | any | **Re-scan unconditionally** (task 040). SHA-1 is structurally untrusted as a cache gate — chosen-prefix collisions (SHAttered) let an attacker republish a tarball whose `shasum` matches the cached one. Applies to legacy rows captured before task 040; new `pass`/`warn` rows for sha1-only packages store `NULL` instead of the sha1 value. |
 | `Some(a)`   | fetch fails   | Re-scan (network, parse, version-not-found, malformed digest — all treated as failure-to-verify) |
+
+**sha1 is structurally untrusted (task 040).** npm `dist.shasum` is SHA-1. The cache treats any `sha1:`-prefixed row as if it were `None` for trust-gate purposes — the value is preserved for diagnostics but never short-circuits a re-scan. New writes for `pass`/`warn` verdicts on packages whose only available digest is sha1 store `NULL`, so the next lookup falls through to the full pipeline.
 
 `--force` on `install` bypasses *verdicts* (a user choosing to install despite a policy violation), but does **not** bypass verification. A hash mismatch always re-scans; the user can `--force` past the resulting verdict if they choose. This prevents an attacker who knows a previous `pass` was cached from substituting bytes and riding past `--force` without re-evaluation.
 
@@ -85,8 +90,29 @@ These limits are documented so callers don't over-trust the feature.
 | 6 | 034 — Go checksum database signature verification | Out-of-band trust root for Go via Ed25519-signed sumdb tree head |
 | 7 | 035 — Full Fulcio root chain verification | Replaces structural Fulcio OID check with real cryptographic chain walk against embedded Fulcio roots; closes the "forge a Fulcio-OID cert" gap left open by 032/033 |
 | 8 | 036 — Rekor inclusion proof verification | Verifies the signing event was committed to Rekor and `integratedTime` falls inside the leaf cert's validity window; closes the "replay an expired Fulcio cert" gap. Together with 035, delivers full sigstore semantics |
-| 9 | (waiting on upstream) 037 — crates.io provenance | Sigstore integration on crates.io's roadmap but not GA as of 2026-05 |
-| 10 | (deferred) `--paranoid` byte-level verification | Download artifact, hash locally — defense in depth against metadata/bytes inconsistency (not a lying-registry fix) |
+
+### v1.1.1 hardening (post-audit follow-ups, tasks 037–042)
+
+The v1.1.0 work above closed the headline gaps. A post-release security audit
+identified six tightenings around the cache key, registry-client input
+validation, and the install command. Each is a defense-in-depth pass on the
+same ADR — no design change, only the wording the implementation must obey.
+
+| Priority | Task | Scope |
+|----------|------|-------|
+| 9  | 037 — Install command CLI flag injection hardening | Reject package-name tokens beginning with `-` before any subprocess invocation, so an attacker-supplied name can't slip through as a flag to the wrapped package manager |
+| 10 | 038 — Use the resolved version as the cache key | Drop the literal `"latest"` key in favor of `metadata.version`; closes a replay window where a CDN briefly serving the old `dist.integrity` could ride past verification |
+| 11 | 039 — PyPI provenance URL SSRF guard | Validate the provenance URL returned by the Simple Index against host, scheme, and IP-class rules before fetching |
+| 12 | 040 — Reject SHA-1 as a cache trust gate for npm | NULL `dist.shasum` on cache write for `pass`/`warn` verdicts; force re-verify on any pre-existing `sha1:` row |
+| 13 | 041 — Go module path validation before URL composition | Validate module paths against the Go module-path grammar (no `..`, no `?`/`#`/spaces, etc.) before URL builders run |
+| 14 | 042 — Harden `TempReqFile` against predictable filename / symlink attack | Use `tempfile::NamedTempFile` (CSPRNG suffix, `O_CREAT\|O_EXCL`, mode 0600) instead of `SystemTime`-derived nanos with the default umask |
+
+### Still on the roadmap
+
+| Priority | Task | Scope |
+|----------|------|-------|
+| — | (waiting on upstream) crates.io provenance | Sigstore integration on crates.io's roadmap but not GA as of 2026-05 |
+| — | (deferred) `--paranoid` byte-level verification | Download artifact, hash locally — defense in depth against metadata/bytes inconsistency (not a lying-registry fix) |
 
 ## Consequences
 

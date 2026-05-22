@@ -1,6 +1,6 @@
 # dep-scan
 
-A cross-platform CLI tool that intercepts and scans every dependency before installation. Detects supply chain attacks — typosquatting, malicious install scripts, suspicious maintainer changes, known vulnerabilities — verifies cryptographic provenance (sigstore for npm + PyPI, sum.golang.org for Go), and enforces configurable policies like minimum package age. Cache entries are content-addressed and fail-closed on hash mismatch — a republished tarball under the same version triggers a re-scan.
+A cross-platform CLI tool that intercepts and scans every dependency before installation. Detects supply chain attacks — typosquatting, malicious install scripts, suspicious maintainer changes, known vulnerabilities — verifies cryptographic provenance (sigstore-issued Fulcio + Rekor proofs for npm and PyPI; Ed25519-signed checksum database for Go), and enforces configurable policies like minimum package age. Cache entries are content-addressed and fail-closed on hash mismatch — a republished tarball under the same version triggers a re-scan. For pip, the verified hash is passed through with `--require-hashes` to close the TOCTOU window between scan and install.
 
 Local-first, fast, open source. Single Rust binary with no runtime dependencies.
 
@@ -58,7 +58,13 @@ dep-scan runs **11 security policies** against every package:
 
 ### Cache integrity (always on)
 
-Every cached verdict is content-addressed. On a cache hit, dep-scan re-fetches the registry's published digest (`dist.integrity` / `digests.sha256` / `cksum` / `h1:`) and compares it to the stored hash. Mismatch ⇒ invalidate the cache row and re-scan from scratch. There is no flag to skip this check. The both-`None` case (registry stopped publishing a digest, and the cache row was a pre-029 row) is fail-closed — re-scan, never honor. See [ADR 003](docs/architecture/decisions/003-content-hash-cache-integrity.md) for the threat model.
+Every cached verdict is content-addressed. On a cache hit, dep-scan re-fetches the registry's published digest (`dist.integrity` / `digests.sha256` / `cksum` / `h1:`) and compares it to the stored hash. Mismatch ⇒ invalidate the cache row and re-scan from scratch. There is no flag to skip this check. The both-`None` case (registry stopped publishing a digest, and the cache row was a pre-029 row) is fail-closed — re-scan, never honor.
+
+npm's legacy `dist.shasum` is SHA-1 and is **never trust-gated**. Any cache row whose digest starts with `sha1:` re-scans unconditionally, and new `pass`/`warn` rows for sha1-only packages store `NULL` for the digest — closes the SHAttered chosen-prefix-collision window.
+
+The cache is keyed by `(name, resolved_version, registry)` — never by the literal string `"latest"` — so a republished `pkg@latest` cannot ride past verification on a prior version's cached verdict.
+
+See [ADR 003](docs/architecture/decisions/003-content-hash-cache-integrity.md) for the threat model.
 
 ## Exit codes
 
@@ -130,12 +136,12 @@ All settings can be overridden via environment variables:
 
 ## Supported registries
 
-| Registry | Flag | Status | Attack vectors scanned |
-|----------|------|--------|----------------------|
-| **npm** | `--registry npm` | Full support | install scripts (`postinstall`, `preinstall`), obfuscation, typosquatting, age, CVEs, maintainer changes, popularity, sigstore provenance (SLSA + Rekor) |
-| **PyPI** | `--registry pypi` | Full support | `setup.py` hooks, typosquatting, age, CVEs, maintainer changes, popularity, PEP 740 sigstore attestations |
-| **crates.io** | `--registry crates` | Full support | typosquatting, age, CVEs, maintainer changes, popularity |
-| **Go modules** | `--registry go` | Full support | typosquatting, age, CVEs, sumdb signed-tree-head verification |
+| Registry | Flag | Status | Policies that apply |
+|----------|------|--------|---------------------|
+| **npm** | `--registry npm` | Full support | age, install scripts, obfuscation, typosquatting, vulnerability (OSV), maintainer change, popularity, dependency confusion, **npm provenance** (sigstore Fulcio chain walk + Rekor inclusion proof + cert-validity window) |
+| **PyPI** | `--registry pypi` | Full support | age, typosquatting, vulnerability (OSV), maintainer change, popularity, dependency confusion, **PyPI provenance** (PEP 740 sigstore attestation; same sigstore verification as npm with sha256 subject digests). Provenance URL is host/scheme/IP-validated before fetch. `pip install` receives the verified hash via `--require-hashes`. |
+| **crates.io** | `--registry crates` | Full support | age, typosquatting, vulnerability (OSV), maintainer change, popularity, dependency confusion |
+| **Go modules** | `--registry go` | Full support | age, typosquatting, vulnerability (OSV), dependency confusion, **Go sumdb** (Ed25519 signed-tree-head verification against `sum.golang.org`). Module paths are validated against the Go module-path grammar before any URL composition. |
 
 ## Example output
 
@@ -198,16 +204,23 @@ dep-scan check express body-parser cors --registry npm
 dep-scan check requests flask sqlalchemy --registry pypi
 dep-scan check serde tokio clap --registry crates
 dep-scan check github.com/gorilla/mux --registry go
-# Or just use the wrappers — they scan automatically
-npmds install express body-parser cors
-pipds install requests flask sqlalchemy
-cargods add serde tokio
-gods get github.com/gorilla/mux
+
+# Or use dep-scan install — scan and exec the package manager in one step
+dep-scan install express body-parser cors --registry npm
+dep-scan install requests flask sqlalchemy --registry pypi
+
+# Or set up the optional shell wrappers (see "Wrapping package managers"
+# below for the install snippet) so your normal npm/pip/cargo/go calls
+# scan automatically:
+#   npmds install express body-parser cors
+#   pipds install requests flask sqlalchemy
+#   cargods add serde tokio
+#   gods get github.com/gorilla/mux
 
 # Scan everything in a lockfile in one go
 dep-scan check --lockfile package-lock.json --lockfile-type npm
-dep-scan check --lockfile requirements.txt --lockfile-type pip
-dep-scan check --lockfile Cargo.lock --lockfile-type cargo
+dep-scan check --lockfile requirements.txt --lockfile-type pypi
+dep-scan check --lockfile Cargo.lock --lockfile-type crates
 dep-scan check --lockfile go.sum --lockfile-type go
 
 # In CI/CD — fail the build on any policy violation
@@ -245,12 +258,14 @@ For ongoing use across an existing workflow, the wrappers below are better — t
 
 dep-scan provides drop-in wrapper commands that scan every package before installing. Same arguments, same behavior as the real commands, but every install goes through dep-scan first.
 
-| Wrapper | Wraps | Status |
-|---------|-------|--------|
-| **`npmds`** | `npm` | Available now |
-| **`pipds`** | `pip` | Available now |
-| **`cargods`** | `cargo` | Available now |
-| **`gods`** | `go` | Available now |
+| Wrapper | Wraps | Distributed as |
+|---------|-------|----------------|
+| **`npmds`** | `npm` | Shell snippet below |
+| **`pipds`** | `pip` | Shell snippet below |
+| **`cargods`** | `cargo` | Shell snippet below |
+| **`gods`** | `go` | Shell snippet below |
+
+> The wrappers are **shell shims that call `dep-scan check`** — they are not separate binaries built by `cargo build`. Install them from the snippet in [*Installing the wrappers*](#installing-the-wrappers-linux--macos) below before using them.
 
 ```bash
 # These work exactly like the real commands, but scan before installing

@@ -16,9 +16,14 @@ pub struct CacheEntry {
     /// `None` for rows that were inserted before task 029 (legacy rows)
     /// or when no digest was available from the registry.
     pub content_hash: Option<String>,
-    /// Verified Fulcio OIDC subject identity from the npm provenance attestation
-    /// (task 032). `None` when no valid attestation was found or the package is
-    /// not from npm.
+    /// Verified provenance identity for the package:
+    ///   - npm (task 032) and PyPI (task 033): Fulcio-issued OIDC subject from
+    ///     the sigstore attestation.
+    ///   - Go modules (task 034): the literal string `"sum.golang.org"` once the
+    ///     Ed25519 signed-tree-head check passes.
+    /// `None` when no provenance was verified — either because the package's
+    /// registry does not (yet) publish one, or because the verification could
+    /// not be completed.
     pub provenance_identity: Option<String>,
 }
 

@@ -61,7 +61,7 @@ Each directory ships a `README.md` documenting the source URL and rotation proce
 
 | Tool | Scope |
 |------|-------|
-| `cargo test` | Unit tests (435+ across the workspace) |
+| `cargo test` | Unit + integration tests across the workspace — running totals tracked in [coverage-tracker.md](../tasks/test-specs/coverage-tracker.md) |
 | `wiremock` | Async HTTP mocks for registry and sumdb integration tests |
 | `assert_cmd` + `predicates` | End-to-end CLI invocations |
 | `rcgen` (dev-dep) | Generating test cert chains for the Fulcio chain-walk tests |
