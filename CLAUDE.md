@@ -8,7 +8,8 @@ A cross-platform CLI tool that wraps package managers to intercept and scan ever
 src/          ← code outputs (what you write)
 artifacts/    ← non-code outputs (diagrams, schemas, exports)
 docs/         ← documentation inputs (what guides your work)
-  architecture/   system design, ADRs, tech stack
+  architecture/   system design, ADRs, tech stack (descriptive)
+  spec/           authoritative behavioral & security contracts
   plans/          roadmap, sprints
   tasks/          active, backlog, completed task files
     test-specs/   TDD specs — always written before implementation
