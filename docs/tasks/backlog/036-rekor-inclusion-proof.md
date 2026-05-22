@@ -1,7 +1,21 @@
 # Task 036 — Rekor inclusion proof verification
 
 **Status:** backlog
-**Depends on:** 032 (npm provenance), 033 (PyPI provenance), 035 (Fulcio chain walk — strongly recommended first)
+**Depends on:** 032 (npm provenance), 033 (PyPI provenance), 034 (sumdb signed-note primitive — to be extracted for shared use), 035 (Fulcio chain walk)
+
+## Re-scoping note (2026-05-22)
+
+Initial draft assumed Rekor entry kinds `dsse` and `hashedrekord` covered npm + PyPI. Empirical verification by the first executor attempt against 7 real npm bundles and 1 real PyPI bundle showed:
+
+- **npm uses `intoto` v0.0.2** (not `dsse`).
+- **PyPI uses `dsse` v0.0.1** (matches the original draft).
+- **`hashedrekord`** is not used by either npm or PyPI provenance in practice.
+
+The supported-kinds set is therefore `dsse` v0.0.1 + `intoto` v0.0.2. `hashedrekord` is removed. T-036-14's unsupported-kind example switches to `helm` (Helm chart entries — definitely unrelated to dep-scan's scope, unambiguously unsupported).
+
+The first executor also discovered that `AttestationBundle` (in both `src/registry/npm_attestation.rs` and `src/registry/pypi_provenance.rs`) silently drops the bundle's `tlogEntries` field — necessary input data for this task that isn't currently parsed. Adding it is now explicitly in scope.
+
+The Rekor tree-head signature uses the same **signed-note format** as Go's sumdb. Task 034 already implemented note parsing + Ed25519 verification in `src/policy/go_sumdb.rs`. This task extracts that primitive to a new shared module `src/signed_note.rs` and reuses it for Rekor.
 
 ## Objective
 
@@ -17,37 +31,71 @@ The bundle format already includes the Rekor proof in `verificationMaterial.tlog
 
 ## Behavior
 
+### Data-model prerequisite
+
+`AttestationBundle` currently drops `tlogEntries`. Add a `tlog_entries: Vec<TlogEntry>` field. `TlogEntry` carries:
+
+```rust
+pub struct TlogEntry {
+    pub log_index: u64,
+    pub log_id: String,                  // base64 sha256 of the log's public key
+    pub kind_version: KindVersion,       // { kind: String, version: String }
+    pub integrated_time: i64,            // unix seconds
+    pub canonicalized_body: Vec<u8>,     // base64-decoded "body" — the canonical-JSON entry
+    pub inclusion_proof: InclusionProof, // tree size, root hash, hash list, log_index
+    pub checkpoint: Option<String>,      // signed-note envelope (Rekor tree head)
+}
+```
+
+Both `npm_attestation::parse_attestation_response` and `pypi_provenance::parse_provenance_response` populate this from `verificationMaterial.tlogEntries`. Existing tests that constructed `AttestationBundle` literals get updated with `tlog_entries: vec![]`.
+
+### Shared signed-note primitive
+
+Extract task 034's signed-note parsing + Ed25519 verification from `src/policy/go_sumdb.rs` into `src/signed_note.rs` with a verifier API parameterized by `key_name` and `pinned_public_key`. `go_sumdb` and `sigstore_verify` both call into it. Task 034's tests must continue to pass unchanged.
+
+### Verification logic
+
 In `src/sigstore_verify.rs`:
 
-1. Add `verify_rekor_inclusion(bundle: &AttestationBundle, signed_payload: &[u8]) -> Result<RekorEntry, RekorError>`:
-   - Parse the bundle's `verificationMaterial.tlogEntries[0]`.
-   - Compute the expected Rekor entry hash from the DSSE envelope + leaf cert (per Rekor's `hashedrekord` or `dsse` entry kind specification).
-   - Verify the inclusion proof: walk the Merkle path from the entry hash to the signed tree head's root hash. Each hop is a SHA-256 of `(left || right)`.
-   - Verify the signed tree head's Ed25519 signature against the **pinned Rekor public key** (similar pattern to task 034's sumdb key — embed as a `const &str` from sigstore's TUF repository).
-   - Extract `integratedTime` from the entry. Return it in `RekorEntry`.
+1. Add `verify_rekor_inclusion(bundle: &AttestationBundle, canonical_dsse: &[u8], leaf_cert: &X509Certificate) -> Result<RekorEntry, RekorError>`:
+   - Take the first `TlogEntry` from `bundle.tlog_entries` (real bundles have exactly one; reject ≥2 with `RekorError::UnexpectedMultipleEntries`).
+   - Validate `kind_version` against the supported-kinds set: `(dsse, 0.0.1)` and `(intoto, 0.0.2)`. Anything else ⇒ `RekorError::UnsupportedKind`.
+   - Compute the **entry hash** per Rekor's spec for the given kind:
+     - For `dsse` v0.0.1: `sha256(canonicalized_body)` where the body's `spec.envelopeHash.value` already binds the DSSE envelope.
+     - For `intoto` v0.0.2: `sha256(canonicalized_body)` where the body's `spec.content.envelope.payloadHash` binds the payload; verify `payloadHash == sha256(decoded_dsse_payload)` and `spec.content.hash == sha256(canonical_dsse)` before accepting.
+   - Walk the inclusion proof's Merkle path (RFC 6962): leaf prefix `0x00`, internal-node prefix `0x01`, SHA-256 throughout. Result must equal `inclusion_proof.root_hash`.
+   - If `checkpoint` is present, parse it as a signed note using `signed_note::verify` with the pinned Rekor public key and key-hash; reject on signature failure. The note's text lines must include the tree size and root hash matching the `inclusion_proof`.
+   - Return `RekorEntry { integrated_time, log_id }`.
 2. In `verify_dsse_bundle`, after the chain walk (035) and DSSE signature verification:
-   - Call `verify_rekor_inclusion(bundle, signed_payload)`.
-   - Compare `RekorEntry.integratedTime` against the leaf cert's validity window (from task 035's parsed cert). If `integratedTime` is outside `[not_before, not_after]`, return `Invalid { reason: "Rekor entry timestamp falls outside Fulcio cert validity window" }`.
-   - On any Rekor verification failure ⇒ `Invalid { reason: format!("Rekor verification failed: {e}") }`.
+   - Call `verify_rekor_inclusion(bundle, canonical_dsse, leaf_cert)`.
+   - Compare `RekorEntry.integrated_time` against the leaf cert's `[notBefore, notAfter]` window. Outside ⇒ `Invalid { reason: <timestamp-window message> }`.
+   - On any Rekor failure ⇒ `Invalid { reason: format!("Rekor verification failed: {e}") }`.
 3. Both npm and PyPI provenance policies inherit this transparently.
 
 ## Acceptance criteria
 
-- [ ] Rekor Ed25519 public key embedded as `const REKOR_PUBLIC_KEY` from `rekor-roots/rekor.pub` (source documented). Use `include_str!` matching task 034's pattern.
-- [ ] `verify_rekor_inclusion` function: parses tlog entry, computes entry hash, verifies Merkle inclusion, verifies signed tree head signature.
-- [ ] Merkle path verification: SHA-256-based, RFC 6962-style; tested against the canonical empty / single-leaf / two-leaf trees with known root hashes.
-- [ ] Entry hash computation supports both `hashedrekord` and `dsse` entry kinds. npm and PyPI use `dsse`; older attestations may use `hashedrekord`. If a bundle uses an unsupported kind ⇒ `RekorError::UnsupportedKind` and fail-closed (Block).
-- [ ] Timestamp window check: `integratedTime` must fall within the leaf cert's `notBefore..notAfter`. Outside the window ⇒ `Invalid` (this is the actual replay defense).
-- [ ] All failure modes (proof invalid, tree head signature invalid, kind unsupported, timestamp out of window) produce distinct error messages.
+- [ ] `src/signed_note.rs` — new shared module with `Verifier { key_name, pinned_public_key }` and `verify(signed_note: &str) -> Result<NoteContents, NoteError>`. Extracted from task 034's `src/policy/go_sumdb.rs` parsing/verification logic. `go_sumdb` refactored to call into it; task 034's existing 22/22 tests continue to pass without modification.
+- [ ] `AttestationBundle` gains `tlog_entries: Vec<TlogEntry>` field. Populated from `verificationMaterial.tlogEntries` by both `npm_attestation::parse_attestation_response` and `pypi_provenance::parse_provenance_response`. Existing unit tests updated to include `tlog_entries: vec![]` in their literals.
+- [ ] Rekor Ed25519 public key embedded as `const REKOR_PUBLIC_KEY` from `rekor-roots/rekor.pub` (source documented). Use `include_str!` matching task 034's pattern. Add `rekor-roots/README.md` documenting source + rotation procedure.
+- [ ] `verify_rekor_inclusion` function: parses tlog entry, validates kind, computes entry hash per kind, verifies Merkle inclusion, verifies signed-note tree head via `signed_note::verify`.
+- [ ] Merkle path verification: SHA-256-based, RFC 6962-style (leaf prefix `0x00`, internal-node prefix `0x01`); tested against canonical vectors.
+- [ ] Entry kind support: `(dsse, 0.0.1)` (PyPI) and `(intoto, 0.0.2)` (npm). Anything else ⇒ `RekorError::UnsupportedKind` and fail-closed (Block).
+- [ ] For `intoto` v0.0.2: verify the body's `payloadHash` matches `sha256(decoded_dsse_payload)` AND `hash` matches `sha256(canonical_dsse)` — binds the Rekor entry to the verified bundle.
+- [ ] Timestamp window check: `integrated_time` must fall within the leaf cert's `[notBefore, notAfter]`. Outside the window ⇒ `Invalid` (the actual replay defense).
+- [ ] All failure modes (proof invalid, signed-note signature invalid, kind unsupported, timestamp out of window, payload binding mismatch) produce distinct error messages.
 - [ ] Pinned Rekor key is the only acceptable signer — no runtime override, no env var.
 - [ ] Tests:
-  - Unit: Merkle path verifier — empty tree, single leaf, two leaves, deep path, tampered intermediate hash, wrong root hash.
-  - Unit: tree-head signature — valid, tampered, wrong key.
-  - Unit: timestamp window — inside window ⇒ OK; before `notBefore` ⇒ fail; after `notAfter` ⇒ fail.
-  - Unit: unsupported entry kind ⇒ `UnsupportedKind` error.
-  - Integration: real sigstore bundle (re-use the fixture from task 035) — full chain walk + DSSE + Rekor passes end-to-end.
-  - Integration: bundle with tampered Rekor inclusion proof ⇒ Block; existing 032/033 tests with stub bundles continue to produce `Invalid` (now for "Rekor verification failed" reason once the chain walk passes; for stubs the chain walk will fail first, so the message is still chain-related).
-- [ ] Tasks 032 and 033 acceptance criteria for "broken chain ⇒ Block" are now fully closed — the lying-registry threat for npm and PyPI is fully defended (modulo the deferred TUF root rotation question).
+  - Unit: Merkle path verifier against RFC 6962 canonical vectors (empty / single / two / deep / tampered / wrong root / index out of range).
+  - Unit: signed-note verifier (already covered in task 034's tests for go_sumdb; after extraction the same tests run against the shared module). Add Rekor-specific tests using the production Rekor key-name + key-hash.
+  - Unit: timestamp window (inside ⇒ OK; before `notBefore` ⇒ fail; after `notAfter` ⇒ fail; expired-cert-with-valid-time ⇒ pass — the replay defense's whole point).
+  - Unit: kind dispatch — `(dsse, 0.0.1)` and `(intoto, 0.0.2)` both accepted; `(helm, 0.0.1)` (or any other) rejected.
+  - Unit: intoto v0.0.2 payload binding — `payloadHash` and `hash` mismatches each rejected with distinct messages.
+  - Unit: AttestationBundle parser carries `tlog_entries` from real npm + PyPI JSON.
+  - Integration: real npm bundle (intoto v0.0.2) and real PyPI bundle (dsse v0.0.1) — full chain walk + DSSE + Rekor passes end-to-end.
+  - Integration: bundle with tampered Rekor inclusion proof ⇒ Block.
+- [ ] Tasks 032 and 033 acceptance criteria: the implementation-notes section gets a final entry stating Rekor verification is now in place.
+- [ ] ADR 003 "What this does *not* defend against" section: the "Consistently-lying registry" entry is amended to reflect that npm + PyPI packages WITH provenance are now fully defended (modulo TUF rotation). Packages WITHOUT provenance remain a gap (most packages don't yet publish).
+- [ ] `src/sigstore_verify.rs` module docstring: the "Rekor verification is NOT performed" caveat is removed.
 - [ ] All tests pass, `cargo clippy` clean, `cargo fmt --check` clean.
 
 ## Out of scope

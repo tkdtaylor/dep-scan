@@ -1,5 +1,16 @@
 # Test Spec — Task 036: Rekor inclusion proof verification
 
+## Re-scoping note (2026-05-22)
+
+Empirical verification against real bundles showed:
+- npm provenance uses `(intoto, 0.0.2)` — not `dsse`.
+- PyPI provenance uses `(dsse, 0.0.1)`.
+- `hashedrekord` is not used by either; removed from supported kinds.
+- `AttestationBundle` parser must be extended to carry `tlog_entries`.
+- Rekor tree head uses signed-note format (same as Go sumdb in task 034); extracted to shared `src/signed_note.rs`.
+
+T-036-13 changes: `hashedrekord` ⇒ `intoto` v0.0.2. T-036-14 unsupported example: `helm`. New cases added for the parser extension (T-036-25) and intoto payload-binding (T-036-26 / T-036-27).
+
 ## Unit tests (Merkle path verification, RFC 6962 style)
 
 ### T-036-01: Single-leaf tree
@@ -56,12 +67,12 @@
 - Build a known DSSE envelope; compute its Rekor entry hash
 - Expected: matches sigstore's `cosign verify` output for the same envelope (test vector)
 
-### T-036-13: `hashedrekord` entry kind hash computed correctly
-- Similar to T-036-12 but for the older entry kind
-- Expected: matches test vector
+### T-036-13: `intoto` v0.0.2 entry kind hash computed correctly
+- Build an intoto v0.0.2 body (the format real npm bundles use); compute its Rekor entry hash
+- Expected: matches sigstore/Rekor reference vector for the same envelope
 
 ### T-036-14: Unsupported entry kind ⇒ fail-closed
-- Bundle with `entryKind = "intoto"` or some other unrecognized string
+- Bundle with `kindVersion = (helm, 0.0.1)` or any other unrecognized pair
 - Expected: `RekorError::UnsupportedKind`, NOT silently accepted
 
 ## Unit tests (timestamp window vs cert validity)
@@ -109,5 +120,26 @@
 
 ### T-036-24: Documentation update — ADR 003 and module docstring
 - Static check: `src/sigstore_verify.rs` module docstring no longer mentions "Rekor verification is NOT performed" — it now describes the full verification pipeline
-- ADR 003's "What this does *not* defend against" section: lying-registry npm and PyPI entries are removed; only the unaddressed threats remain (lying registry without provenance, metadata/bytes inconsistency, local cache DB tampering)
+- ADR 003's "What this does *not* defend against" section: lying-registry npm and PyPI entries are amended (provenanced packages defended; non-provenanced packages still a gap); only the unaddressed threats remain (lying registry without provenance, metadata/bytes inconsistency, local cache DB tampering)
 - Expected: matching text present
+
+## New tests (rescope additions)
+
+### T-036-25: AttestationBundle parsers carry tlog_entries from real JSON
+- Two sub-cases:
+  - npm: parse a real npm attestations response → `AttestationBundle.tlog_entries` has length 1, with `kind_version = ("intoto", "0.0.2")`, `integrated_time` populated, `inclusion_proof` populated.
+  - PyPI: parse a real PEP 740 provenance response → `kind_version = ("dsse", "0.0.1")`.
+- Expected: both populate correctly; legacy unit tests (which use empty bundles) continue to pass after the field is added with `tlog_entries: vec![]`.
+
+### T-036-26: intoto v0.0.2 payload binding — payloadHash mismatch ⇒ Block
+- Construct an intoto v0.0.2 body whose `spec.content.envelope.payloadHash` does not equal `sha256(decoded_dsse_payload)`.
+- Expected: `RekorError::PayloadBindingFailed` with a message naming "payloadHash mismatch".
+
+### T-036-27: intoto v0.0.2 payload binding — envelope hash mismatch ⇒ Block
+- Construct an intoto v0.0.2 body whose `spec.content.hash` does not equal `sha256(canonical_dsse)`.
+- Expected: `RekorError::PayloadBindingFailed` with a message naming "canonical envelope hash mismatch".
+
+### T-036-28: signed_note module extracted from task 034
+- Static check: `src/signed_note.rs` exists with `Verifier` and `verify` exposed publicly.
+- `src/policy/go_sumdb.rs` imports from `crate::signed_note` rather than carrying its own parser/verifier.
+- Task 034's existing 22 tests (in `go_sumdb` module and `tests/go_sumdb_integration.rs`) continue to pass without modification.
