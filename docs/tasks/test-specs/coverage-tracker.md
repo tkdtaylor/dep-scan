@@ -39,6 +39,7 @@
 | 026 | GitHub Actions release workflow | 026-release-workflow-test-spec.md | ✅ | Done |
 | 027 | Install script | 027-install-script-test-spec.md | ✅ | Done |
 | 028 | v1.0 polish and release | 028-v1-polish-test-spec.md | ✅ | Done |
+| 029 | Capture content hash in scan cache | 029-content-hash-capture-test-spec.md | 0/16 | ❌ |
 
 ## Status key
 
