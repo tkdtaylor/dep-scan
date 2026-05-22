@@ -1768,4 +1768,30 @@ mod tests {
     // T-049-15: Regression — all task 039 PyPI SSRF tests pass
     // (verified by `cargo test pypi_provenance` — all T-039-xx tests in this module above).
     // T-049-16: cargo test / clippy / fmt --check all pass (verified in CI gate).
+
+    // T-056-08: PyPI provenance client fetches Simple Index after reqwest bump
+    // Verifies that the reqwest 0.12 → 0.13 upgrade did not break the provenance
+    // client's ability to issue HTTP requests and deserialise PEP 691 responses.
+    #[tokio::test]
+    async fn t056_08_pypi_provenance_client_works_after_reqwest_bump() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/simple/requests/"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(
+                simple_index_without_provenance().as_bytes(),
+                "application/vnd.pypi.simple.v1+json",
+            ))
+            .mount(&server)
+            .await;
+
+        let client = PyPiProvenanceClient::new(server.uri());
+        let result = client.fetch_simple_index("requests").await;
+
+        assert!(
+            result.is_ok(),
+            "T-056-08: PyPI provenance client must issue requests correctly after reqwest bump; got: {:?}",
+            result
+        );
+    }
 }

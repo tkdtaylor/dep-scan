@@ -722,4 +722,31 @@ mod tests {
             "content_hash should be None when no sha256 digest is available"
         );
     }
+
+    // T-056-05: PyPI registry client returns valid metadata after reqwest bump
+    // Verifies that the reqwest 0.12 → 0.13 upgrade did not break the PyPI client.
+    #[tokio::test]
+    async fn t056_05_pypi_client_returns_valid_metadata_after_reqwest_bump() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/pypi/flask/json"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(pypi_requests_json()))
+            .mount(&server)
+            .await;
+
+        // Reuse the requests fixture served at the flask path — the name field comes
+        // from the response body, not the URL.
+        let registry = PyPiRegistry::new(server.uri());
+        let meta = registry.get_metadata("flask", None).await.unwrap();
+
+        assert_eq!(
+            meta.name, "requests",
+            "T-056-05: PyPI client must deserialise metadata correctly after reqwest bump"
+        );
+        assert!(
+            !meta.version.is_empty(),
+            "T-056-05: version must be non-empty"
+        );
+    }
 }

@@ -747,4 +747,31 @@ mod tests {
             "content_hash should be None when dist is absent"
         );
     }
+
+    // T-056-04: npm registry client returns valid metadata after reqwest bump
+    // Verifies that the reqwest 0.12 → 0.13 upgrade did not break the npm client.
+    #[tokio::test]
+    async fn t056_04_npm_client_returns_valid_metadata_after_reqwest_bump() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/express"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(lodash_json()))
+            .mount(&server)
+            .await;
+
+        // Reuse the lodash_json fixture but request it as "express" — the JSON still
+        // deserialises correctly; the name field comes from the response body.
+        let registry = NpmRegistry::new(server.uri());
+        let meta = registry.get_metadata("express", None).await.unwrap();
+
+        assert_eq!(
+            meta.name, "lodash",
+            "T-056-04: npm client must deserialise metadata correctly after reqwest bump"
+        );
+        assert!(
+            !meta.version.is_empty(),
+            "T-056-04: version must be non-empty"
+        );
+    }
 }
