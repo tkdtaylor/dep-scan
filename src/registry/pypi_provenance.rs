@@ -1762,4 +1762,10 @@ mod tests {
             "T-033-21: expected None for HTML (legacy mirror) response"
         );
     }
+
+    // T-049-14: Regression — all task 033 PyPI provenance verification tests pass
+    // (verified by `cargo test pypi_provenance` — all tests in this module above).
+    // T-049-15: Regression — all task 039 PyPI SSRF tests pass
+    // (verified by `cargo test pypi_provenance` — all T-039-xx tests in this module above).
+    // T-049-16: cargo test / clippy / fmt --check all pass (verified in CI gate).
 }

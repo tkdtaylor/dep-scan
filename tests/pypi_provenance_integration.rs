@@ -297,7 +297,7 @@ async fn full_scan_package_with_attestation_is_verified() {
         .mount(&server)
         .await;
 
-    // T-033-17: attestation is present and fetched; stub cert fails crypto → Block (exit 1)
+    // T-033-17 / T-049-12: attestation is present and fetched; stub cert fails crypto → Block
     // (the full "pass" path requires real crypto — tested in policy unit tests via MockVerifier)
     dep_scan()
         .args([
@@ -523,7 +523,8 @@ async fn legacy_mirror_html_only_warns() {
         .mount(&server)
         .await;
 
-    // T-033-21: legacy mirror → no provenance → Warn → exit 1 (project convention)
+    // T-033-21 / T-049-13: hostile mirror serves wrong content-type → legacy-mirror path
+    // → no provenance → Warn → exit 1.
     dep_scan()
         .args([
             "--config",
