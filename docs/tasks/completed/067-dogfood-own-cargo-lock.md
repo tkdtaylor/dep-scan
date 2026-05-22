@@ -68,3 +68,17 @@ Recommend A — keeps the production policies on, just changes the CI gate.
   uniformly.
 - Running dep-scan against dev-only deps separately — `cargo check --lockfile`
   shows everything; the verdict pipeline handles dev-deps the same way.
+
+## Post-implementation note (2026-05-22)
+
+The CI infrastructure landed at commit `75e4d3e` as designed.  However, the
+acceptance criterion "Running dep-scan against current main succeeds (no block
+verdicts)" is **blocked by task 078** — a pre-existing source-code bug means
+the lockfile scanner discards the pinned version from `Cargo.lock` and queries
+registry "latest" instead, producing false-positive age-policy blocks on any
+recently-published crate.
+
+The dogfood CI job itself is correct; T-067-08 will be re-verified once task
+078 lands. Coverage-tracker reflects this with `9/10 | ⏳ T-067-08 blocked by 078`.
+**Do not push** until task 078 lands and the dogfood scan returns zero block
+verdicts locally.
