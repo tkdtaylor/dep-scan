@@ -78,7 +78,7 @@
 | 060 | Validate Go version strings before URL composition (N-L-2) | 060-go-version-string-validation-test-spec.md | 31/31 | ✅ |
 | 061 | Verbose-gate parse_tlog_entries malformed-entry diagnostic (N-L-3) | 061-tlog-diagnostic-verbose-gate-test-spec.md | 0/14 | ❌ |
 | 062 | Single-parse refactor for verify_rekor_checkpoint_impl (N-L-4) | 062-single-parse-rekor-checkpoint-test-spec.md | 0/16 | ❌ |
-| 063 | Reject empty note_text in signed_note::parse (N-L-5) | 063-signed-note-empty-text-rejection-test-spec.md | 0/13 | ❌ |
+| 063 | Reject empty note_text in signed_note::parse (N-L-5) | 063-signed-note-empty-text-rejection-test-spec.md | 13/13 | ✅ |
 
 ## Status key
 

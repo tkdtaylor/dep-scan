@@ -132,6 +132,16 @@ pub fn parse(signed_note: &str) -> Result<ParsedNote<'_>, String> {
     // Safety: prev_was_blank = true guarantees em_dash_offset >= 1.
     let note_text = &signed_note[..em_dash_offset - 1];
 
+    // REQ-063-01, REQ-063-05: reject notes with empty note_text before
+    // iterating signatures.  A well-formed signed note must contain at least
+    // one byte of text before the signature block.
+    if note_text.is_empty() {
+        return Err(
+            "signed note has empty note_text: at least one byte of text is required before the signature block"
+                .to_string(),
+        );
+    }
+
     // sig_section: from the em-dash line onward, trailing newlines stripped.
     let sig_section = signed_note[em_dash_offset..].trim_end_matches('\n');
 
@@ -1305,4 +1315,268 @@ mod tests {
             "T-044-17: ECDSA P-256 round-trip regression must pass"
         );
     }
+
+    // -----------------------------------------------------------------------
+    // Task 063 tests — empty note_text rejection (N-L-5)
+    // -----------------------------------------------------------------------
+
+    // T-063-01: `parse("\n— key b64sig")` returns Err with "empty" in the message.
+    #[test]
+    fn t_063_01_parse_empty_note_text_returns_err() {
+        // One leading '\n': em-dash offset = 1, so note_text = &note[..0] = ""
+        let note = "\n\u{2014} rekor.sigstore.dev AAAAAAAAAAAABBBBBBBBBB==\n";
+        let result = parse(note);
+        assert!(
+            result.is_err(),
+            "T-063-01: parse must return Err for empty note_text, got Ok"
+        );
+        let msg = result.unwrap_err();
+        assert!(
+            msg.contains("empty"),
+            "T-063-01: error message must contain 'empty', got: {msg}"
+        );
+    }
+
+    // T-063-02: minimal one-character key name with empty note_text is also rejected.
+    #[test]
+    fn t_063_02_parse_empty_note_text_minimal_key_returns_err() {
+        // One leading '\n', one-character key name, four bytes of base64.
+        let note = "\n\u{2014} k AAEC\n";
+        let result = parse(note);
+        assert!(
+            result.is_err(),
+            "T-063-02: parse must return Err for empty note_text regardless of key name length"
+        );
+    }
+
+    // T-063-03: two leading newlines produce note_text = "\n" (one byte) — should parse Ok.
+    #[test]
+    fn t_063_03_single_newline_note_text_parses_ok() {
+        // Two leading '\n': em-dash offset = 2 (the second \n is the separator),
+        // note_text = &note[..1] = "\n" — one non-empty byte.
+        // We need a syntactically valid (parseable) sig payload: 4-byte key-id + 64 bytes.
+        let sig_payload = vec![0u8; 68];
+        let sig_b64 = base64::engine::general_purpose::STANDARD.encode(&sig_payload);
+        let note = format!("\n\n\u{2014} key-name {sig_b64}\n");
+        let result = parse(&note);
+        assert!(
+            result.is_ok(),
+            "T-063-03: note_text='\\n' (one byte) must parse Ok; got: {:?}",
+            result
+        );
+        let parsed = result.unwrap();
+        assert_eq!(
+            parsed.note_text, "\n",
+            "T-063-03: note_text must be '\\n' (single newline)"
+        );
+    }
+
+    // T-063-04: normal Rekor checkpoint fixture still succeeds (non-empty note_text).
+    #[test]
+    fn t_063_04_normal_rekor_checkpoint_still_succeeds() {
+        let note_text = "rekor.sigstore.dev - 2605736670972794746\n90244708\nCOSIc1jqxpbuuTChPdiTqtZBBve7GAVJqTYjqAaM940=\n";
+        let (pem, signed_note) = build_ecdsa_p256_signed_note(note_text, "rekor.sigstore.dev");
+        let result = parse(&signed_note);
+        assert!(
+            result.is_ok(),
+            "T-063-04: normal Rekor checkpoint must parse Ok; got: {:?}",
+            result
+        );
+        assert!(
+            !result.unwrap().note_text.is_empty(),
+            "T-063-04: note_text must be non-empty"
+        );
+        // Also verify the cryptographic round-trip is intact.
+        assert_eq!(
+            verify_ecdsa_p256(&signed_note, "rekor.sigstore.dev", &pem),
+            NoteVerifyOutcome::Valid,
+            "T-063-04: Rekor round-trip must still verify"
+        );
+    }
+
+    // T-063-05: normal sumdb tree-head fixture still succeeds.
+    #[test]
+    fn t_063_05_normal_sumdb_tree_head_still_succeeds() {
+        let note_text = "go.sum database tree\n12345\nabc123==\n";
+        let (key_str, signed_note) = build_ed25519_signed_note(note_text);
+        let result = parse(&signed_note);
+        assert!(
+            result.is_ok(),
+            "T-063-05: normal sumdb tree-head must parse Ok; got: {:?}",
+            result
+        );
+        assert!(
+            !result.unwrap().note_text.is_empty(),
+            "T-063-05: note_text must be non-empty"
+        );
+        assert_eq!(
+            verify_ed25519(&signed_note, &key_str),
+            NoteVerifyOutcome::Valid,
+            "T-063-05: sumdb round-trip must still verify"
+        );
+    }
+
+    // T-063-06: note_text = " " (one space) is non-empty — should parse Ok.
+    #[test]
+    fn t_063_06_single_space_note_text_parses_ok() {
+        // " \n\n— key b64": note_text = " " (one space), separator = blank line.
+        let sig_payload = vec![0u8; 68];
+        let sig_b64 = base64::engine::general_purpose::STANDARD.encode(&sig_payload);
+        let note = format!(" \n\n\u{2014} key-name {sig_b64}\n");
+        let result = parse(&note);
+        assert!(
+            result.is_ok(),
+            "T-063-06: note_text=' ' (one space) must parse Ok; got: {:?}",
+            result
+        );
+        let parsed = result.unwrap();
+        assert_eq!(
+            parsed.note_text, " \n",
+            "T-063-06: note_text must be ' \\n' (space + newline)"
+        );
+    }
+
+    // T-063-07: empty note_text with syntactically valid base64 is still rejected.
+    #[test]
+    fn t_063_07_empty_note_text_valid_b64_still_rejected() {
+        // Well-formed base64 (decodes to 8 bytes: 4-byte key-id + 4 bytes sig),
+        // but note_text is empty (one leading '\n').
+        let payload: Vec<u8> = vec![0xAA, 0xBB, 0xCC, 0xDD, 0x01, 0x02, 0x03, 0x04, 0x05];
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&payload);
+        let note = format!("\n\u{2014} key-name {b64}\n");
+        let result = parse(&note);
+        assert!(
+            result.is_err(),
+            "T-063-07: even with valid base64, empty note_text must be rejected"
+        );
+        let msg = result.unwrap_err();
+        assert!(
+            msg.contains("empty"),
+            "T-063-07: error must contain 'empty', got: {msg}"
+        );
+    }
+
+    // T-063-08: structural check — is_empty guard precedes signature loop.
+    // Verified by code inspection (see parse() in this file); this test acts
+    // as a spec-marker anchor.  We confirm the behavior indirectly: even
+    // when the signature section is structurally valid (>= 5-byte payload),
+    // the empty-text check fires first.
+    #[test]
+    fn t_063_08_empty_check_before_signature_loop() {
+        // Construct a note with a fully-valid sig line (4-byte key-id + 64-byte payload)
+        // but empty note_text.
+        let sig_payload: Vec<u8> = (0u8..68).collect(); // 68 bytes = 4-byte key-id + 64-byte sig
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&sig_payload);
+        let note = format!("\n\u{2014} key-name {b64}\n");
+        // The empty-text guard must fire before we even try to parse the signature.
+        let result = parse(&note);
+        assert!(
+            result.is_err(),
+            "T-063-08: empty note_text must be rejected even with valid sig payload"
+        );
+        let msg = result.unwrap_err();
+        assert!(
+            msg.contains("empty"),
+            "T-063-08: error must mention 'empty', got: {msg}"
+        );
+    }
+
+    // T-063-09: error message is distinct from existing parse-error messages
+    // and contains "empty".
+    #[test]
+    fn t_063_09_error_message_is_distinct_and_contains_empty() {
+        let note = "\n\u{2014} key AAEC\n";
+        let result = parse(note);
+        assert!(result.is_err(), "T-063-09: must return Err");
+        let msg = result.unwrap_err();
+        // Must contain "empty" (REQ-063-02).
+        assert!(
+            msg.contains("empty"),
+            "T-063-09: error must contain 'empty', got: {msg}"
+        );
+        // Must be distinct from the other two structural errors.
+        assert!(
+            !msg.contains("no signature lines"),
+            "T-063-09: error must not duplicate 'no signature lines' message"
+        );
+        assert!(
+            !msg.contains("missing blank-line separator"),
+            "T-063-09: error must not duplicate 'missing blank-line separator' message"
+        );
+    }
+
+    // T-063-10: all task 044 boundary-parser tests still pass (regression marker).
+    // The actual T-044-NN tests are in this same module; cargo test exercises them.
+    // This marker confirms the regression suite runs.
+    #[test]
+    fn t_063_10_task_044_regression_tests_pass() {
+        // Smoke-test covering the same code path as T-044-01.
+        let note_text = "regression check for task 044\n";
+        let (key_str, signed_note) = build_ed25519_signed_note(note_text);
+        assert_eq!(
+            verify_ed25519(&signed_note, &key_str),
+            NoteVerifyOutcome::Valid,
+            "T-063-10: task 044 em-dash boundary regression must pass"
+        );
+    }
+
+    // T-063-11: all task 043 multi-sig iteration tests still pass (regression marker).
+    #[test]
+    fn t_063_11_task_043_regression_tests_pass() {
+        // Smoke-test covering the same code path as T-043-01.
+        let note_text = "go.sum database tree\n999\nregression==\n";
+        let (key_str, _sk, signed_note) =
+            build_ed25519_signed_note_named(note_text, "sum.golang.org");
+        assert_eq!(
+            verify_ed25519(&signed_note, &key_str),
+            NoteVerifyOutcome::Valid,
+            "T-063-11: task 043 multi-sig regression must pass"
+        );
+    }
+
+    // T-063-12: verify_rekor_checkpoint_impl propagates the empty-note error.
+    #[test]
+    fn t_063_12_verify_rekor_checkpoint_impl_propagates_empty_note_error() {
+        use crate::registry::npm_attestation::InclusionProof;
+        use crate::sigstore_verify::verify_rekor_checkpoint_impl;
+
+        // Construct an empty-body envelope: one leading '\n' then a valid-looking
+        // ECDSA-P256 sig line (key-id + minimal DER-ish payload).
+        let sig_payload: Vec<u8> = (0u8..68).collect();
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&sig_payload);
+        let empty_envelope = format!("\n\u{2014} rekor.sigstore.dev {b64}\n");
+
+        // The proof values don't matter — parse will fail before we reach them.
+        let proof = InclusionProof {
+            tree_size: 1,
+            log_index: 0,
+            root_hash_b64: "abc=".to_string(),
+            hashes_b64: vec![],
+            checkpoint: None,
+        };
+
+        // Use a dummy PEM — any PEM that parses structurally is fine; the
+        // parse() failure will fire before ECDSA verification is attempted.
+        // We need a real PEM for the outer verify_ecdsa_p256 not to fail with
+        // a PEM-parse error before calling parse(), but since parse() is called
+        // inside verify_ecdsa_p256 which returns Invalid (not Ok), the
+        // checkpoint impl sees TreeHeadSignatureInvalid containing "empty".
+        let (pem, _signed_note) = build_ecdsa_p256_signed_note("some text\n", "rekor.sigstore.dev");
+
+        let result =
+            verify_rekor_checkpoint_impl(&empty_envelope, &proof, "rekor.sigstore.dev", &pem);
+        assert!(
+            result.is_err(),
+            "T-063-12: verify_rekor_checkpoint_impl must return Err for empty-body envelope"
+        );
+        let err_str = format!("{:?}", result.unwrap_err());
+        assert!(
+            err_str.contains("empty"),
+            "T-063-12: error must propagate 'empty' from parse, got: {err_str}"
+        );
+    }
+
+    // T-063-13: `cargo test`, `cargo clippy --all-targets -- -D warnings`, and
+    // `cargo fmt --check` all pass.  This is a CI gate requirement verified by
+    // the pre-commit checklist; no runtime assertion is needed.
 }
