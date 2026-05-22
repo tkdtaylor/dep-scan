@@ -1,82 +1,69 @@
-# Task 034 — Go checksum database cross-check
+# Task 034 — Go checksum database signature verification
 
 **Status:** backlog
-**Depends on:** 010 (policy framework), 019 (Go module client), 029 (h1 hash capture)
+**Depends on:** 010 (policy framework), 019 (Go module client), 029 (h1 fetch from sumdb)
+
+## Re-scoping note (2026-05-21)
+
+The original draft of this task assumed task 029 would capture an h1 hash from the **Go module proxy** and that 034 would compare that proxy-side h1 against the **sumdb** h1, blocking on mismatch.
+
+After implementing 029, that framing doesn't hold: Go module proxies do not serve h1 hashes in their metadata. The h1 must either be computed locally from the module zip (deferred to a future `--paranoid` flag per ADR 003) or obtained from the sumdb. Task 029's spec T-029-09 chose the sumdb path. So `content_hash` for Go packages already comes from sum.golang.org — there is no separate "proxy h1" to cross-check against.
+
+The genuine defense that's still missing — and that this task now provides — is **Ed25519 verification of the signed tree head** returned by sum.golang.org. Today, [src/registry/go.rs::fetch_h1_hash](../../../src/registry/go.rs#L74-L95) trusts the response without verifying any signature. An attacker performing MITM, or a compromised sumdb mirror, can lie freely. Pinning the sumdb public key and verifying the tree-head signature closes that gap.
 
 ## Objective
 
-Cross-check Go module hashes against the public Go checksum database (`sum.golang.org`), closing the lying-registry/lying-proxy threat for Go modules. Companion to [task 032](032-npm-provenance-verification.md) and [task 033](033-pypi-provenance-verification.md), but uses a different cryptographic primitive: a Merkle-tree transparency log rather than a sigstore signature chain.
-
-## Background
-
-Go's module checksum database (`sum.golang.org`) is a tamper-evident transparency log:
-
-- **Lookup endpoint:** `GET https://sum.golang.org/lookup/<module>@<version>` returns a signed text response containing the `h1:` hash for the module (and its `go.mod` file) at the requested version, along with a Merkle tree position and a signed tree head.
-- **Trust model:** the sumdb's Ed25519 signing key is well-known (shipped in the Go toolchain); the Merkle tree provides append-only/inclusion guarantees. Independence from the module proxy is the point — a compromised proxy that lies about an h1 hash cannot also make the sumdb lie.
-- **Coverage:** all public modules served via `proxy.golang.org` are recorded. Private modules and modules excluded via `GONOSUMDB` are not.
-
-Go's own toolchain does this verification by default. But:
-- A user can set `GOSUMDB=off`, opting out for performance or air-gapped environments
-- Some private module proxies don't enforce sumdb checks
-- dep-scan performing its own independent verification gives belt-and-suspenders coverage in CI and on developer workstations
-
-dep-scan does **not** respect the user's `GOSUMDB=off` environment variable. Go's opt-out applies to the Go toolchain; dep-scan is a separate integrity tool with its own configuration. Users who want to skip sumdb cross-check in dep-scan use dep-scan's config.
+Add Ed25519 signature verification of sum.golang.org tree-head responses. Make the verification surface a policy with the usual decision table (Pass / Warn / Block) and persist `"sum.golang.org"` to `scanned_packages.provenance_identity` for verified Go modules. Reuse the column added in task 032.
 
 ## Behavior
 
-Add `GoSumDbPolicy`:
+Add `GoSumDbPolicy` implementing the existing `Policy` trait:
 
-1. After Go module metadata fetch (which captures the proxy's claimed `h1:` hash via task 029), query `https://sum.golang.org/lookup/<module>@<version>`.
-2. Parse the response: a 3-line plaintext body of the form:
-   ```
-   <module> <version> h1:<hash>
-   <module> <version>/go.mod h1:<hash>
-   <signed-tree-head-block>
-   ```
-3. **Module not present in sumdb** (404) ⇒ `Warn` ("module not in checksum database — likely private or excluded"). Config knob `require_go_sumdb = true` escalates to `Block`.
-4. **Module present:**
-   - Compare the sumdb-returned h1 against the proxy-returned h1 (captured in task 029).
-   - **Match** ⇒ `Pass`. Persist `"sum.golang.org"` to `scanned_packages.provenance_identity` (the column added in task 032) as the marker that this entry was verified via the sumdb path.
-   - **Mismatch** ⇒ `Block` unconditionally. This is the strongest possible signal that the proxy is lying.
-5. **Signed-tree-head verification:** verify the Ed25519 signature on the tree head using the sumdb's well-known public key (shipped in `sumdb-public-key.txt` in the repo, sourced from Go's distribution). On signature failure ⇒ `Block`. *We do not verify the inclusion proof against a maintained tree state* — that would require persistent state across scans. Signed tree head + lookup signature is the practical compromise.
-6. **Network failure** querying the sumdb ⇒ fail-closed, same semantics as task 030. Do not silently downgrade to "not in sumdb."
+1. On every Go module scan, fetch `https://{sum_db_url}/lookup/<module>@<version>`. Parse the response into a `SumDbEntry { h1_module, h1_gomod, signed_tree_head }`.
+2. Verify the signed tree head's Ed25519 signature against the **pinned sum.golang.org public key** (embedded as a `const &str` or `include_str!` macro — the trust root).
+3. **Module not present in sumdb (404)** ⇒ `Warn` ("module not in checksum database — likely private or excluded"). `require_go_sumdb = true` escalates to `Block`.
+4. **Module present + valid signature** ⇒ `Pass`. Persist `"sum.golang.org"` to `scanned_packages.provenance_identity`.
+5. **Invalid signature** (sig fails verification against the pinned key, or response is malformed/missing the tree head) ⇒ `Block` unconditionally. `require_go_sumdb = false` does not silence this — same pattern as task 032's invalid-attestation rule.
+6. **Network failure** ⇒ surface as a scan error (fail-closed, same as task 030).
+
+`GOSUMDB=off` from the environment is **ignored**. Go's opt-out applies to the Go toolchain; dep-scan uses its own config knob. (An attacker who can set `GOSUMDB=off` in your environment can already do worse things, but social-engineering "just set `GOSUMDB=off`" must not silently downgrade dep-scan.)
 
 ## Configuration
 
 ```toml
 [policies]
-check_go_sumdb = true               # default: true
-require_go_sumdb = false            # default: warn on missing; true ⇒ block
-go_sumdb_url = "https://sum.golang.org"   # configurable for private mirrors / testing
+check_go_sumdb = true                          # default: true
+require_go_sumdb = false                       # default: warn on missing; true ⇒ block
+
+[registries]
+go_sum_db_url = "https://sum.golang.org"       # already configurable per task 029
 ```
 
 ## Acceptance criteria
 
 - [ ] `src/policy/go_sumdb.rs`: `GoSumDbPolicy` implementing `Policy`
-- [ ] New module `src/registry/go_sumdb.rs` (or extension of `src/registry/go.rs`) exposing `lookup(module, version) -> Result<Option<SumDbEntry>>`
-- [ ] `SumDbEntry` struct carries `h1_module`, `h1_gomod`, and the signed tree head
-- [ ] Sumdb Ed25519 public key shipped as a build-time constant or embedded asset (no runtime download — the key is the trust root and must be pinned)
-- [ ] Tree head signature verification uses an established Ed25519 crate (`ed25519-dalek` already transitively present, or add `ed25519-compact`)
-- [ ] 404 response ⇒ `Ok(None)`; the policy interprets `None` as "not in sumdb"
-- [ ] Non-404 errors propagate as `Err` (fail-closed)
-- [ ] Mismatch between sumdb h1 and proxy h1 ⇒ `Block` unconditionally — config does not silence
-- [ ] Missing from sumdb ⇒ `Warn` by default; `Block` when `require_go_sumdb = true`
-- [ ] Valid match ⇒ `Pass`, persists `"sum.golang.org"` to `scanned_packages.provenance_identity`
-- [ ] `GOSUMDB=off` environment variable is **ignored** — dep-scan uses its own config knob
-- [ ] Policy is wired into the pipeline in `main.rs` behind `config.policies.check_go_sumdb` (default true)
-- [ ] Unit tests: lookup parser (well-formed, 404, malformed body, bad signature), policy decision table
-- [ ] Integration test against wiremock sumdb: full Go scan with match / mismatch / 404 / bad-signature cases
+- [ ] Lookup response parser refactored or replaced: returns `SumDbEntry { h1_module, h1_gomod, signed_tree_head }` instead of just an `Option<String>` h1
+- [ ] sum.golang.org Ed25519 public key embedded as a build-time constant (no runtime download — the key is the trust root)
+- [ ] Ed25519 verification uses an established crate (`ed25519-dalek` preferred — common in the ecosystem; pin to a stable version)
+- [ ] 404 from sumdb ⇒ `Warn` by default, `Block` when `require_go_sumdb = true`
+- [ ] Invalid signature ⇒ `Block` unconditionally — config does not silence
+- [ ] Malformed body (missing tree head, partial response) ⇒ treated as invalid signature (Block)
+- [ ] Valid signature + h1 present ⇒ `Pass`, persists `"sum.golang.org"` to `provenance_identity`
+- [ ] `GOSUMDB` environment variable is not read anywhere in this task's code
+- [ ] Policy wired into the pipeline behind `config.policies.check_go_sumdb` (default true)
+- [ ] Unit tests cover the parser (well-formed, 404, 500, malformed, mismatch in module/version), Ed25519 verification (valid, tampered sig, wrong-key sig), and policy decision logic
+- [ ] Integration tests against wiremock sumdb: valid response → Pass; 404 → Warn (exit 1) / Block when required (exit 1); invalid sig → Block (exit 1); non-Go registries unaffected
 - [ ] Only Go is in scope; npm and PyPI paths unchanged
 - [ ] All tests pass, `cargo clippy` clean, `cargo fmt --check` clean
 
 ## Out of scope
 
-- Maintaining a persistent Merkle tree state and verifying consistency proofs across scans. This is what `gosum` itself does; dep-scan defers that complexity in favor of per-lookup signature verification.
-- Mirroring the full sumdb locally for air-gapped use. Users in air-gapped environments will set `check_go_sumdb = false` and rely on lockfile-level h1 pinning.
-- Cross-checking the `h1:` of `go.mod` against any independent source — the sumdb also carries this hash; we just compare against itself, not against the proxy. Future task if a use case emerges.
+- Maintaining persistent Merkle tree state and consistency proofs across scans. Per-lookup signature verification is the practical compromise.
+- Downloading the module zip and computing h1 locally as an additional cross-check — deferred to a future `--paranoid` flag.
+- Mirroring the full sumdb locally for air-gapped use. Air-gapped users set `check_go_sumdb = false`.
 
 ## Risk notes
 
-- The sumdb public key is a hardcoded trust root. If Google rotates it (rare but possible), users will need a dep-scan update. Document the key source and rotation process in the task implementation.
-- Sumdb adds one network call per Go module. For modules with many transitive dependencies this can be noticeable; concurrent lookups (matching the OSV batch pattern) should be considered in the implementation.
-- The sumdb URL is configurable for testing and for users who run private sumdb instances (Athens, JFrog GoCenter mirror with sumdb). The default trusts Google's instance.
+- The sumdb public key is a hardcoded trust root. If Google rotates it, users will need a dep-scan update. Document the source (Go distribution's `cmd/go/internal/modfetch/sumdb/keys.go` or equivalent) and the rotation process in the implementation comments.
+- Sumdb adds one network call per Go module (already added by task 029 — this task just leverages the existing call by demanding a signature).
+- The `ed25519-dalek` crate has had churn in its API across major versions. Pin and verify the version chosen still compiles cleanly with the rest of the dependency graph.
