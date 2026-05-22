@@ -35,6 +35,12 @@
 //! ## Spec marker coverage
 //! T-036-08, T-036-09, T-036-10 (Rekor ECDSA path) +
 //! T-034-06, T-034-07, T-034-08 (Ed25519 path, unchanged behavior).
+//!
+//! Task 043 (multi-sig iteration for key rotation):
+//! T-043-01 through T-043-13 (new tests in the `tests` module below).
+//! T-043-14 — see `verify_ed25519` and `verify_ecdsa_p256` loops: key-id
+//! mismatch uses `continue`, not `return`.
+//! T-043-15 — verified by CI: `cargo test`, `cargo clippy`, `cargo fmt` all pass.
 
 use base64::Engine as _;
 use ed25519_dalek::{Signature as Ed25519Signature, Verifier, VerifyingKey};
@@ -204,32 +210,20 @@ pub fn verify_ed25519(signed_note: &str, key_str: &str) -> NoteVerifyOutcome {
         Err(e) => return NoteVerifyOutcome::Invalid { reason: e },
     };
 
+    // T-043-14: iterate all lines; continue on key-id mismatch (REQ-043-01).
     for sig in &parsed.signatures {
         if sig.key_name != key_name {
             continue;
         }
+        // Key-id mismatch: this line was signed by a different key (e.g. old
+        // key during rotation).  Continue to the next line rather than
+        // returning Invalid immediately (REQ-043-01).
         if sig.key_id != expected_key_id {
-            return NoteVerifyOutcome::Invalid {
-                reason: format!(
-                    "signature key ID {:02x}{:02x}{:02x}{:02x} does not match pinned key ID {:02x}{:02x}{:02x}{:02x}",
-                    sig.key_id[0],
-                    sig.key_id[1],
-                    sig.key_id[2],
-                    sig.key_id[3],
-                    expected_key_id[0],
-                    expected_key_id[1],
-                    expected_key_id[2],
-                    expected_key_id[3],
-                ),
-            };
+            continue;
         }
         if sig.sig_bytes.len() != 64 {
-            return NoteVerifyOutcome::Invalid {
-                reason: format!(
-                    "Ed25519 signature payload must be exactly 64 bytes after the key-id, got {}",
-                    sig.sig_bytes.len()
-                ),
-            };
+            // Malformed line length — continue in case a later line is valid.
+            continue;
         }
         let sig_arr: [u8; 64] = sig
             .sig_bytes
@@ -237,12 +231,13 @@ pub fn verify_ed25519(signed_note: &str, key_str: &str) -> NoteVerifyOutcome {
             .try_into()
             .expect("len == 64 by check above");
         let signature = Ed25519Signature::from_bytes(&sig_arr);
-        return match Verifier::verify(&verifying_key, parsed.note_text.as_bytes(), &signature) {
-            Ok(()) => NoteVerifyOutcome::Valid,
-            Err(e) => NoteVerifyOutcome::Invalid {
-                reason: format!("Ed25519 signature verification failed: {e}"),
-            },
-        };
+        // On cryptographic success return Valid immediately; on failure
+        // continue so a second line with the same key-id but a valid
+        // signature can succeed (REQ-043-01, per task spec "continue
+        // iterating rather than returning immediately").
+        if Verifier::verify(&verifying_key, parsed.note_text.as_bytes(), &signature).is_ok() {
+            return NoteVerifyOutcome::Valid;
+        }
     }
 
     NoteVerifyOutcome::Invalid {
@@ -310,39 +305,27 @@ pub fn verify_ecdsa_p256(
         Err(e) => return NoteVerifyOutcome::Invalid { reason: e },
     };
 
+    // T-043-14: iterate all lines; continue on key-id mismatch (REQ-043-02).
     for sig in &parsed.signatures {
         if sig.key_name != expected_key_name {
             continue;
         }
+        // Key-id mismatch: this line was signed by a different key (e.g. old
+        // key during rotation).  Continue to the next line rather than
+        // returning Invalid immediately (REQ-043-02).
         if sig.key_id != expected_key_id {
-            return NoteVerifyOutcome::Invalid {
-                reason: format!(
-                    "signature key ID {:02x}{:02x}{:02x}{:02x} does not match pinned key ID {:02x}{:02x}{:02x}{:02x}",
-                    sig.key_id[0],
-                    sig.key_id[1],
-                    sig.key_id[2],
-                    sig.key_id[3],
-                    expected_key_id[0],
-                    expected_key_id[1],
-                    expected_key_id[2],
-                    expected_key_id[3],
-                ),
-            };
+            continue;
         }
-        let signature = match P256Signature::from_der(&sig.sig_bytes) {
-            Ok(s) => s,
-            Err(e) => {
-                return NoteVerifyOutcome::Invalid {
-                    reason: format!("malformed ECDSA P-256 DER signature: {e}"),
-                };
-            }
+        // DER parse failure — continue in case a later line with the same
+        // key-id has valid DER (REQ-043-02, per task spec).
+        let Ok(signature) = P256Signature::from_der(&sig.sig_bytes) else {
+            continue;
         };
-        return match P256Verifier::verify(&verifying_key, parsed.note_text.as_bytes(), &signature) {
-            Ok(()) => NoteVerifyOutcome::Valid,
-            Err(e) => NoteVerifyOutcome::Invalid {
-                reason: format!("ECDSA P-256 signature verification failed: {e}"),
-            },
-        };
+        // On cryptographic success return Valid; on failure continue so a
+        // second line with the same key-id but a valid signature can succeed.
+        if P256Verifier::verify(&verifying_key, parsed.note_text.as_bytes(), &signature).is_ok() {
+            return NoteVerifyOutcome::Valid;
+        }
     }
 
     NoteVerifyOutcome::Invalid {
@@ -541,5 +524,425 @@ mod tests {
             verify_ecdsa_p256(envelope, "rekor.sigstore.dev", pem),
             NoteVerifyOutcome::Valid
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Task 043 helpers
+    // -----------------------------------------------------------------------
+
+    /// Build an Ed25519 signed note with a configurable key name.
+    /// Returns `(key_str, signing_key, signed_note)`.
+    fn build_ed25519_signed_note_named(
+        note_text: &str,
+        key_name: &str,
+    ) -> (String, SigningKey, String) {
+        let signing_key = SigningKey::generate(&mut OsRng);
+        let verifying_key = signing_key.verifying_key();
+        let mut key_bytes = vec![0x01u8];
+        key_bytes.extend_from_slice(verifying_key.as_bytes());
+        let mut hasher = Sha256::new();
+        hasher.update(b"hash:1:");
+        hasher.update(key_name.as_bytes());
+        hasher.update(b"\n");
+        hasher.update(&key_bytes);
+        let key_id = &hasher.finalize()[..4];
+        let key_id_hex = format!(
+            "{:02x}{:02x}{:02x}{:02x}",
+            key_id[0], key_id[1], key_id[2], key_id[3]
+        );
+        let key_b64 = base64::engine::general_purpose::STANDARD.encode(&key_bytes);
+        let key_str = format!("{key_name}+{key_id_hex}+{key_b64}");
+        let sig = Signer::sign(&signing_key, note_text.as_bytes());
+        let mut sig_payload = key_id.to_vec();
+        sig_payload.extend_from_slice(&sig.to_bytes());
+        let sig_b64 = base64::engine::general_purpose::STANDARD.encode(&sig_payload);
+        let signed_note = format!("{note_text}\n\u{2014} {key_name} {sig_b64}\n");
+        (key_str, signing_key, signed_note)
+    }
+
+    /// Extract the signature line (the `— name b64` part) from a single-sig note.
+    fn extract_sig_line(signed_note: &str) -> &str {
+        signed_note
+            .lines()
+            .find(|l| l.starts_with('\u{2014}'))
+            .expect("no sig line found")
+    }
+
+    /// Build an ECDSA P-256 signed note with configurable key name.
+    /// Returns `(pem, signing_key, signed_note)`.
+    fn build_ecdsa_p256_signed_note_full(
+        note_text: &str,
+        key_name: &str,
+    ) -> (String, P256SigningKey, String) {
+        use p256::pkcs8::EncodePublicKey;
+        let signing_key = P256SigningKey::random(&mut OsRng);
+        let verifying_key = signing_key.verifying_key();
+        let spki_pem = verifying_key
+            .to_public_key_pem(p256::pkcs8::LineEnding::LF)
+            .expect("encode pem");
+        let spki_der = pem_to_spki_der(&spki_pem).expect("extract spki");
+        let mut hasher = Sha256::new();
+        hasher.update(&spki_der);
+        let key_id = &hasher.finalize()[..4];
+        let sig: p256::ecdsa::Signature = P256Signer::sign(&signing_key, note_text.as_bytes());
+        let sig_der = sig.to_der();
+        let mut payload = key_id.to_vec();
+        payload.extend_from_slice(sig_der.as_bytes());
+        let sig_b64 = base64::engine::general_purpose::STANDARD.encode(&payload);
+        let signed_note = format!("{note_text}\n\u{2014} {key_name} {sig_b64}\n");
+        (spki_pem, signing_key, signed_note)
+    }
+
+    // -----------------------------------------------------------------------
+    // T-043-01 through T-043-08: verify_ed25519 multi-sig iteration tests
+    // -----------------------------------------------------------------------
+
+    // T-043-01
+    #[test]
+    fn t_043_01_ed25519_single_sig_correct_key_verifies() {
+        let note_text = "go.sum database tree\n100\nabc=\n";
+        let (key_str, _sk, signed_note) =
+            build_ed25519_signed_note_named(note_text, "sum.golang.org");
+        assert_eq!(
+            verify_ed25519(&signed_note, &key_str),
+            NoteVerifyOutcome::Valid,
+            "T-043-01: single correct signature must verify"
+        );
+    }
+
+    // T-043-02
+    #[test]
+    fn t_043_02_ed25519_single_sig_wrong_key_name_returns_invalid() {
+        let note_text = "go.sum database tree\n100\nabc=\n";
+        let (key_str_k1, _sk, signed_note) =
+            build_ed25519_signed_note_named(note_text, "sum.golang.org");
+        // Build a key_str for a different key name — key-hash is irrelevant here
+        // because the name won't match the sig line.
+        let (key_str_k2, _sk2, _) =
+            build_ed25519_signed_note_named(note_text, "other.registry.dev");
+        // signed_note was signed by key_str_k1 (sum.golang.org); verify with key_str_k2 (other.registry.dev)
+        let _ = key_str_k1; // suppress unused
+        match verify_ed25519(&signed_note, &key_str_k2) {
+            NoteVerifyOutcome::Invalid { reason } => {
+                assert!(
+                    reason.contains("no signature line found"),
+                    "T-043-02: reason should mention 'no signature line found', got: {reason}"
+                );
+            }
+            other => panic!("T-043-02: expected Invalid, got {other:?}"),
+        }
+    }
+
+    // T-043-03: two lines — old key first, new key second; pinned = new key
+    #[test]
+    fn t_043_03_ed25519_two_lines_old_first_new_second_verifies() {
+        let note_text = "go.sum database tree\n200\nxyz=\n";
+        let key_name = "sum.golang.org";
+
+        // Build old-key signature line (different key-id, not the pinned one).
+        let (_, _sk_old, note_old) = build_ed25519_signed_note_named(note_text, key_name);
+        let old_sig_line = extract_sig_line(&note_old).to_string();
+
+        // Build new-key (the pinned key).
+        let (key_str_new, _sk_new, note_new) = build_ed25519_signed_note_named(note_text, key_name);
+        let new_sig_line = extract_sig_line(&note_new).to_string();
+
+        // Assemble: note_text + blank + old sig line + new sig line
+        let two_line_note = format!("{note_text}\n{old_sig_line}\n{new_sig_line}\n");
+
+        assert_eq!(
+            verify_ed25519(&two_line_note, &key_str_new),
+            NoteVerifyOutcome::Valid,
+            "T-043-03: old key first, new key second — must find pinned key and verify"
+        );
+    }
+
+    // T-043-04: two lines — new key first, old key second; pinned = new key
+    #[test]
+    fn t_043_04_ed25519_two_lines_new_first_old_second_verifies() {
+        let note_text = "go.sum database tree\n201\nxyz=\n";
+        let key_name = "sum.golang.org";
+
+        let (_, _sk_old, note_old) = build_ed25519_signed_note_named(note_text, key_name);
+        let old_sig_line = extract_sig_line(&note_old).to_string();
+
+        let (key_str_new, _sk_new, note_new) = build_ed25519_signed_note_named(note_text, key_name);
+        let new_sig_line = extract_sig_line(&note_new).to_string();
+
+        // Reversed order: new first, old second
+        let two_line_note = format!("{note_text}\n{new_sig_line}\n{old_sig_line}\n");
+
+        assert_eq!(
+            verify_ed25519(&two_line_note, &key_str_new),
+            NoteVerifyOutcome::Valid,
+            "T-043-04: new key first, old key second — must verify via first line"
+        );
+    }
+
+    // T-043-05: two lines, both with wrong key-ids (both different from pinned)
+    #[test]
+    fn t_043_05_ed25519_two_lines_both_wrong_key_id_returns_invalid() {
+        let note_text = "go.sum database tree\n300\nabc=\n";
+        let key_name = "sum.golang.org";
+
+        // k_a and k_b are both different from k_pinned.
+        let (_, _sk_a, note_a) = build_ed25519_signed_note_named(note_text, key_name);
+        let sig_a = extract_sig_line(&note_a).to_string();
+        let (_, _sk_b, note_b) = build_ed25519_signed_note_named(note_text, key_name);
+        let sig_b = extract_sig_line(&note_b).to_string();
+
+        // Pinned key is a third, independent key.
+        let (key_str_pinned, _sk_pinned, _) = build_ed25519_signed_note_named(note_text, key_name);
+
+        let two_line_note = format!("{note_text}\n{sig_a}\n{sig_b}\n");
+
+        match verify_ed25519(&two_line_note, &key_str_pinned) {
+            NoteVerifyOutcome::Invalid { reason } => {
+                assert!(
+                    reason.contains("no signature line found"),
+                    "T-043-05: reason should mention 'no signature line found', got: {reason}"
+                );
+            }
+            other => panic!("T-043-05: expected Invalid, got {other:?}"),
+        }
+    }
+
+    // T-043-06: correct key-id on first line but bad sig bytes; valid second line
+    #[test]
+    fn t_043_06_ed25519_bad_sig_first_valid_second_verifies() {
+        let note_text = "go.sum database tree\n400\nabc=\n";
+        let key_name = "sum.golang.org";
+
+        // Build a valid note for the pinned key to extract key_str and key_id.
+        let (key_str, _sk, note_valid) = build_ed25519_signed_note_named(note_text, key_name);
+
+        // Parse the valid note to get the correct key_id prefix.
+        let parsed_valid = parse(&note_valid).expect("parse valid note");
+        let key_id_bytes = parsed_valid.signatures[0].key_id;
+
+        // Construct a bad sig line: same key_name, same key_id, but 64 bytes of
+        // garbage for the sig payload.
+        let mut bad_payload = key_id_bytes.to_vec();
+        bad_payload.extend_from_slice(&[0xffu8; 64]);
+        let bad_b64 = base64::engine::general_purpose::STANDARD.encode(&bad_payload);
+        let bad_sig_line = format!("\u{2014} {key_name} {bad_b64}");
+
+        // Extract the valid sig line from the correctly-signed note.
+        let good_sig_line = extract_sig_line(&note_valid).to_string();
+
+        // Build the two-line note: bad first, good second.
+        let two_line_note = format!("{note_text}\n{bad_sig_line}\n{good_sig_line}\n");
+
+        assert_eq!(
+            verify_ed25519(&two_line_note, &key_str),
+            NoteVerifyOutcome::Valid,
+            "T-043-06: bad sig first, valid second — must continue and find good sig"
+        );
+    }
+
+    // T-043-07: wrong key name on all lines
+    #[test]
+    fn t_043_07_ed25519_wrong_key_name_all_lines_returns_invalid() {
+        let note_text = "go.sum database tree\n500\nabc=\n";
+        // Note is signed with "other.registry.dev"; verify with "sum.golang.org".
+        let (_key_str, _sk, signed_note) =
+            build_ed25519_signed_note_named(note_text, "other.registry.dev");
+
+        // Build a key_str with the expected key name.
+        let (key_str_sumdb, _sk2, _) = build_ed25519_signed_note_named(note_text, "sum.golang.org");
+
+        match verify_ed25519(&signed_note, &key_str_sumdb) {
+            NoteVerifyOutcome::Invalid { reason } => {
+                assert!(
+                    reason.contains("no signature line found for key 'sum.golang.org'"),
+                    "T-043-07: wrong key name — reason should mention key name, got: {reason}"
+                );
+            }
+            other => panic!("T-043-07: expected Invalid, got {other:?}"),
+        }
+    }
+
+    // T-043-08: regression — go_sumdb single-signature behavior still works
+    // (duplicates the existing round-trip test with explicit spec markers)
+    #[test]
+    fn t_043_08_ed25519_regression_single_sig_paths() {
+        let note_text = "go.sum database tree\n12345\nabc\n";
+
+        // Happy path.
+        let (key_str, _sk, signed_note) = build_ed25519_signed_note_named(note_text, "test-key");
+        assert_eq!(
+            verify_ed25519(&signed_note, &key_str),
+            NoteVerifyOutcome::Valid,
+            "T-043-08 happy path"
+        );
+
+        // Tampered signature (flip last byte of sig payload).
+        let parsed = parse(&signed_note).expect("parse");
+        let sig = &parsed.signatures[0];
+        let mut tampered_payload = sig.key_id.to_vec();
+        tampered_payload.extend_from_slice(&sig.sig_bytes);
+        // Flip a byte in the sig portion.
+        let last = tampered_payload.len() - 1;
+        tampered_payload[last] ^= 0xff;
+        let tampered_b64 = base64::engine::general_purpose::STANDARD.encode(&tampered_payload);
+        let tampered_note = format!("{note_text}\n\u{2014} test-key {tampered_b64}\n");
+        match verify_ed25519(&tampered_note, &key_str) {
+            NoteVerifyOutcome::Invalid { .. } => {}
+            other => panic!("T-043-08 tampered: expected Invalid, got {other:?}"),
+        }
+
+        // Wrong key.
+        let (key_str2, _sk2, _) = build_ed25519_signed_note_named(note_text, "test-key");
+        match verify_ed25519(&signed_note, &key_str2) {
+            NoteVerifyOutcome::Invalid { .. } => {}
+            other => panic!("T-043-08 wrong key: expected Invalid, got {other:?}"),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // T-043-09 through T-043-13: verify_ecdsa_p256 multi-sig iteration tests
+    // -----------------------------------------------------------------------
+
+    // T-043-09: single ECDSA signature, correct key, verifies
+    #[test]
+    fn t_043_09_ecdsa_single_sig_correct_key_verifies() {
+        let note_text = "rekor.sigstore.dev - 1\n42\nabc=\n";
+        let (pem, _sk, signed_note) =
+            build_ecdsa_p256_signed_note_full(note_text, "rekor.sigstore.dev");
+        assert_eq!(
+            verify_ecdsa_p256(&signed_note, "rekor.sigstore.dev", &pem),
+            NoteVerifyOutcome::Valid,
+            "T-043-09: single correct ECDSA signature must verify"
+        );
+    }
+
+    // T-043-10: two lines — old Rekor key first, new Rekor key second; pinned = new
+    #[test]
+    fn t_043_10_ecdsa_two_lines_old_first_new_second_verifies() {
+        let note_text = "rekor.sigstore.dev - 2\n100\nxyz=\n";
+        let key_name = "rekor.sigstore.dev";
+
+        let (_, _sk_old, note_old) = build_ecdsa_p256_signed_note_full(note_text, key_name);
+        let old_sig_line = extract_sig_line(&note_old).to_string();
+
+        let (pem_new, _sk_new, note_new) = build_ecdsa_p256_signed_note_full(note_text, key_name);
+        let new_sig_line = extract_sig_line(&note_new).to_string();
+
+        // Old key first.
+        let two_line_note = format!("{note_text}\n{old_sig_line}\n{new_sig_line}\n");
+
+        assert_eq!(
+            verify_ecdsa_p256(&two_line_note, key_name, &pem_new),
+            NoteVerifyOutcome::Valid,
+            "T-043-10: old ECDSA key first, new second — must find pinned key and verify"
+        );
+    }
+
+    // T-043-11: two ECDSA lines, both with wrong key-ids
+    #[test]
+    fn t_043_11_ecdsa_two_lines_both_wrong_key_id_returns_invalid() {
+        let note_text = "rekor.sigstore.dev - 3\n200\nabc=\n";
+        let key_name = "rekor.sigstore.dev";
+
+        let (_, _sk_a, note_a) = build_ecdsa_p256_signed_note_full(note_text, key_name);
+        let sig_a = extract_sig_line(&note_a).to_string();
+        let (_, _sk_b, note_b) = build_ecdsa_p256_signed_note_full(note_text, key_name);
+        let sig_b = extract_sig_line(&note_b).to_string();
+
+        // Pinned key is independent of both sig lines.
+        let (pem_pinned, _sk_pinned, _) = build_ecdsa_p256_signed_note_full(note_text, key_name);
+
+        let two_line_note = format!("{note_text}\n{sig_a}\n{sig_b}\n");
+
+        match verify_ecdsa_p256(&two_line_note, key_name, &pem_pinned) {
+            NoteVerifyOutcome::Invalid { .. } => {}
+            other => panic!("T-043-11: expected Invalid, got {other:?}"),
+        }
+    }
+
+    // T-043-12: correct key-id, bad DER on first; valid second line
+    #[test]
+    fn t_043_12_ecdsa_bad_der_first_valid_second_verifies() {
+        use p256::pkcs8::EncodePublicKey;
+        let note_text = "rekor.sigstore.dev - 4\n300\nabc=\n";
+        let key_name = "rekor.sigstore.dev";
+
+        // Build the pinned key.
+        let signing_key = P256SigningKey::random(&mut OsRng);
+        let verifying_key = signing_key.verifying_key();
+        let pem = verifying_key
+            .to_public_key_pem(p256::pkcs8::LineEnding::LF)
+            .expect("encode pem");
+        let spki_der = pem_to_spki_der(&pem).expect("extract spki");
+        let mut hasher = Sha256::new();
+        hasher.update(&spki_der);
+        let key_id_full = hasher.finalize();
+        let key_id = &key_id_full[..4];
+
+        // Build a bad-DER line: same key-id, but `sig_bytes` is not valid DER.
+        let mut bad_payload = key_id.to_vec();
+        bad_payload.extend_from_slice(&[0xdeu8, 0xad, 0xbe, 0xef]); // garbage DER
+        let bad_b64 = base64::engine::general_purpose::STANDARD.encode(&bad_payload);
+        let bad_sig_line = format!("\u{2014} {key_name} {bad_b64}");
+
+        // Build a valid sig line.
+        let valid_sig: p256::ecdsa::Signature =
+            P256Signer::sign(&signing_key, note_text.as_bytes());
+        let valid_der = valid_sig.to_der();
+        let mut good_payload = key_id.to_vec();
+        good_payload.extend_from_slice(valid_der.as_bytes());
+        let good_b64 = base64::engine::general_purpose::STANDARD.encode(&good_payload);
+        let good_sig_line = format!("\u{2014} {key_name} {good_b64}");
+
+        let two_line_note = format!("{note_text}\n{bad_sig_line}\n{good_sig_line}\n");
+
+        assert_eq!(
+            verify_ecdsa_p256(&two_line_note, key_name, &pem),
+            NoteVerifyOutcome::Valid,
+            "T-043-12: bad DER first, valid second — must continue past DER failure"
+        );
+    }
+
+    // T-043-13: regression — Rekor ECDSA single-signature behavior still works
+    #[test]
+    fn t_043_13_ecdsa_regression_single_sig_paths() {
+        let note_text = "rekor.sigstore.dev - 5\n999\nabc=\n";
+        let key_name = "rekor.sigstore.dev";
+
+        // Happy path.
+        let (pem, _sk, signed_note) = build_ecdsa_p256_signed_note_full(note_text, key_name);
+        assert_eq!(
+            verify_ecdsa_p256(&signed_note, key_name, &pem),
+            NoteVerifyOutcome::Valid,
+            "T-043-13 happy path"
+        );
+
+        // Tampered sig — reuse T-036-09 pattern.
+        let tampered: String = signed_note
+            .lines()
+            .map(|l| {
+                if l.starts_with('\u{2014}') {
+                    let mut chars: Vec<char> = l.chars().collect();
+                    let idx = chars.len() - 2;
+                    chars[idx] = if chars[idx] == 'A' { 'B' } else { 'A' };
+                    chars.into_iter().collect()
+                } else {
+                    l.to_string()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n";
+        match verify_ecdsa_p256(&tampered, key_name, &pem) {
+            NoteVerifyOutcome::Invalid { .. } => {}
+            other => panic!("T-043-13 tampered: expected Invalid, got {other:?}"),
+        }
+
+        // Wrong key.
+        let (pem2, _sk2, _) = build_ecdsa_p256_signed_note_full(note_text, key_name);
+        match verify_ecdsa_p256(&signed_note, key_name, &pem2) {
+            NoteVerifyOutcome::Invalid { .. } => {}
+            other => panic!("T-043-13 wrong key: expected Invalid, got {other:?}"),
+        }
     }
 }

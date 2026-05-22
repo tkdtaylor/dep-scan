@@ -21,6 +21,7 @@ pub struct CacheEntry {
     ///     the sigstore attestation.
     ///   - Go modules (task 034): the literal string `"sum.golang.org"` once the
     ///     Ed25519 signed-tree-head check passes.
+    ///
     /// `None` when no provenance was verified — either because the package's
     /// registry does not (yet) publish one, or because the verification could
     /// not be completed.
