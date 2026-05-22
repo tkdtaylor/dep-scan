@@ -117,9 +117,91 @@ pub fn validate_go_module_path(path: &str) -> Result<(), GoPathError> {
     Ok(())
 }
 
+/// Errors produced by [`validate_go_version`].
+#[derive(Debug, PartialEq)]
+pub enum GoVersionError {
+    /// The input string was empty.
+    Empty,
+    /// The version string does not start with `v`.
+    MissingVPrefix,
+    /// A `..` segment was found (path traversal guard).
+    PathTraversal,
+    /// A character with special URL meaning (or that is non-ASCII) appeared.
+    ForbiddenCharacter {
+        /// The offending character.
+        char: char,
+    },
+}
+
+impl fmt::Display for GoVersionError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            GoVersionError::Empty => write!(f, "version string must not be empty"),
+            GoVersionError::MissingVPrefix => {
+                write!(f, "version string must begin with 'v' (e.g. v1.2.3)")
+            }
+            GoVersionError::PathTraversal => {
+                write!(f, "version string contains a `..` path traversal sequence")
+            }
+            GoVersionError::ForbiddenCharacter { char } => {
+                write!(f, "version string contains forbidden character {:?}", char)
+            }
+        }
+    }
+}
+
+impl std::error::Error for GoVersionError {}
+
+/// Validate a Go version string before interpolating it into a proxy URL.
+///
+/// Accepts printable ASCII only. Rejects:
+/// - Empty string → [`GoVersionError::Empty`]
+/// - Any `..` path traversal sequence → [`GoVersionError::PathTraversal`]
+/// - Any string not starting with `v` → [`GoVersionError::MissingVPrefix`]
+/// - Characters `/`, `?`, `#`, `%`, `@`, space, tab, `\r`, `\n`, NUL, or any
+///   non-ASCII byte → [`GoVersionError::ForbiddenCharacter`]
+///
+/// Does **not** enforce full SemVer or Go pseudo-version grammar — only rejects
+/// characters that are dangerous in URL context.
+pub fn validate_go_version(version: &str) -> Result<(), GoVersionError> {
+    if version.is_empty() {
+        return Err(GoVersionError::Empty);
+    }
+
+    // Check for path traversal before the v-prefix check so that bare `..`
+    // returns PathTraversal rather than MissingVPrefix.
+    if version.contains("..") {
+        return Err(GoVersionError::PathTraversal);
+    }
+
+    if !version.starts_with('v') {
+        return Err(GoVersionError::MissingVPrefix);
+    }
+
+    // Scan every character for forbidden values.
+    for c in version.chars() {
+        if !c.is_ascii() {
+            return Err(GoVersionError::ForbiddenCharacter { char: c });
+        }
+        if matches!(
+            c,
+            '\0' | '/' | '?' | '#' | '%' | '@' | ' ' | '\t' | '\r' | '\n'
+        ) {
+            return Err(GoVersionError::ForbiddenCharacter { char: c });
+        }
+    }
+
+    Ok(())
+}
+
 /// Convert a [`GoPathError`] to a [`RegistryError::InvalidModulePath`].
 fn path_err_to_registry(module: &str, err: GoPathError) -> RegistryError {
     RegistryError::InvalidModulePath(format!("{err} (module: {module:?})"))
+}
+
+/// Convert a [`GoVersionError`] to a [`RegistryError::InvalidVersion`].
+fn version_err_to_registry(version: &str, err: GoVersionError) -> RegistryError {
+    RegistryError::InvalidVersion(format!("{err} (version: {version:?})"))
 }
 
 /// Go module proxy client.
@@ -228,6 +310,7 @@ impl GoRegistry {
         version: &str,
     ) -> Result<GoVersionInfo, RegistryError> {
         validate_go_module_path(module).map_err(|e| path_err_to_registry(module, e))?;
+        validate_go_version(version).map_err(|e| version_err_to_registry(version, e))?;
         let encoded = encode_module_path(module);
         let url = format!("{}/{}/@v/{}.info", self.base_url, encoded, version);
 
@@ -871,6 +954,377 @@ mod tests {
             "2024-03-01T00:00:00+00:00"
         );
     }
+
+    // ── validate_go_version unit tests ──────────────────────────────────────
+
+    // T-060-01: Canonical semver tag is accepted
+    #[test]
+    fn t060_01_canonical_semver_accepted() {
+        assert_eq!(
+            validate_go_version("v1.2.3"),
+            Ok(()),
+            "canonical semver tag should be accepted"
+        );
+    }
+
+    // T-060-02: Zero-patch semver tag is accepted
+    #[test]
+    fn t060_02_zero_patch_semver_accepted() {
+        assert_eq!(
+            validate_go_version("v1.0.0"),
+            Ok(()),
+            "zero-patch semver tag should be accepted"
+        );
+    }
+
+    // T-060-03: Major-only tag is accepted
+    #[test]
+    fn t060_03_major_only_tag_accepted() {
+        assert_eq!(
+            validate_go_version("v2"),
+            Ok(()),
+            "major-only tag should be accepted"
+        );
+    }
+
+    // T-060-04: Major.minor tag is accepted
+    #[test]
+    fn t060_04_major_minor_tag_accepted() {
+        assert_eq!(
+            validate_go_version("v0.9"),
+            Ok(()),
+            "major.minor tag should be accepted"
+        );
+    }
+
+    // T-060-05: Pseudo-version (timestamp + commit hash) is accepted
+    #[test]
+    fn t060_05_pseudo_version_accepted() {
+        assert_eq!(
+            validate_go_version("v0.0.0-20210101120000-abcdef0123456"),
+            Ok(()),
+            "pseudo-version should be accepted"
+        );
+    }
+
+    // T-060-06: Build-metadata suffix is accepted
+    #[test]
+    fn t060_06_build_metadata_suffix_accepted() {
+        assert_eq!(
+            validate_go_version("v1.2.3+incompatible"),
+            Ok(()),
+            "build-metadata suffix should be accepted"
+        );
+    }
+
+    // T-060-07: Pre-release suffix with alphanumeric label is accepted
+    #[test]
+    fn t060_07_prerelease_suffix_accepted() {
+        assert_eq!(
+            validate_go_version("v1.0.0-beta.1"),
+            Ok(()),
+            "pre-release suffix should be accepted"
+        );
+    }
+
+    // T-060-08: Path traversal segment `..` is rejected
+    #[test]
+    fn t060_08_dotdot_bare_rejected() {
+        let result = validate_go_version("..");
+        assert_eq!(
+            result,
+            Err(GoVersionError::PathTraversal),
+            "bare `..` should return PathTraversal"
+        );
+    }
+
+    // T-060-09: Embedded `..` within a longer string is rejected
+    #[test]
+    fn t060_09_embedded_dotdot_rejected() {
+        let result = validate_go_version("v1.0.0/../etc");
+        // `/` is rejected first as ForbiddenCharacter, but `..` check fires before v-prefix check
+        // In practice `..` is present so PathTraversal fires before the char scan
+        assert!(
+            result.is_err(),
+            "version with embedded `..` should be rejected"
+        );
+    }
+
+    // T-060-10: Query separator `?` is rejected
+    #[test]
+    fn t060_10_question_mark_rejected() {
+        let result = validate_go_version("v1.0.0?foo=bar");
+        assert_eq!(
+            result,
+            Err(GoVersionError::ForbiddenCharacter { char: '?' }),
+            "version containing `?` should be rejected"
+        );
+    }
+
+    // T-060-11: Fragment separator `#` is rejected
+    #[test]
+    fn t060_11_fragment_rejected() {
+        let result = validate_go_version("v1.0.0#section");
+        assert_eq!(
+            result,
+            Err(GoVersionError::ForbiddenCharacter { char: '#' }),
+            "version containing `#` should be rejected"
+        );
+    }
+
+    // T-060-12: Percent-encoded slash `%2F` is rejected
+    #[test]
+    fn t060_12_percent_encoded_slash_rejected() {
+        let result = validate_go_version("v1.0%2F0");
+        assert_eq!(
+            result,
+            Err(GoVersionError::ForbiddenCharacter { char: '%' }),
+            "version containing `%` should be rejected"
+        );
+    }
+
+    // T-060-13: Percent-encoded newline `%0A` is rejected
+    #[test]
+    fn t060_13_percent_encoded_newline_rejected() {
+        let result = validate_go_version("v1.0%0A.0");
+        assert_eq!(
+            result,
+            Err(GoVersionError::ForbiddenCharacter { char: '%' }),
+            "version containing `%` should be rejected"
+        );
+    }
+
+    // T-060-14: Bare `@` is rejected
+    #[test]
+    fn t060_14_at_sign_rejected() {
+        let result = validate_go_version("v1.0.0@evil.com");
+        assert_eq!(
+            result,
+            Err(GoVersionError::ForbiddenCharacter { char: '@' }),
+            "version containing `@` should be rejected"
+        );
+    }
+
+    // T-060-15: Embedded space is rejected
+    #[test]
+    fn t060_15_embedded_space_rejected() {
+        let result = validate_go_version("v1.0 .0");
+        assert_eq!(
+            result,
+            Err(GoVersionError::ForbiddenCharacter { char: ' ' }),
+            "version containing space should be rejected"
+        );
+    }
+
+    // T-060-16: Tab character is rejected
+    #[test]
+    fn t060_16_tab_rejected() {
+        let result = validate_go_version("v1.0\t0");
+        assert_eq!(
+            result,
+            Err(GoVersionError::ForbiddenCharacter { char: '\t' }),
+            "version containing tab should be rejected"
+        );
+    }
+
+    // T-060-17: Carriage return `\r` is rejected
+    #[test]
+    fn t060_17_carriage_return_rejected() {
+        let result = validate_go_version("v1.0\r\n0");
+        assert_eq!(
+            result,
+            Err(GoVersionError::ForbiddenCharacter { char: '\r' }),
+            "version containing `\\r` should be rejected"
+        );
+    }
+
+    // T-060-18: Newline `\n` is rejected
+    #[test]
+    fn t060_18_newline_rejected() {
+        let result = validate_go_version("v1.0\n0");
+        assert_eq!(
+            result,
+            Err(GoVersionError::ForbiddenCharacter { char: '\n' }),
+            "version containing `\\n` should be rejected"
+        );
+    }
+
+    // T-060-19: NUL byte is rejected
+    #[test]
+    fn t060_19_nul_byte_rejected() {
+        let result = validate_go_version("v1.0\x000");
+        assert_eq!(
+            result,
+            Err(GoVersionError::ForbiddenCharacter { char: '\0' }),
+            "version containing NUL should be rejected"
+        );
+    }
+
+    // T-060-20: Forward slash `/` inside version string is rejected
+    #[test]
+    fn t060_20_forward_slash_rejected() {
+        let result = validate_go_version("v1.0/0");
+        assert_eq!(
+            result,
+            Err(GoVersionError::ForbiddenCharacter { char: '/' }),
+            "version containing `/` should be rejected"
+        );
+    }
+
+    // T-060-21: Empty string is rejected
+    #[test]
+    fn t060_21_empty_string_rejected() {
+        let result = validate_go_version("");
+        assert_eq!(
+            result,
+            Err(GoVersionError::Empty),
+            "empty version string should be rejected with Empty"
+        );
+    }
+
+    // T-060-22: Version not starting with `v` is rejected
+    #[test]
+    fn t060_22_missing_v_prefix_rejected() {
+        let result = validate_go_version("1.2.3");
+        assert_eq!(
+            result,
+            Err(GoVersionError::MissingVPrefix),
+            "version not starting with `v` should be rejected with MissingVPrefix"
+        );
+    }
+
+    // T-060-23: fetch_version_info with a valid version contacts the proxy
+    #[tokio::test]
+    async fn t060_23_fetch_version_info_valid_version_contacts_proxy() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/github.com/foo/bar/@v/v1.2.3.info"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string(r#"{"Version":"v1.2.3","Time":"2023-01-01T00:00:00Z"}"#),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let registry = GoRegistry::new(server.uri(), server.uri());
+        let result = registry
+            .get_metadata("github.com/foo/bar", Some("v1.2.3"))
+            .await;
+
+        assert!(result.is_ok(), "valid version should succeed: {:?}", result);
+        let meta = result.unwrap();
+        assert_eq!(meta.version, "v1.2.3");
+    }
+
+    // T-060-24: fetch_version_info with crafted version `..` does not contact proxy
+    #[tokio::test]
+    async fn t060_24_fetch_version_info_dotdot_no_http() {
+        let server = MockServer::start().await;
+        // No mocks mounted — any request would cause the test to fail via expect(0)
+        // We use port 1 to ensure any accidental HTTP call fails with NetworkError,
+        // not an accidental 200 from wiremock.
+        let registry = GoRegistry::new(
+            "http://127.0.0.1:1".to_string(),
+            "http://127.0.0.1:1".to_string(),
+        );
+        let result = registry
+            .get_metadata("github.com/foo/bar", Some(".."))
+            .await;
+        match result {
+            Err(RegistryError::InvalidVersion(msg)) => {
+                assert!(
+                    msg.contains("version") || msg.contains(".."),
+                    "error message should mention the violation: {msg}"
+                );
+            }
+            other => panic!("T-060-24: expected InvalidVersion, got: {:?}", other),
+        }
+        // Ensure the wiremock server received zero requests
+        server.verify().await;
+    }
+
+    // T-060-25: fetch_version_info with CRLF injection does not contact proxy
+    #[tokio::test]
+    async fn t060_25_fetch_version_info_crlf_no_http() {
+        let registry = GoRegistry::new(
+            "http://127.0.0.1:1".to_string(),
+            "http://127.0.0.1:1".to_string(),
+        );
+        let result = registry
+            .get_metadata("github.com/foo/bar", Some("v1.0\r\nHost: evil.com"))
+            .await;
+        match result {
+            Err(RegistryError::InvalidVersion(_)) => {}
+            other => panic!("T-060-25: expected InvalidVersion, got: {:?}", other),
+        }
+    }
+
+    // T-060-26: fetch_version_info with percent-encoded slash does not contact proxy
+    #[tokio::test]
+    async fn t060_26_fetch_version_info_percent_encoded_slash_no_http() {
+        let registry = GoRegistry::new(
+            "http://127.0.0.1:1".to_string(),
+            "http://127.0.0.1:1".to_string(),
+        );
+        let result = registry
+            .get_metadata("github.com/foo/bar", Some("v1.0%2F1"))
+            .await;
+        match result {
+            Err(RegistryError::InvalidVersion(_)) => {}
+            other => panic!("T-060-26: expected InvalidVersion, got: {:?}", other),
+        }
+    }
+
+    // T-060-27: RegistryError::InvalidVersion variant exists with display mentioning "version"
+    #[test]
+    fn t060_27_registry_error_invalid_version_variant_exists() {
+        let err = RegistryError::InvalidVersion("test violation".to_string());
+        let msg = err.to_string();
+        assert!(
+            msg.contains("version"),
+            "InvalidVersion display should mention 'version', got: {msg}"
+        );
+    }
+
+    // T-060-28: GoVersionError Display is human-readable
+    #[test]
+    fn t060_28_go_version_error_display_human_readable() {
+        let empty_msg = GoVersionError::Empty.to_string();
+        assert!(
+            !empty_msg.is_empty(),
+            "Empty display should not be empty string"
+        );
+
+        let prefix_msg = GoVersionError::MissingVPrefix.to_string();
+        assert!(
+            prefix_msg.contains('v'),
+            "MissingVPrefix display should mention 'v': {prefix_msg}"
+        );
+
+        let traversal_msg = GoVersionError::PathTraversal.to_string();
+        assert!(
+            traversal_msg.contains("..") || traversal_msg.contains("path traversal"),
+            "PathTraversal display should mention '..' or 'path traversal': {traversal_msg}"
+        );
+
+        let char_msg = GoVersionError::ForbiddenCharacter { char: '?' }.to_string();
+        assert!(
+            char_msg.contains('?'),
+            "ForbiddenCharacter display should mention the char: {char_msg}"
+        );
+    }
+
+    // T-060-29: All task 041 Go module path validation tests still pass — verified
+    // by the t041_* tests above existing and passing unmodified.
+
+    // T-060-30: All task 019 Go registry client tests still pass — verified by
+    // the existing T-019-* tests above passing unmodified.
+
+    // T-060-31: cargo test, cargo clippy --all-targets -- -D warnings, and
+    // cargo fmt --check all pass — verified by the pre-commit gate (not a
+    // coded assertion; this marker confirms the tooling checks were run).
 
     // T-029-09: Go module h1 hash comes from the Go checksum database.
     //

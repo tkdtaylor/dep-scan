@@ -91,6 +91,14 @@ pub enum RegistryError {
     /// treat this as user input error — exit code 2 at the CLI layer.
     #[error("invalid Go module path: {0}")]
     InvalidModulePath(String),
+
+    /// A Go version string failed validation before URL composition.
+    ///
+    /// The contained string is a human-readable description of the violation
+    /// (e.g. "version string contains forbidden character '?'").  Callers should
+    /// treat this as user input error — exit code 2 at the CLI layer.
+    #[error("invalid Go version string: {0}")]
+    InvalidVersion(String),
 }
 
 /// Trait for querying package metadata from a registry.
