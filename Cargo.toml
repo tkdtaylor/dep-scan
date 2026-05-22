@@ -13,10 +13,7 @@ categories = ["command-line-utilities", "development-tools"]
 [dependencies]
 clap = { version = "4", features = ["derive"] }
 tokio = { version = "1", features = ["full"] }
-# reqwest 0.13: `rustls-tls` was replaced by `rustls` (uses rustls-platform-verifier
-# + aws-lc-rs as the crypto backend). No OpenSSL dependency — dep-scan remains
-# statically linkable. `json` enables serde_json response deserialization.
-reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 rusqlite = { version = "0.39", features = ["bundled"] }

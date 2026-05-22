@@ -509,29 +509,4 @@ mod tests {
             )
         );
     }
-
-    // T-056-07: crates.io registry client returns valid metadata after reqwest bump
-    // Verifies that the reqwest 0.12 → 0.13 upgrade did not break the crates.io client.
-    #[tokio::test]
-    async fn t056_07_crates_client_returns_valid_metadata_after_reqwest_bump() {
-        let server = MockServer::start().await;
-
-        Mock::given(method("GET"))
-            .and(path("/api/v1/crates/serde"))
-            .respond_with(ResponseTemplate::new(200).set_body_string(serde_json()))
-            .mount(&server)
-            .await;
-
-        let registry = CratesRegistry::new(server.uri());
-        let meta = registry.get_metadata("serde", None).await.unwrap();
-
-        assert_eq!(
-            meta.name, "serde",
-            "T-056-07: crates.io client must deserialise metadata correctly after reqwest bump"
-        );
-        assert!(
-            !meta.version.is_empty(),
-            "T-056-07: version must be non-empty"
-        );
-    }
 }
