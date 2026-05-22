@@ -1,6 +1,6 @@
 # Task 035 — Full Fulcio root chain verification
 
-**Status:** backlog
+**Status:** completed
 **Depends on:** 032 (npm provenance), 033 (PyPI provenance)
 
 ## Objective
@@ -37,23 +37,26 @@ In `src/sigstore_verify.rs`:
 
 ## Acceptance criteria
 
-- [ ] New directory `fulcio-roots/` with DER files for `fulcio_v1_root.der`, `fulcio_v1_intermediate.der` (if applicable), `fulcio_v3_root.der`, `fulcio_v3_intermediate.der`. Source documented in a `README.md` in the same directory: sigstore's TUF repository (`https://tuf-repo-cdn.sigstore.dev/targets/`) with the exact retrieval steps for future rotation.
-- [ ] Each DER is loaded via `include_bytes!` into a `FULCIO_TRUST_STORE` static — no runtime download of the trust root.
-- [ ] `verify_fulcio_chain(leaf_der)` function: parses leaf, walks the chain, returns specific `ChainError` variants (`UnknownIssuer`, `SignatureInvalid`, `MissingCodeSigningEku`, `MalformedCert`).
-- [ ] Cryptographic signature verification at each chain link (NOT just OID matching). P-256 ECDSA via `p256`; if any embedded Fulcio cert uses RSA, add RSA verification via `rsa` crate (pinned).
-- [ ] EKU check: leaf cert must contain `id-kp-codeSigning` (OID `1.3.6.1.5.5.7.3.3`). Missing or wrong EKU ⇒ `ChainError::MissingCodeSigningEku`.
-- [ ] Validity period of certs is **NOT** checked at verification time — short-lived Fulcio certs are always expired by then. Documented in the module docstring with the explicit reasoning.
-- [ ] `verify_dsse_bundle` invokes `verify_fulcio_chain` before signature verification; failures produce distinct error messages (`"Fulcio chain validation failed: <reason>"` vs `"DSSE signature verification failed"`).
-- [ ] Tests:
-  - Test-only secondary trust root (gated by `#[cfg(test)]`) so test fixtures can be generated against a controllable CA.
-  - Chain validation succeeds for a test cert chain rooted at the test CA.
-  - Chain validation fails with `UnknownIssuer` for a cert signed by an unknown CA.
-  - Chain validation fails with `SignatureInvalid` for a cert with a tampered signature.
-  - Chain validation fails with `MissingCodeSigningEku` for a cert with serverAuth EKU only.
-  - One smoke test using a real Fulcio-signed bundle fixture (extract from a real public npm package's attestation; document the source so the fixture can be re-generated).
-- [ ] Tasks 032 and 033 acceptance criteria upgraded from `[~]` to `[x]` for the "broken chain ⇒ Block" line — the gap is now closed.
-- [ ] All tests pass (including existing 032/033 integration tests, which use stub certs and therefore now produce `ChainError::UnknownIssuer` ⇒ `Invalid` — the test expectations are unchanged because they already assert `Invalid`/`Block`).
-- [ ] `cargo clippy` clean, `cargo fmt --check` clean.
+- [x] New directory `fulcio-roots/` with DER files. Spec called for `fulcio_v1_root.der` + `fulcio_v3_root.der`; in practice sigstore's current TUF manifest (12.targets.json) ships the legacy `fulcio.crt` and the rotated `fulcio_v1.crt` + `fulcio_intermediate_v1.crt` — there is no v3 root in the active TUF manifest as of 2026-05-22. Both active anchors are P-384 self-signed roots sharing subject DN `O=sigstore.dev, CN=sigstore`. Sources documented in `fulcio-roots/README.md` (TUF source URL + retrieval steps + sha256s).
+- [x] Each DER is loaded via `include_bytes!` into a `FULCIO_TRUST_STORE` static — no runtime download. Audited by `static_audit::t_035_11_no_runtime_fulcio_lookup`.
+- [x] `verify_fulcio_chain(leaf_der)` function: parses leaf, walks the chain, returns specific `ChainError` variants (`UnknownIssuer`, `SignatureInvalid`, `MissingCodeSigningEku`, `MalformedCert`).
+- [x] Cryptographic signature verification at each chain link (NOT just OID matching). Uses `x509-parser`'s `verify` feature (ring-backed) which supports P-256, P-384 ECDSA, RSA-PKCS1 with SHA-256/384/512, and Ed25519 — no new top-level crate dep needed (`ring` was already transitive via rustls-tls). Fulcio v1 root + intermediate are P-384/SHA-384; leaves are P-256.
+- [x] EKU check: leaf cert must contain `id-kp-codeSigning` (1.3.6.1.5.5.7.3.3). Missing or wrong EKU ⇒ `ChainError::MissingCodeSigningEku`.
+- [x] Validity period of certs is **NOT** checked at verification time — short-lived Fulcio certs are always expired by then. Documented in module docstring; enforced by `t_035_08_expired_cert_still_passes`.
+- [x] `verify_dsse_bundle` invokes `verify_fulcio_chain` after parse + subject-digest check, before DSSE signature verification; failures produce distinct error messages (`"Fulcio chain validation failed: <reason>"` vs `"DSSE signature verification failed: …"`). Verified by `t_035_12_*` and `t_035_13_*`.
+- [x] Tests:
+  - Test-only trust root (`build_root_ca` / `build_intermediate` / `build_leaf` helpers under `#[cfg(test)]` using `rcgen`).
+  - T-035-01 / T-035-02: valid chain (root → intermediate → leaf and root → leaf) ⇒ Ok.
+  - T-035-03: `UnknownIssuer` for a cert signed by an unknown CA — DN named in the error.
+  - T-035-04: `SignatureInvalid` for tampered signature bytes — link named.
+  - T-035-05: `MissingCodeSigningEku` for serverAuth-only leaf.
+  - T-035-06: `MissingCodeSigningEku` for leaf with no EKU extension.
+  - T-035-07: `MalformedCert` for random bytes.
+  - T-035-14 / T-035-15: smoke tests against real Fulcio leaves from `sigstore@2.3.1` and `sigstore@1.0.0` (extracted from `https://registry.npmjs.org/-/npm/v1/attestations/<pkg>@<ver>`); fixtures live in `tests/fixtures/fulcio_real/` and are documented inline.
+- [x] Tasks 032 and 033 acceptance criteria upgraded from `[~]` to `[x]` for the "broken chain ⇒ Block" line — the gap is now closed.
+- [x] All tests pass (399 / 399). Existing 032/033 integration tests still pass — they use stub `MIIB...` cert which fails at X.509 parsing before reaching the chain walk, so observable behavior is unchanged (exit 1 / Block).
+- [x] `cargo clippy --all-targets --all-features -- -D warnings` clean; `cargo fmt --check` clean.
+- [~] T-035-09 (RSA-signed intermediate path): production Fulcio is fully P-384/P-256 — there is no RSA-signed Fulcio intermediate in the current TUF manifest. The RSA verification path is wired through `x509-parser`'s ring-backed `verify_signature` (compile-time-guarded by `verifier_supports_rsa_oids_for_legacy_chains`); a runtime end-to-end RSA chain test would require fabricating a non-Fulcio fixture. Considered partial because the spec lists this as test-target T-035-09; the production code path supports it, the dedicated assertion is wired, but no real RSA Fulcio chain exists to point at.
 
 ## Out of scope
 

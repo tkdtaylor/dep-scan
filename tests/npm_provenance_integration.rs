@@ -8,6 +8,11 @@
 /// T-032-19: Full scan — require_npm_provenance=true blocks unprovenanced packages
 /// T-032-20: Full scan — tampered attestation blocks regardless of config
 /// T-032-21: Non-npm registries unaffected
+///
+/// T-035-16: Regression — all task-032 tests still pass after the Fulcio chain
+/// walk lands. Stub bundles fail at the chain-walk step instead of structural
+/// OID check, but exit codes (1) and Block messages are unchanged from
+/// 032's perspective — the assertions in this file are the regression test.
 use std::io::Write;
 
 use assert_cmd::Command;

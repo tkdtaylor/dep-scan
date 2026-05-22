@@ -9,6 +9,10 @@
 /// T-033-20: Full scan — tampered attestation blocks regardless of config
 /// T-033-21: Legacy mirror without JSON v1 ⇒ Warn for every file
 /// T-033-22: Non-PyPI registries unaffected
+///
+/// T-035-17: Regression — all task-033 tests still pass after the Fulcio
+/// chain walk lands. Stub PEP-740 bundles produce `UnknownIssuer ⇒ Invalid ⇒
+/// Block`, exit code 1; the assertions in this file are the regression test.
 use std::io::Write;
 
 use assert_cmd::Command;

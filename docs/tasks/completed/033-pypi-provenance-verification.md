@@ -49,7 +49,7 @@ require_pypi_provenance = false          # default: warn on missing; true ⇒ bl
 - [x] sigstore verification reuses the helper introduced in task 032 — no duplicate verification code
 - [x] Subject digest comparison uses `sha256` (PyPI), not `sha512` (npm) — distinct from task 032's path
 - [x] Missing attestation ⇒ `Warn` by default; `Block` when `require_pypi_provenance = true`
-- [x] Invalid attestation ⇒ `Block` unconditionally — no config silences this
+- [x] Invalid attestation ⇒ `Block` unconditionally — no config silences this. Includes broken Fulcio chain ⇒ `Block` (closed by task 035: `verify_dsse_bundle` invokes the full chain walk via `verify_fulcio_chain` before DSSE signature verification).
 - [x] Valid attestation ⇒ `Pass`, OIDC subject persisted to `scanned_packages.provenance_identity`
 - [x] Policy is wired into the pipeline in `main.rs` behind `config.policies.check_pypi_provenance` (default true)
 - [x] Network failure during provenance fetch surfaces as a scan error, not a silent skip

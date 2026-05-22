@@ -52,7 +52,7 @@ require_npm_provenance = false         # default: warn on missing; true ⇒ bloc
 - [x] Schema: `scanned_packages` gained nullable `provenance_identity TEXT` column via additive migration ([src/cache.rs:74-78](../../../src/cache.rs#L74-L78))
 - [x] Policy is wired into the pipeline behind `config.policies.check_npm_provenance` (default true)
 - [x] Missing attestation ⇒ `Warn` by default; `Block` when `require_npm_provenance = true`
-- [~] Invalid attestation ⇒ `Block` unconditionally. **Coverage:** bad DSSE signature ✅; SLSA subject digest mismatch ✅; broken Fulcio chain partially — structural OID check (cert claims to be Fulcio-issued) is enforced, but a full PKI walk against the embedded Fulcio root is NOT. Documented limitation in `src/sigstore_verify.rs`. Hardening follow-up filed as ADR 003's "(deferred) full Fulcio root chain validation".
+- [x] Invalid attestation ⇒ `Block` unconditionally. **Coverage:** bad DSSE signature ✅; SLSA subject digest mismatch ✅; broken Fulcio chain ✅ — full cryptographic PKI walk landed in task 035 (`verify_fulcio_chain` in `src/sigstore_verify.rs`). The earlier structural-only OID check is preserved as a belt-and-braces assertion after the chain walk.
 - [x] Valid attestation ⇒ `Pass`, OIDC subject identity persisted to `scanned_packages.provenance_identity`
 - [x] Network failure during attestation fetch surfaces as a scan error
 - [x] Unit tests use sigstore bundle fixtures (valid / tampered / mismatched subject)
@@ -68,8 +68,8 @@ require_npm_provenance = false         # default: warn on missing; true ⇒ bloc
 
 ## Known limitations / hardening follow-ups
 
-1. **Fulcio PKI chain walk is structural, not cryptographic.** An attacker who could forge an X.509 cert with the Fulcio issuer OID but not actually signed by Fulcio could pass this layer. A future task should embed Fulcio root + intermediate DERs and run a full WebPKI verifier. This is a meaningful but narrower-than-implied gap.
-2. **Rekor inclusion proof is not verified.** The current implementation accepts DSSE-signed bundles without independently checking that the signing event was recorded in Rekor's transparency log. Rekor verification is queued behind the chain-walk follow-up.
+1. ~~**Fulcio PKI chain walk is structural, not cryptographic.**~~ **Closed by task 035** (2026-05-22) — full cryptographic chain walk against embedded Fulcio root + intermediate is now performed by `verify_fulcio_chain`.
+2. **Rekor inclusion proof is not verified.** The current implementation accepts DSSE-signed bundles without independently checking that the signing event was recorded in Rekor's transparency log. Rekor verification is queued as task 036.
 
 ## Out of scope (queued as follow-up tasks)
 

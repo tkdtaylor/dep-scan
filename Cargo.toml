@@ -25,8 +25,12 @@ base64 = "0.22"
 # Task 032 — npm provenance attestation verification
 # p256 for ECDSA P-256 signature verification (Fulcio leaf cert key type for npm)
 p256 = { version = "0.13", features = ["ecdsa"] }
-# x509-parser for X.509 certificate chain parsing
-x509-parser = "0.16"
+# Task 035 — full Fulcio root chain verification.
+# `verify` enables ring-backed signature verification for chain walk (P-256,
+# P-384 ecdsa, RSA — Fulcio v1 root + intermediate are both P-384/SHA384, leaf
+# certs are P-256). `ring` is already a transitive dep via rustls-tls so this
+# adds no new top-level dependencies.
+x509-parser = { version = "0.16", features = ["verify"] }
 # sha2 for computing digests (already transitively pulled in by many deps)
 sha2 = "0.10"
 # Task 034 — Go sumdb Ed25519 signature verification
@@ -39,3 +43,5 @@ wiremock = "0.6"
 assert_cmd = "2"
 predicates = "3"
 tempfile = "3"
+# Task 035 — generate test cert chains (test trust root + leaves with custom EKUs)
+rcgen = "0.13"

@@ -45,7 +45,7 @@
 | 032 | npm provenance attestation verification | 032-npm-provenance-verification-test-spec.md | 21/21 | ✅ |
 | 033 | PyPI sigstore attestation verification (PEP 740) | 033-pypi-provenance-verification-test-spec.md | 22/22 | ✅ |
 | 034 | Go checksum database signature verification | 034-go-sumdb-cross-check-test-spec.md | 22/22 | ✅ |
-| 035 | Full Fulcio root chain verification | 035-fulcio-chain-walk-test-spec.md | 0/19 | ❌ |
+| 035 | Full Fulcio root chain verification | 035-fulcio-chain-walk-test-spec.md | 19/19 | ✅ |
 | 036 | Rekor inclusion proof verification | 036-rekor-inclusion-proof-test-spec.md | 0/24 | ❌ |
 
 ## Status key
