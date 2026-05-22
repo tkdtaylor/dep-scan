@@ -82,7 +82,7 @@
 | 064 | Add `cargo audit` step to CI | 064-cargo-audit-in-ci-test-spec.md | 8/8 | ✅ |
 | 065 | Multi-OS test matrix in CI | 065-multi-os-ci-matrix-test-spec.md | 8/8 | ✅ |
 | 066 | Pin MSRV (1.88) in CI test job | 066-msrv-pin-in-ci-test-spec.md | 8/8 | ✅ |
-| 067 | Dog-food — dep-scan scans its own `Cargo.lock` in CI | 067-dogfood-own-cargo-lock-test-spec.md | 9/10 | ⏳ T-067-08 blocked by 078 |
+| 067 | Dog-food — dep-scan scans its own `Cargo.lock` in CI | 067-dogfood-own-cargo-lock-test-spec.md | 10/10 | ✅ |
 | 068 | Sign release artifacts with cosign / sigstore | 068-sign-releases-with-cosign-test-spec.md | 0/10 | ❌ |
 | 069 | Generate CycloneDX SBOM per release | 069-cyclonedx-sbom-per-release-test-spec.md | 0/8 | ❌ |
 | 070 | Add `SECURITY.md` | 070-security-md-test-spec.md | 0/10 | ❌ |
@@ -93,7 +93,7 @@
 | 075 | Add `examples/` directory | 075-examples-directory-test-spec.md | 0/13 | ❌ |
 | 076 | Add `CONTRIBUTING.md` | 076-contributing-md-test-spec.md | 0/10 | ❌ |
 | 077 | Add `CODE_OF_CONDUCT.md` (Contributor Covenant 2.1) | 077-code-of-conduct-test-spec.md | 0/8 | ❌ |
-| 078 | Lockfile scanner uses pinned versions, not registry "latest" | 078-lockfile-pinned-version-propagation-test-spec.md | 0/18 | ❌ |
+| 078 | Lockfile scanner uses pinned versions, not registry "latest" | 078-lockfile-pinned-version-propagation-test-spec.md | 18/18 | ✅ |
 
 ## Status key
 

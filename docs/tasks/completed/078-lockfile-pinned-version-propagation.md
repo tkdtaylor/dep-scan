@@ -147,3 +147,25 @@ of which trace back to this bug.
   are unchanged by this fix).
 - Cache-key changes (cache already keys on resolved version, which now
   matches the pinned version — no change needed).
+
+## Known limitations surfaced by dogfood self-check
+
+After the fix, the dogfood self-check against the project's own `Cargo.lock`
+produces 5 block verdicts. These are **legitimate policy verdicts** on the
+correct pinned versions — they are not bugs introduced by this fix.
+
+| Package | Verdict | Reason |
+|---------|---------|--------|
+| `autocfg@1.5.1` | block | Age policy: recently published (< 48h at time of scan) |
+| `getrandom@0.3.4` | block | Maintainer change: removed [newpavlov], added [josephlr] |
+| `getrandom@0.4.2` | block | Complete maintainer changeover: removed [josephlr], added [] |
+| `serde_json@1.0.150` | block | Age policy: recently published (< 48h at time of scan) |
+| `version_check@0.9.5` | block | Typosquatting: similar to popular package `version-check` (Levenshtein distance ≤ 1) |
+
+The `version_check` crate is a well-known legitimate crate (used by the Rust
+ecosystem) that happens to be named very similarly to a popular package. The
+typosquatting policy correctly flags it as suspicious by design. Suppressing
+this false positive would require adding `version_check` to a trusted-name
+allowlist or adjusting the Levenshtein threshold — both are out of scope for
+this fix. The age and maintainer-change verdicts are transient (they will
+clear as the packages age past 48h or the maintainer baseline is established).

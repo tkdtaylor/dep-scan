@@ -54,7 +54,7 @@ Numbers are stable. Removed behaviors stay numbered as `B-NNN: REMOVED — see A
 - **Trigger:** `dep-scan check <NAME> --registry <R>` (or any of `dep-scan install`'s embedded check step, or a lockfile entry).
 - **Response:**
   1. Load layered config (defaults < `.dep-scan.toml` < env < CLI).
-  2. Fetch metadata from registry `R` → `metadata.version` is the **resolved** version (never `"latest"`).
+  2. Fetch metadata from registry `R` → `metadata.version` is the **resolved** version (never `"latest"`). For lockfile-driven scans (task 078), the resolved version is the **pinned version from the lockfile** (e.g. `serde@1.0.0` if `Cargo.lock` pins `1.0.0`), not the registry's current latest; the registry client is called with `Some(pinned_version)` so it fetches and returns data for the exact pinned bytes. CLI-arg scans (no lockfile) continue to query the registry's latest version by passing `None`. Bare-name or range-constraint lockfile entries that carry no exact pin also query latest (`None`).
   3. Cache lookup keyed `(name, resolved_version, registry)`:
      - Cache hit ⇒ run the content-hash decision matrix from [data-model.md § Cache decision matrix](data-model.md#cache-decision-matrix). Honor or invalidate accordingly.
      - Cache miss ⇒ continue.
