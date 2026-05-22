@@ -34,7 +34,7 @@ p256 = { version = "0.13", features = ["ecdsa", "pem"] }
 # P-384 ecdsa, RSA — Fulcio v1 root + intermediate are both P-384/SHA384, leaf
 # certs are P-256). `ring` is already a transitive dep via rustls-tls so this
 # adds no new top-level dependencies.
-x509-parser = { version = "0.16", features = ["verify"] }
+x509-parser = { version = "0.18", features = ["verify"] }
 # sha2 for computing digests (already transitively pulled in by many deps)
 sha2 = "0.10"
 # Task 034 — Go sumdb Ed25519 signature verification
