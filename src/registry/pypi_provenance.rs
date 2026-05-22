@@ -448,6 +448,7 @@ impl PyPiProvenanceClient {
         name: &str,
         _version: &str,
         filename: &str,
+        verbose: bool,
     ) -> Result<Option<AttestationBundle>, RegistryError> {
         // Step 1: Fetch the Simple Index to find the provenance URL for `filename`.
         let files = match self.fetch_simple_index(name).await? {
@@ -463,7 +464,7 @@ impl PyPiProvenanceClient {
         };
 
         // Step 2: Fetch the provenance URL.
-        self.fetch_provenance_url(&provenance_url).await
+        self.fetch_provenance_url(&provenance_url, verbose).await
     }
 
     /// Select the appropriate file from a Simple Index file list using the same
@@ -489,11 +490,15 @@ impl PyPiProvenanceClient {
     /// [`RegistryError::InvalidProvenanceUrl`] immediately without any network
     /// contact.
     ///
+    /// `verbose` is forwarded to `parse_tlog_entries` so that malformed tlog-entry
+    /// diagnostics are verbose-gated (REQ-061-04).
+    ///
     /// - Returns `Ok(None)` for 404.
     /// - Returns `Err(_)` for 5xx or non-JSON body.
     pub async fn fetch_provenance_url(
         &self,
         url: &str,
+        verbose: bool,
     ) -> Result<Option<AttestationBundle>, RegistryError> {
         // SSRF guard: validate the URL before any network call (REQ-039-04).
         validate_provenance_url(url, &self.base_url)
@@ -521,7 +526,7 @@ impl PyPiProvenanceClient {
             .await
             .map_err(|e| RegistryError::NetworkError(e.to_string()))?;
 
-        let bundle = parse_provenance_response(&body)?;
+        let bundle = parse_provenance_response(&body, verbose)?;
         Ok(bundle)
     }
 }
@@ -602,16 +607,23 @@ pub fn parse_simple_index(body: &[u8]) -> Result<Vec<SimpleIndexFile>, RegistryE
 /// Returns `Ok(Some(bundle))` for the first usable bundle found.
 /// Returns `Ok(None)` when no attestations are present.
 /// Returns `Err(ParseError)` for invalid JSON.
-pub fn parse_provenance_response(body: &[u8]) -> Result<Option<AttestationBundle>, RegistryError> {
+/// Parse the raw PEP 740 provenance endpoint JSON body.
+///
+/// `verbose` is forwarded to `parse_tlog_entries` so that malformed tlog-entry
+/// diagnostics are verbose-gated (REQ-061-04).
+pub fn parse_provenance_response(
+    body: &[u8],
+    verbose: bool,
+) -> Result<Option<AttestationBundle>, RegistryError> {
     let raw: serde_json::Value = serde_json::from_slice(body).map_err(|e| {
         RegistryError::ParseError(format!("invalid JSON in provenance response: {e}"))
     })?;
 
     // Dispatch on top-level shape.
     if raw["attestation_bundles"].is_array() {
-        parse_real_pep740(&raw)
+        parse_real_pep740(&raw, verbose)
     } else if raw["attestations"].is_array() {
-        parse_synthetic_shape(&raw)
+        parse_synthetic_shape(&raw, verbose)
     } else {
         Err(RegistryError::ParseError(
             "missing 'attestations' or 'attestation_bundles' in provenance response".to_string(),
@@ -621,6 +633,7 @@ pub fn parse_provenance_response(body: &[u8]) -> Result<Option<AttestationBundle
 
 fn parse_synthetic_shape(
     raw: &serde_json::Value,
+    verbose: bool,
 ) -> Result<Option<AttestationBundle>, RegistryError> {
     use crate::registry::npm_attestation::{
         DsseEnvelope, DsseSignature, VerificationMaterial, parse_tlog_entries,
@@ -677,7 +690,7 @@ fn parse_synthetic_shape(
                 VerificationMaterial::PublicKeyHint(String::new())
             };
 
-        let tlog_entries = parse_tlog_entries(&vm["tlogEntries"]);
+        let tlog_entries = parse_tlog_entries(&vm["tlogEntries"], verbose);
 
         let predicate_type = att_val["predicateType"]
             .as_str()
@@ -695,7 +708,10 @@ fn parse_synthetic_shape(
     Ok(None)
 }
 
-fn parse_real_pep740(raw: &serde_json::Value) -> Result<Option<AttestationBundle>, RegistryError> {
+fn parse_real_pep740(
+    raw: &serde_json::Value,
+    verbose: bool,
+) -> Result<Option<AttestationBundle>, RegistryError> {
     use crate::registry::npm_attestation::{
         DsseEnvelope, DsseSignature, VerificationMaterial, parse_tlog_entries,
     };
@@ -741,7 +757,7 @@ fn parse_real_pep740(raw: &serde_json::Value) -> Result<Option<AttestationBundle
                 VerificationMaterial::PublicKeyHint(String::new())
             };
 
-            let tlog_entries = parse_tlog_entries(&vm["transparency_entries"]);
+            let tlog_entries = parse_tlog_entries(&vm["transparency_entries"], verbose);
 
             return Ok(Some(AttestationBundle {
                 predicate_type: "https://docs.pypi.org/attestations/publish/v1".to_string(),
@@ -889,7 +905,7 @@ mod tests {
         // Verify that the SSRF validator correctly blocks the HTTP/loopback URL
         // (this is the new post-task-039 behavior — the URL is rejected before any
         // network call is made, protecting against SSRF).
-        let result = client.fetch_provenance_url(&provenance_url).await;
+        let result = client.fetch_provenance_url(&provenance_url, false).await;
         assert!(
             matches!(result, Err(RegistryError::InvalidProvenanceUrl(_))),
             "T-033-02: HTTP/loopback provenance URL must be blocked by the SSRF validator, got: {:?}",
@@ -913,7 +929,7 @@ mod tests {
 
         let client = PyPiProvenanceClient::new(server.uri());
         let result = client
-            .get_provenance("requests", "2.31.0", "requests-2.31.0.tar.gz")
+            .get_provenance("requests", "2.31.0", "requests-2.31.0.tar.gz", false)
             .await;
         assert!(result.is_ok(), "T-033-03: expected Ok");
         assert!(
@@ -952,7 +968,7 @@ mod tests {
         // For the 404 path: call fetch_provenance_url with a URL that would be
         // rejected by the validator. Confirm the validator fires (not the 404 path).
         let url = format!("{}/provenance/requests/gone", server.uri());
-        let result = client.fetch_provenance_url(&url).await;
+        let result = client.fetch_provenance_url(&url, false).await;
         // The SSRF validator fires before any HTTP request.
         // With HTTP/loopback URL, InvalidProvenanceUrl is returned.
         assert!(
@@ -985,7 +1001,7 @@ mod tests {
 
         let client = PyPiProvenanceClient::new(server.uri());
         let result = client
-            .get_provenance("requests", "2.31.0", "requests-2.31.0.tar.gz")
+            .get_provenance("requests", "2.31.0", "requests-2.31.0.tar.gz", false)
             .await;
         assert!(result.is_err(), "T-033-05: expected Err for 500 response");
     }
@@ -1017,7 +1033,7 @@ mod tests {
 
         let client = PyPiProvenanceClient::new(server.uri());
         let result = client
-            .get_provenance("requests", "2.31.0", "requests-2.31.0.tar.gz")
+            .get_provenance("requests", "2.31.0", "requests-2.31.0.tar.gz", false)
             .await;
         assert!(
             result.is_err(),
@@ -1308,7 +1324,7 @@ mod tests {
         // The validator must short-circuit before reqwest is invoked.
         let client = PyPiProvenanceClient::new("https://pypi.org".to_string());
         let result = client
-            .fetch_provenance_url("http://169.254.169.254/latest/meta-data/")
+            .fetch_provenance_url("http://169.254.169.254/latest/meta-data/", false)
             .await;
         assert!(
             matches!(result, Err(RegistryError::InvalidProvenanceUrl(_))),
@@ -1372,7 +1388,7 @@ mod tests {
 
         let client = PyPiProvenanceClient::new(server.uri());
         let result = client
-            .get_provenance("flask", "3.0.0", "requests-2.31.0.tar.gz")
+            .get_provenance("flask", "3.0.0", "requests-2.31.0.tar.gz", false)
             .await;
 
         // The private IP must never be contacted; we get an error back instead.

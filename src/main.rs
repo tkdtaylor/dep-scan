@@ -536,7 +536,7 @@ async fn run_check(
             if config.policies.check_npm_provenance && reg_type == RegistryType::Npm {
                 let att_client = NpmAttestationClient::new(config.registries.npm_url.clone());
                 match att_client
-                    .get_attestations(&metadata.name, &metadata.version)
+                    .get_attestations(&metadata.name, &metadata.version, verbose)
                     .await
                 {
                     Ok(bundles) => (Some(bundles), None),
@@ -563,7 +563,7 @@ async fn run_check(
                                 match selected_file.provenance_url.as_deref() {
                                     None => (Some(None), None), // no provenance URL for this file
                                     Some(url) => {
-                                        match prov_client.fetch_provenance_url(url).await {
+                                        match prov_client.fetch_provenance_url(url, verbose).await {
                                             Ok(bundle) => (Some(bundle), None),
                                             Err(e) => (Some(None), Some(e.to_string())),
                                         }

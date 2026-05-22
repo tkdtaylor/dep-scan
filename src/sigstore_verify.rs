@@ -2398,7 +2398,7 @@ mod rekor_tests {
     #[test]
     fn t_036_19_real_npm_bundle_rekor_step_succeeds() {
         let body = include_bytes!("../tests/fixtures/rekor_real/sigstore_2.3.1_attestations.json");
-        let bundles = parse_attestation_response(body).expect("parse npm response");
+        let bundles = parse_attestation_response(body, false).expect("parse npm response");
         assert_eq!(bundles.len(), 2, "expected 2 attestations in npm response");
         for (i, b) in bundles.iter().enumerate() {
             assert_eq!(
@@ -2418,7 +2418,7 @@ mod rekor_tests {
     #[test]
     fn t_036_20_tampered_rekor_proof_blocks() {
         let body = include_bytes!("../tests/fixtures/rekor_real/sigstore_2.3.1_attestations.json");
-        let mut bundles = parse_attestation_response(body).expect("parse npm response");
+        let mut bundles = parse_attestation_response(body, false).expect("parse npm response");
         let bundle = &mut bundles[1];
         // Flip a byte in the first audit-path hash.
         let raw = base64::engine::general_purpose::STANDARD
@@ -2554,7 +2554,7 @@ mod rekor_tests {
     #[test]
     fn t_036_25_npm_parser_populates_tlog_entries() {
         let body = include_bytes!("../tests/fixtures/rekor_real/sigstore_2.3.1_attestations.json");
-        let bundles = parse_attestation_response(body).expect("parse npm");
+        let bundles = parse_attestation_response(body, false).expect("parse npm");
         assert_eq!(bundles.len(), 2);
         for b in &bundles {
             assert_eq!(
@@ -2576,7 +2576,7 @@ mod rekor_tests {
         use crate::registry::pypi_provenance::parse_provenance_response;
         let body =
             include_bytes!("../tests/fixtures/rekor_real/sampleproject_4.0.0_provenance.json");
-        let bundle = parse_provenance_response(body)
+        let bundle = parse_provenance_response(body, false)
             .expect("parse pypi")
             .expect("pypi bundle present");
         assert_eq!(bundle.tlog_entries.len(), 1);
@@ -2745,9 +2745,9 @@ mod rekor_tests {
     #[test]
     fn parse_tlog_entries_handles_missing_array() {
         let v = serde_json::json!(null);
-        assert_eq!(parse_tlog_entries(&v).len(), 0);
+        assert_eq!(parse_tlog_entries(&v, false).len(), 0);
         let v = serde_json::json!([]);
-        assert_eq!(parse_tlog_entries(&v).len(), 0);
+        assert_eq!(parse_tlog_entries(&v, false).len(), 0);
     }
 
     // -----------------------------------------------------------------------
