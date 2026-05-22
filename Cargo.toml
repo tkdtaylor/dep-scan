@@ -21,6 +21,7 @@ anyhow = "1"
 thiserror = "2"
 chrono = { version = "0.4", features = ["serde"] }
 regex = "1"
+base64 = "0.22"
 
 [dev-dependencies]
 wiremock = "0.6"

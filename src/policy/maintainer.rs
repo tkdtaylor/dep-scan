@@ -81,6 +81,7 @@ mod tests {
             maintainers: current_maintainers,
             downloads: None,
             repository_url: None,
+            content_hash: None,
         };
         ScanContext {
             metadata: meta,

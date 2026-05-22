@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use base64::Engine as _;
 use chrono::{DateTime, Utc};
 use reqwest::Client;
 use serde::Deserialize;
@@ -100,6 +101,34 @@ impl NpmRegistry {
     }
 }
 
+/// Parse an npm SRI integrity string (e.g. `sha512-<base64>`) into
+/// the normalized `<algo>:<hex>` format used by dep-scan.
+///
+/// Returns `None` if the format is unrecognized or the base64 is invalid.
+fn parse_npm_integrity(integrity: &str) -> Option<String> {
+    // SRI format: "<algo>-<base64>"
+    let (algo, b64) = integrity.split_once('-')?;
+    let bytes = base64::engine::general_purpose::STANDARD.decode(b64).ok()?;
+    let hex = bytes.iter().map(|b| format!("{b:02x}")).collect::<String>();
+    Some(format!("{algo}:{hex}"))
+}
+
+/// Extract the content hash from an npm `dist` block.
+///
+/// Prefers `integrity` (SRI format, decoded to hex) over `shasum` (raw SHA-1 hex).
+fn extract_npm_content_hash(dist: Option<&NpmDist>) -> Option<String> {
+    let dist = dist?;
+    if let Some(ref integrity) = dist.integrity
+        && let Some(hash) = parse_npm_integrity(integrity)
+    {
+        return Some(hash);
+    }
+    dist.shasum
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .map(|s| format!("sha1:{s}"))
+}
+
 impl Registry for NpmRegistry {
     async fn get_metadata(
         &self,
@@ -180,6 +209,13 @@ impl Registry for NpmRegistry {
             .and_then(|vi| vi.description.clone())
             .or(npm_response.description);
 
+        // Extract content hash from dist.integrity (preferred) or dist.shasum fallback.
+        let content_hash = npm_response
+            .versions
+            .as_ref()
+            .and_then(|v| v.get(&resolved_version))
+            .and_then(|vi| extract_npm_content_hash(vi.dist.as_ref()));
+
         Ok(PackageMetadata {
             name: npm_response.name,
             version: resolved_version,
@@ -188,6 +224,7 @@ impl Registry for NpmRegistry {
             maintainers,
             downloads: None, // npm registry API does not include download counts
             repository_url,
+            content_hash,
         })
     }
 }
@@ -212,6 +249,16 @@ struct NpmVersionInfo {
     description: Option<String>,
     repository: Option<NpmRepository>,
     scripts: Option<HashMap<String, String>>,
+    dist: Option<NpmDist>,
+}
+
+/// The `dist` block in an npm version entry — contains integrity and shasum.
+#[derive(Debug, Deserialize)]
+struct NpmDist {
+    /// SRI-format integrity string, e.g. `sha512-<base64>`.
+    integrity: Option<String>,
+    /// SHA-1 hex digest fallback.
+    shasum: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -550,6 +597,109 @@ mod tests {
         assert!(
             scripts.is_empty(),
             "Package without scripts should return empty Vec"
+        );
+    }
+
+    // T-029-02: npm client extracts dist.integrity (sha512 SRI → hex)
+    #[tokio::test]
+    async fn npm_extracts_dist_integrity_as_hex() {
+        let server = MockServer::start().await;
+
+        // sha512 of the bytes [0xDE, 0xAD, 0xBE, 0xEF] in standard base64 is "3q2+7w=="
+        // We'll use a known base64 payload and verify the hex output.
+        // base64("deadbeef" as bytes) — craft a simple example:
+        // bytes: [0x00, 0x01, 0x02] → base64 "AAEC" → hex "000102"
+        let json = r#"{
+            "name": "test-pkg",
+            "description": "A test package",
+            "dist-tags": { "latest": "1.0.0" },
+            "versions": {
+                "1.0.0": {
+                    "name": "test-pkg",
+                    "version": "1.0.0",
+                    "dist": {
+                        "integrity": "sha512-AAEC",
+                        "shasum": "da39a3ee5e6b4b0d3255bfef95601890afd80709"
+                    }
+                }
+            },
+            "time": { "1.0.0": "2024-01-01T00:00:00.000Z" },
+            "maintainers": [{ "name": "alice" }]
+        }"#;
+
+        Mock::given(method("GET"))
+            .and(path("/test-pkg"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(json))
+            .mount(&server)
+            .await;
+
+        let registry = NpmRegistry::new(server.uri());
+        let meta = registry.get_metadata("test-pkg", None).await.unwrap();
+
+        // AAEC (standard base64) decodes to bytes [0x00, 0x01, 0x02] → hex "000102"
+        assert_eq!(
+            meta.content_hash,
+            Some("sha512:000102".to_string()),
+            "integrity sha512-AAEC should decode to sha512:000102"
+        );
+    }
+
+    // T-029-03: npm client falls back to dist.shasum when integrity missing
+    #[tokio::test]
+    async fn npm_falls_back_to_shasum() {
+        let server = MockServer::start().await;
+
+        let json = r#"{
+            "name": "test-pkg",
+            "description": "A test package",
+            "dist-tags": { "latest": "1.0.0" },
+            "versions": {
+                "1.0.0": {
+                    "name": "test-pkg",
+                    "version": "1.0.0",
+                    "dist": {
+                        "shasum": "da39a3ee5e6b4b0d3255bfef95601890afd80709"
+                    }
+                }
+            },
+            "time": { "1.0.0": "2024-01-01T00:00:00.000Z" },
+            "maintainers": [{ "name": "alice" }]
+        }"#;
+
+        Mock::given(method("GET"))
+            .and(path("/test-pkg"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(json))
+            .mount(&server)
+            .await;
+
+        let registry = NpmRegistry::new(server.uri());
+        let meta = registry.get_metadata("test-pkg", None).await.unwrap();
+
+        assert_eq!(
+            meta.content_hash,
+            Some("sha1:da39a3ee5e6b4b0d3255bfef95601890afd80709".to_string()),
+            "should fall back to sha1:<shasum> when integrity is absent"
+        );
+    }
+
+    // T-029-04: npm client tolerates missing dist
+    #[tokio::test]
+    async fn npm_tolerates_missing_dist() {
+        let server = MockServer::start().await;
+
+        // lodash_json() has no dist field
+        Mock::given(method("GET"))
+            .and(path("/lodash"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(lodash_json()))
+            .mount(&server)
+            .await;
+
+        let registry = NpmRegistry::new(server.uri());
+        let meta = registry.get_metadata("lodash", None).await.unwrap();
+
+        assert_eq!(
+            meta.content_hash, None,
+            "content_hash should be None when dist is absent"
         );
     }
 }

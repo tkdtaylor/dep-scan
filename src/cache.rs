@@ -11,6 +11,11 @@ pub struct CacheEntry {
     pub result: String,
     /// RFC 3339 timestamp of when the entry was recorded.
     pub scanned_at: String,
+    /// Registry-published content digest, formatted as `<algo>:<hex>`.
+    ///
+    /// `None` for rows that were inserted before task 029 (legacy rows)
+    /// or when no digest was available from the registry.
+    pub content_hash: Option<String>,
 }
 
 /// Local SQLite cache for storing scan results so already-scanned packages
@@ -29,11 +34,12 @@ impl Cache {
         let conn = Connection::open(path)?;
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS scanned_packages (
-                name       TEXT NOT NULL,
-                version    TEXT NOT NULL,
-                registry   TEXT NOT NULL,
-                result     TEXT NOT NULL,
-                scanned_at TEXT NOT NULL,
+                name         TEXT NOT NULL,
+                version      TEXT NOT NULL,
+                registry     TEXT NOT NULL,
+                result       TEXT NOT NULL,
+                scanned_at   TEXT NOT NULL,
+                content_hash TEXT,
                 PRIMARY KEY (name, version, registry)
             );
             CREATE TABLE IF NOT EXISTS maintainer_history (
@@ -44,6 +50,21 @@ impl Cache {
                 PRIMARY KEY (name, registry)
             );",
         )?;
+
+        // Additive migration: add content_hash column to existing databases that
+        // predate task 029. The column-exists check makes this idempotent.
+        let column_exists: bool = conn
+            .prepare("PRAGMA table_info(scanned_packages)")?
+            .query_map([], |row| {
+                let name: String = row.get(1)?;
+                Ok(name)
+            })?
+            .any(|r| r.map(|n| n == "content_hash").unwrap_or(false));
+
+        if !column_exists {
+            conn.execute_batch("ALTER TABLE scanned_packages ADD COLUMN content_hash TEXT;")?;
+        }
+
         Ok(Self { conn })
     }
 
@@ -58,7 +79,7 @@ impl Cache {
     /// Returns `None` if no entry exists for the given key.
     pub fn lookup(&self, name: &str, version: &str, registry: &str) -> Result<Option<CacheEntry>> {
         let mut stmt = self.conn.prepare(
-            "SELECT result, scanned_at FROM scanned_packages
+            "SELECT result, scanned_at, content_hash FROM scanned_packages
              WHERE name = ?1 AND version = ?2 AND registry = ?3",
         )?;
 
@@ -66,6 +87,7 @@ impl Cache {
             Ok(CacheEntry {
                 result: row.get(0)?,
                 scanned_at: row.get(1)?,
+                content_hash: row.get(2)?,
             })
         })?;
 
@@ -79,12 +101,23 @@ impl Cache {
     ///
     /// The `scanned_at` timestamp is set automatically to the current UTC time
     /// in RFC 3339 format.
-    pub fn insert(&self, name: &str, version: &str, registry: &str, result: &str) -> Result<()> {
+    ///
+    /// `content_hash` should be formatted as `<algo>:<hex>` (e.g. `sha512:<hex>`),
+    /// or `None` when no digest was available from the registry.
+    pub fn insert(
+        &self,
+        name: &str,
+        version: &str,
+        registry: &str,
+        result: &str,
+        content_hash: Option<&str>,
+    ) -> Result<()> {
         let scanned_at = Utc::now().to_rfc3339();
         self.conn.execute(
-            "INSERT OR REPLACE INTO scanned_packages (name, version, registry, result, scanned_at)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            rusqlite::params![name, version, registry, result, scanned_at],
+            "INSERT OR REPLACE INTO scanned_packages
+             (name, version, registry, result, scanned_at, content_hash)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            rusqlite::params![name, version, registry, result, scanned_at, content_hash],
         )?;
         Ok(())
     }
@@ -168,7 +201,9 @@ mod tests {
     #[test]
     fn insert_and_lookup() {
         let cache = Cache::in_memory().unwrap();
-        cache.insert("lodash", "4.17.21", "npm", "pass").unwrap();
+        cache
+            .insert("lodash", "4.17.21", "npm", "pass", None)
+            .unwrap();
 
         let entry = cache.lookup("lodash", "4.17.21", "npm").unwrap();
         assert!(entry.is_some(), "lookup should return an entry");
@@ -187,8 +222,12 @@ mod tests {
     #[test]
     fn insert_upserts_on_conflict() {
         let cache = Cache::in_memory().unwrap();
-        cache.insert("lodash", "4.17.21", "npm", "pass").unwrap();
-        cache.insert("lodash", "4.17.21", "npm", "block").unwrap();
+        cache
+            .insert("lodash", "4.17.21", "npm", "pass", None)
+            .unwrap();
+        cache
+            .insert("lodash", "4.17.21", "npm", "block", None)
+            .unwrap();
 
         let entry = cache.lookup("lodash", "4.17.21", "npm").unwrap().unwrap();
         assert_eq!(entry.result, "block", "upsert should update the result");
@@ -198,7 +237,9 @@ mod tests {
     #[test]
     fn invalidate_removes_entry() {
         let cache = Cache::in_memory().unwrap();
-        cache.insert("lodash", "4.17.21", "npm", "pass").unwrap();
+        cache
+            .insert("lodash", "4.17.21", "npm", "pass", None)
+            .unwrap();
         cache.invalidate("lodash", "4.17.21", "npm").unwrap();
 
         let entry = cache.lookup("lodash", "4.17.21", "npm").unwrap();
@@ -220,9 +261,9 @@ mod tests {
     #[test]
     fn clear_removes_all_entries() {
         let cache = Cache::in_memory().unwrap();
-        cache.insert("a", "1.0", "npm", "pass").unwrap();
-        cache.insert("b", "2.0", "pypi", "block").unwrap();
-        cache.insert("c", "3.0", "cargo", "warn").unwrap();
+        cache.insert("a", "1.0", "npm", "pass", None).unwrap();
+        cache.insert("b", "2.0", "pypi", "block", None).unwrap();
+        cache.insert("c", "3.0", "cargo", "warn", None).unwrap();
 
         cache.clear().unwrap();
 
@@ -235,8 +276,8 @@ mod tests {
     #[test]
     fn different_registries_are_distinct() {
         let cache = Cache::in_memory().unwrap();
-        cache.insert("foo", "1.0", "npm", "pass").unwrap();
-        cache.insert("foo", "1.0", "pypi", "block").unwrap();
+        cache.insert("foo", "1.0", "npm", "pass", None).unwrap();
+        cache.insert("foo", "1.0", "pypi", "block", None).unwrap();
 
         let npm_entry = cache.lookup("foo", "1.0", "npm").unwrap().unwrap();
         let pypi_entry = cache.lookup("foo", "1.0", "pypi").unwrap().unwrap();
@@ -254,7 +295,9 @@ mod tests {
         // First open: create + insert
         {
             let cache = Cache::new(&db_path).unwrap();
-            cache.insert("lodash", "4.17.21", "npm", "pass").unwrap();
+            cache
+                .insert("lodash", "4.17.21", "npm", "pass", None)
+                .unwrap();
         }
         // Cache is dropped here, connection closed.
 
@@ -310,7 +353,9 @@ mod tests {
     fn scanned_at_is_valid_timestamp() {
         let cache = Cache::in_memory().unwrap();
         let before = Utc::now();
-        cache.insert("lodash", "4.17.21", "npm", "pass").unwrap();
+        cache
+            .insert("lodash", "4.17.21", "npm", "pass", None)
+            .unwrap();
         let after = Utc::now();
 
         let entry = cache.lookup("lodash", "4.17.21", "npm").unwrap().unwrap();
@@ -323,6 +368,196 @@ mod tests {
         assert!(
             ts_utc >= before && ts_utc <= after,
             "scanned_at ({ts_utc}) should be between {before} and {after}"
+        );
+    }
+
+    // T-029-10: Cache::new on a fresh DB creates content_hash column
+    #[test]
+    fn new_creates_content_hash_column() {
+        let cache = Cache::in_memory().unwrap();
+        // Query PRAGMA to verify the column exists and is nullable TEXT
+        let mut stmt = cache
+            .conn
+            .prepare("PRAGMA table_info(scanned_packages)")
+            .unwrap();
+        let col = stmt
+            .query_map([], |row| {
+                let name: String = row.get(1)?;
+                let col_type: String = row.get(2)?;
+                let not_null: i64 = row.get(3)?;
+                Ok((name, col_type, not_null))
+            })
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .find(|(name, _, _)| name == "content_hash");
+
+        let col = col.expect("content_hash column should exist");
+        assert_eq!(col.1.to_uppercase(), "TEXT", "column type should be TEXT");
+        assert_eq!(col.2, 0, "column should be nullable (not_null = 0)");
+    }
+
+    // T-029-11: Cache::new on a legacy DB adds the column in place
+    #[test]
+    fn new_migrates_legacy_db() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("legacy.db");
+
+        // Manually create the v1.0 schema (no content_hash column)
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE scanned_packages (
+                    name       TEXT NOT NULL,
+                    version    TEXT NOT NULL,
+                    registry   TEXT NOT NULL,
+                    result     TEXT NOT NULL,
+                    scanned_at TEXT NOT NULL,
+                    PRIMARY KEY (name, version, registry)
+                );",
+            )
+            .unwrap();
+            // Insert a legacy row
+            conn.execute(
+                "INSERT INTO scanned_packages (name, version, registry, result, scanned_at)
+                 VALUES ('legacy-pkg', '1.0.0', 'npm', 'pass', '2024-01-01T00:00:00Z')",
+                [],
+            )
+            .unwrap();
+        }
+
+        // Open with Cache::new — should migrate without error
+        let cache = Cache::new(&db_path).expect("migration should succeed");
+
+        // Legacy row should be preserved
+        let entry = cache
+            .lookup("legacy-pkg", "1.0.0", "npm")
+            .unwrap()
+            .expect("legacy row should still exist");
+        assert_eq!(entry.result, "pass");
+        // content_hash on legacy row is NULL → None
+        assert_eq!(
+            entry.content_hash, None,
+            "legacy row content_hash should be None"
+        );
+    }
+
+    // T-029-12: Cache::new is idempotent across the migration
+    #[test]
+    fn new_migration_is_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("idem.db");
+
+        // First open creates the table with content_hash already present
+        let _ = Cache::new(&db_path).unwrap();
+        // Second open should not error (no duplicate column)
+        let result = Cache::new(&db_path);
+        assert!(
+            result.is_ok(),
+            "second open should not error: {}",
+            result.err().map(|e| e.to_string()).unwrap_or_default()
+        );
+    }
+
+    // T-029-13: insert + lookup round-trips content_hash
+    #[test]
+    fn insert_and_lookup_roundtrips_content_hash() {
+        let cache = Cache::in_memory().unwrap();
+        cache
+            .insert(
+                "lodash",
+                "4.17.21",
+                "npm",
+                "pass",
+                Some("sha512:abcdef1234567890"),
+            )
+            .unwrap();
+
+        let entry = cache
+            .lookup("lodash", "4.17.21", "npm")
+            .unwrap()
+            .expect("entry should exist");
+        assert_eq!(
+            entry.content_hash,
+            Some("sha512:abcdef1234567890".to_string())
+        );
+    }
+
+    // T-029-14: insert with None stores NULL
+    #[test]
+    fn insert_none_content_hash_stores_null() {
+        let cache = Cache::in_memory().unwrap();
+        cache
+            .insert("lodash", "4.17.21", "npm", "pass", None)
+            .unwrap();
+
+        let entry = cache
+            .lookup("lodash", "4.17.21", "npm")
+            .unwrap()
+            .expect("entry should exist");
+        assert_eq!(entry.content_hash, None, "content_hash should be None");
+    }
+
+    // T-029-15: Legacy rows return None for content_hash
+    #[test]
+    fn legacy_rows_return_none_for_content_hash() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("legacy15.db");
+
+        // Create legacy schema and insert a row without content_hash
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE scanned_packages (
+                    name       TEXT NOT NULL,
+                    version    TEXT NOT NULL,
+                    registry   TEXT NOT NULL,
+                    result     TEXT NOT NULL,
+                    scanned_at TEXT NOT NULL,
+                    PRIMARY KEY (name, version, registry)
+                );",
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO scanned_packages (name, version, registry, result, scanned_at)
+                 VALUES ('legacy-pkg', '2.0.0', 'pypi', 'pass', '2024-06-01T00:00:00Z')",
+                [],
+            )
+            .unwrap();
+        }
+
+        // Migrate via Cache::new
+        let cache = Cache::new(&db_path).unwrap();
+
+        // Lookup legacy row — content_hash should be None, not an error
+        let entry = cache
+            .lookup("legacy-pkg", "2.0.0", "pypi")
+            .unwrap()
+            .expect("legacy row should exist");
+        assert_eq!(
+            entry.content_hash, None,
+            "legacy row content_hash must be None"
+        );
+    }
+
+    // T-029-16: Re-insert updates content_hash via upsert
+    #[test]
+    fn re_insert_updates_content_hash() {
+        let cache = Cache::in_memory().unwrap();
+        cache
+            .insert("pkg", "1.0.0", "npm", "pass", Some("sha256:aaaa"))
+            .unwrap();
+        cache
+            .insert("pkg", "1.0.0", "npm", "pass", Some("sha256:bbbb"))
+            .unwrap();
+
+        let entry = cache
+            .lookup("pkg", "1.0.0", "npm")
+            .unwrap()
+            .expect("entry should exist");
+        assert_eq!(
+            entry.content_hash,
+            Some("sha256:bbbb".to_string()),
+            "content_hash should be updated by re-insert"
         );
     }
 }

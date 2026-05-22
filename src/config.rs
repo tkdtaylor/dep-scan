@@ -18,6 +18,9 @@ pub struct RegistryConfig {
     /// Go module proxy URL
     #[serde(default = "default_go_proxy_url")]
     pub go_proxy_url: String,
+    /// Go checksum database URL
+    #[serde(default = "default_go_sum_db_url")]
+    pub go_sum_db_url: String,
 }
 
 fn default_npm_url() -> String {
@@ -36,6 +39,10 @@ fn default_go_proxy_url() -> String {
     "https://proxy.golang.org".to_string()
 }
 
+fn default_go_sum_db_url() -> String {
+    "https://sum.golang.org".to_string()
+}
+
 impl Default for RegistryConfig {
     fn default() -> Self {
         Self {
@@ -43,6 +50,7 @@ impl Default for RegistryConfig {
             pypi_url: default_pypi_url(),
             crates_url: default_crates_url(),
             go_proxy_url: default_go_proxy_url(),
+            go_sum_db_url: default_go_sum_db_url(),
         }
     }
 }
@@ -262,6 +270,9 @@ impl Config {
         }
         if let Ok(val) = std::env::var("DEP_SCAN_GO_PROXY_URL") {
             self.registries.go_proxy_url = val;
+        }
+        if let Ok(val) = std::env::var("DEP_SCAN_GO_SUM_DB_URL") {
+            self.registries.go_sum_db_url = val;
         }
         if let Ok(val) = std::env::var("DEP_SCAN_CACHE_PATH") {
             self.cache_path = Some(val);

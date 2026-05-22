@@ -254,7 +254,10 @@ async fn run_check(
                 client.get_metadata(pkg_name, None).await
             }
             RegistryType::Go => {
-                let client = GoRegistry::new(config.registries.go_proxy_url.clone());
+                let client = GoRegistry::new(
+                    config.registries.go_proxy_url.clone(),
+                    config.registries.go_sum_db_url.clone(),
+                );
                 client.get_metadata(pkg_name, None).await
             }
         };
@@ -349,7 +352,13 @@ async fn run_check(
         }
 
         // Store in cache using "latest" as version key to match lookup
-        let _ = cache.insert(pkg_name, "latest", &reg_str, &result_str);
+        let _ = cache.insert(
+            pkg_name,
+            "latest",
+            &reg_str,
+            &result_str,
+            metadata.content_hash.as_deref(),
+        );
 
         results.push(CheckResult {
             package: metadata.name.clone(),

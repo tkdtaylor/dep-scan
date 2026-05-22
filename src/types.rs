@@ -78,12 +78,42 @@ pub struct PackageMetadata {
 
     /// URL of the source repository (e.g. GitHub link).
     pub repository_url: Option<String>,
+
+    /// Registry-published content digest, formatted as `<algo>:<hex>` (e.g. `sha512:<hex>`).
+    ///
+    /// Populated from the registry's own published digest at scan time:
+    /// - npm: `dist.integrity` (preferred, SRI base64→hex) or `dist.shasum` fallback
+    /// - PyPI: `digests.sha256` of the sdist, else the first wheel
+    /// - crates.io: `cksum`
+    /// - Go: `h1:` hash from the checksum database
+    ///
+    /// `None` means no digest was available from the registry response.
+    pub content_hash: Option<String>,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use chrono::TimeZone;
+
+    // T-029-01: PackageMetadata.content_hash defaults to None
+    #[test]
+    fn content_hash_defaults_to_none() {
+        let meta = PackageMetadata {
+            name: "test-pkg".to_string(),
+            version: "1.0.0".to_string(),
+            description: None,
+            published_at: None,
+            maintainers: vec![],
+            downloads: None,
+            repository_url: None,
+            content_hash: None,
+        };
+        assert!(
+            meta.content_hash.is_none(),
+            "content_hash should default to None"
+        );
+    }
 
     // T-004-01: PackageMetadata construction with all fields populated
     #[test]
@@ -97,6 +127,7 @@ mod tests {
             maintainers: vec!["jdalton".to_string(), "mathias".to_string()],
             downloads: Some(50_000_000),
             repository_url: Some("https://github.com/lodash/lodash".to_string()),
+            content_hash: None,
         };
 
         assert_eq!(meta.name, "lodash");
@@ -127,6 +158,7 @@ mod tests {
             maintainers: vec![],
             downloads: None,
             repository_url: None,
+            content_hash: None,
         };
 
         assert_eq!(meta.name, "unknown-pkg");
@@ -150,6 +182,7 @@ mod tests {
             maintainers: vec!["kennethreitz".to_string()],
             downloads: Some(1_000_000),
             repository_url: Some("https://github.com/psf/requests".to_string()),
+            content_hash: None,
         };
 
         let json = serde_json::to_string(&original).expect("serialize to JSON");
@@ -170,6 +203,7 @@ mod tests {
             maintainers: vec![],
             downloads: None,
             repository_url: None,
+            content_hash: None,
         };
 
         let ctx = ScanContext::from_metadata(meta.clone());
@@ -192,6 +226,7 @@ mod tests {
             maintainers: vec!["jdalton".to_string()],
             downloads: Some(50_000_000),
             repository_url: Some("https://github.com/lodash/lodash".to_string()),
+            content_hash: None,
         };
 
         let ctx = ScanContext {

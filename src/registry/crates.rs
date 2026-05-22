@@ -99,6 +99,13 @@ impl Registry for CratesRegistry {
         // Extract description
         let description = api_response.krate.description.filter(|s| !s.is_empty());
 
+        // Extract content hash from cksum field (sha256 hex).
+        let content_hash = resolved_version_entry
+            .cksum
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .map(|s| format!("sha256:{s}"));
+
         Ok(PackageMetadata {
             name: api_response.krate.name,
             version: version_str,
@@ -107,6 +114,7 @@ impl Registry for CratesRegistry {
             maintainers,
             downloads,
             repository_url,
+            content_hash,
         })
     }
 }
@@ -142,6 +150,9 @@ struct CrateVersion {
     num: String,
     created_at: String,
     published_by: Option<PublishedBy>,
+    /// SHA-256 checksum of the crate tarball, as a hex string.
+    #[serde(default)]
+    cksum: Option<String>,
 }
 
 /// The publisher of a version.
@@ -453,5 +464,49 @@ mod tests {
             }
             other => panic!("expected NotFound, got: {:?}", other),
         }
+    }
+
+    // T-029-08: crates.io client extracts cksum as sha256:<hex>
+    #[tokio::test]
+    async fn crates_extracts_cksum_as_sha256_hex() {
+        let json = r#"{
+            "crate": {
+                "name": "mylib",
+                "max_version": "1.0.0",
+                "description": "A library",
+                "downloads": 42,
+                "repository": "https://github.com/example/mylib",
+                "created_at": "2024-01-01T00:00:00.000000+00:00"
+            },
+            "versions": [
+                {
+                    "num": "1.0.0",
+                    "created_at": "2024-01-01T00:00:00.000000+00:00",
+                    "cksum": "abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890",
+                    "published_by": {
+                        "login": "alice",
+                        "name": "Alice"
+                    }
+                }
+            ]
+        }"#;
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/crates/mylib"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(json))
+            .mount(&server)
+            .await;
+
+        let registry = CratesRegistry::new(server.uri());
+        let meta = registry.get_metadata("mylib", None).await.unwrap();
+
+        assert_eq!(
+            meta.content_hash,
+            Some(
+                "sha256:abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890"
+                    .to_string()
+            )
+        );
     }
 }

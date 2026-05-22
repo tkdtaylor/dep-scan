@@ -7,11 +7,12 @@ use crate::types::PackageMetadata;
 
 /// Go module proxy client.
 ///
-/// Fetches package metadata from a Go module proxy (default: proxy.golang.org).
-/// The base URL is configurable so tests can point at a wiremock server
-/// and production usage can point at an internal proxy (e.g. GOPROXY).
+/// Fetches package metadata from a Go module proxy (default: proxy.golang.org)
+/// and optionally cross-checks the `h1:` hash from the Go checksum database
+/// (default: sum.golang.org). Both URLs are configurable.
 pub struct GoRegistry {
     base_url: String,
+    sum_db_url: String,
     client: Client,
 }
 
@@ -44,16 +45,53 @@ fn encode_module_path(module: &str) -> String {
 }
 
 impl GoRegistry {
-    /// Create a new Go module proxy client with the given base URL.
+    /// Create a new Go module proxy client with configurable proxy and sum DB URLs.
     ///
-    /// The `base_url` should be the root URL of the Go module proxy
-    /// (e.g. `https://proxy.golang.org`). No trailing slash.
-    pub fn new(base_url: String) -> Self {
+    /// - `base_url`: root URL of the Go module proxy (e.g. `https://proxy.golang.org`). No trailing slash.
+    /// - `sum_db_url`: root URL of the Go checksum database (e.g. `https://sum.golang.org`). No trailing slash.
+    pub fn new(base_url: String, sum_db_url: String) -> Self {
         let base_url = base_url.trim_end_matches('/').to_string();
+        let sum_db_url = sum_db_url.trim_end_matches('/').to_string();
         Self {
             base_url,
+            sum_db_url,
             client: Client::new(),
         }
+    }
+
+    /// Fetch the `h1:` content hash for a module version from the Go checksum database.
+    ///
+    /// The sum DB returns lines in the format:
+    /// ```
+    /// <module> <version>/go.mod h1:<base64>
+    /// <module> <version> h1:<base64>
+    /// ```
+    /// This method extracts the `h1:` hash from the line that matches
+    /// `<module> <version> h1:...` (i.e., the zip hash, not the go.mod hash).
+    ///
+    /// Returns `None` on any error (network, parse, not found) — failure to
+    /// obtain a hash is non-fatal at scan time.
+    async fn fetch_h1_hash(&self, module: &str, version: &str) -> Option<String> {
+        let encoded = encode_module_path(module);
+        let url = format!("{}/lookup/{}@{}", self.sum_db_url, encoded, version);
+
+        let response = self.client.get(&url).send().await.ok()?;
+        if !response.status().is_success() {
+            return None;
+        }
+
+        let body = response.text().await.ok()?;
+        // Find the line matching "<module> <version> h1:<base64>" (not the go.mod line)
+        body.lines()
+            .find(|line| {
+                let parts: Vec<&str> = line.splitn(3, ' ').collect();
+                parts.len() == 3
+                    && parts[0] == module
+                    && parts[1] == version
+                    && parts[2].starts_with("h1:")
+            })
+            .and_then(|line| line.splitn(3, ' ').nth(2))
+            .map(|h| h.to_string())
     }
 
     /// Fetch the version list for a module from the proxy.
@@ -163,6 +201,9 @@ impl Registry for GoRegistry {
             .parse::<DateTime<Utc>>()
             .map_err(|e| RegistryError::ParseError(format!("invalid Time field: {e}")))?;
 
+        // Fetch h1: hash from the checksum database (non-fatal if unavailable).
+        let content_hash = self.fetch_h1_hash(name, &resolved_version).await;
+
         Ok(PackageMetadata {
             name: name.to_string(),
             version: info.version,
@@ -171,6 +212,7 @@ impl Registry for GoRegistry {
             maintainers: vec![],  // Go proxy doesn't provide maintainer info
             downloads: None,      // Go proxy doesn't provide download counts
             repository_url: None, // Could infer from module path but keeping simple
+            content_hash,
         })
     }
 }
@@ -203,7 +245,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let registry = GoRegistry::new(server.uri());
+        let registry = GoRegistry::new(server.uri(), server.uri());
         let meta = registry
             .get_metadata("github.com/test/module", None)
             .await
@@ -229,7 +271,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let registry = GoRegistry::new(server.uri());
+        let registry = GoRegistry::new(server.uri(), server.uri());
         let result = registry
             .get_metadata("github.com/nonexistent/module", None)
             .await;
@@ -253,7 +295,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let registry = GoRegistry::new(server.uri());
+        let registry = GoRegistry::new(server.uri(), server.uri());
         let result = registry
             .get_metadata("github.com/retracted/module", None)
             .await;
@@ -289,7 +331,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let registry = GoRegistry::new(server.uri());
+        let registry = GoRegistry::new(server.uri(), server.uri());
         let meta = registry
             .get_metadata("github.com/Azure/go-autorest", None)
             .await
@@ -311,7 +353,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let registry = GoRegistry::new(server.uri());
+        let registry = GoRegistry::new(server.uri(), server.uri());
         let result = registry.get_metadata("github.com/empty/module", None).await;
 
         match result {
@@ -349,7 +391,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let registry = GoRegistry::new(custom_url);
+        let registry = GoRegistry::new(custom_url, server.uri());
         let meta = registry
             .get_metadata("github.com/gin-gonic/gin", None)
             .await
@@ -379,7 +421,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let registry = GoRegistry::new(server.uri());
+        let registry = GoRegistry::new(server.uri(), server.uri());
         let meta = registry
             .get_metadata("github.com/test/module", None)
             .await
@@ -412,7 +454,10 @@ mod tests {
     // Additional: network error
     #[tokio::test]
     async fn network_error_returns_network_error() {
-        let registry = GoRegistry::new("http://127.0.0.1:1".to_string());
+        let registry = GoRegistry::new(
+            "http://127.0.0.1:1".to_string(),
+            "http://127.0.0.1:1".to_string(),
+        );
         let result = registry.get_metadata("github.com/test/module", None).await;
 
         match result {
@@ -438,7 +483,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let registry = GoRegistry::new(server.uri());
+        let registry = GoRegistry::new(server.uri(), server.uri());
         let result = registry.get_metadata("github.com/test/module", None).await;
 
         match result {
@@ -463,7 +508,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let registry = GoRegistry::new(server.uri());
+        let registry = GoRegistry::new(server.uri(), server.uri());
         let meta = registry
             .get_metadata("github.com/test/module", Some("v2.0.0"))
             .await
@@ -473,6 +518,50 @@ mod tests {
         assert_eq!(
             meta.published_at.unwrap().to_rfc3339(),
             "2024-03-01T00:00:00+00:00"
+        );
+    }
+
+    // T-029-09: Go module client extracts h1 hash from sum DB
+    #[tokio::test]
+    async fn go_extracts_h1_hash_from_sum_db() {
+        let proxy_server = MockServer::start().await;
+        let sumdb_server = MockServer::start().await;
+
+        // Module proxy: list and info
+        Mock::given(method("GET"))
+            .and(path("/github.com/test/hashmodule/@v/list"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("v1.2.3\n"))
+            .mount(&proxy_server)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path("/github.com/test/hashmodule/@v/v1.2.3.info"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string(r#"{"Version":"v1.2.3","Time":"2024-05-01T00:00:00Z"}"#),
+            )
+            .mount(&proxy_server)
+            .await;
+
+        // Sum DB: lookup endpoint returns sum DB lines
+        // Format: "<module> <version>/go.mod h1:<base64>\n<module> <version> h1:<base64>"
+        let sum_db_body = "github.com/test/hashmodule v1.2.3/go.mod h1:AAAA\ngithub.com/test/hashmodule v1.2.3 h1:c29zZWtyb3BlcnR5";
+        Mock::given(method("GET"))
+            .and(path("/lookup/github.com/test/hashmodule@v1.2.3"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(sum_db_body))
+            .mount(&sumdb_server)
+            .await;
+
+        let registry = GoRegistry::new(proxy_server.uri(), sumdb_server.uri());
+        let meta = registry
+            .get_metadata("github.com/test/hashmodule", None)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            meta.content_hash,
+            Some("h1:c29zZWtyb3BlcnR5".to_string()),
+            "content_hash should be the h1 hash from the sum DB"
         );
     }
 }

@@ -181,6 +181,7 @@ mod tests {
             maintainers: vec![],
             downloads: None,
             repository_url: None,
+            content_hash: None,
         };
         ScanContext {
             metadata: meta,

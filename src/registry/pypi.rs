@@ -6,6 +6,12 @@ use serde::Deserialize;
 use super::{Registry, RegistryError};
 use crate::types::PackageMetadata;
 
+/// Digests map for a PyPI release file.
+#[derive(Debug, Deserialize, Default)]
+struct PyPiDigests {
+    sha256: Option<String>,
+}
+
 /// Serde model for the PyPI JSON API response.
 #[derive(Debug, Deserialize)]
 struct PyPiResponse {
@@ -31,6 +37,12 @@ struct PyPiInfo {
 struct PyPiRelease {
     #[serde(default)]
     upload_time_iso_8601: Option<String>,
+    /// Package type: "sdist", "bdist_wheel", etc.
+    #[serde(default)]
+    packagetype: Option<String>,
+    /// Digest map for this release file.
+    #[serde(default)]
+    digests: PyPiDigests,
 }
 
 /// Client for fetching package metadata from the PyPI JSON API.
@@ -85,6 +97,30 @@ impl PyPiRegistry {
             maintainers.push(maintainer.clone());
         }
         maintainers
+    }
+
+    /// Extract the content hash from a version's release file list.
+    ///
+    /// Prefers the `sha256` digest of the sdist; falls back to the first wheel
+    /// if no sdist is present. Returns `None` if no `digests.sha256` is available.
+    fn extract_content_hash(release_files: &[PyPiRelease]) -> Option<String> {
+        // Try sdist first
+        if let Some(sdist) = release_files
+            .iter()
+            .find(|r| r.packagetype.as_deref() == Some("sdist"))
+            && let Some(ref sha) = sdist.digests.sha256
+        {
+            return Some(format!("sha256:{sha}"));
+        }
+        // Fall back to first wheel
+        if let Some(wheel) = release_files
+            .iter()
+            .find(|r| r.packagetype.as_deref() == Some("bdist_wheel"))
+            && let Some(ref sha) = wheel.digests.sha256
+        {
+            return Some(format!("sha256:{sha}"));
+        }
+        None
     }
 
     /// Parse an ISO 8601 timestamp string into a `DateTime<Utc>`.
@@ -159,6 +195,12 @@ impl Registry for PyPiRegistry {
         let maintainers = Self::extract_maintainers(&pypi_response.info);
         let repository_url = Self::extract_repository_url(&pypi_response.info);
 
+        // Extract content hash from the sdist (preferred) or first wheel.
+        let content_hash = pypi_response
+            .releases
+            .get(resolved_version)
+            .and_then(|files| Self::extract_content_hash(files));
+
         Ok(PackageMetadata {
             name: pypi_response.info.name,
             version: resolved_version.to_string(),
@@ -167,6 +209,7 @@ impl Registry for PyPiRegistry {
             maintainers,
             downloads: None, // PyPI JSON API does not include download counts
             repository_url,
+            content_hash,
         })
     }
 }
@@ -535,6 +578,148 @@ mod tests {
         assert_eq!(
             metadata.repository_url,
             Some("https://example.com/old-pkg".to_string())
+        );
+    }
+
+    // T-029-05: PyPI client extracts sdist digest
+    #[tokio::test]
+    async fn pypi_extracts_sdist_sha256() {
+        let json = r#"{
+            "info": {
+                "name": "mypackage",
+                "version": "1.0.0",
+                "summary": "A test package",
+                "author": "Author",
+                "author_email": "",
+                "maintainer": "",
+                "maintainer_email": "",
+                "home_page": "",
+                "project_urls": null
+            },
+            "releases": {
+                "1.0.0": [
+                    {
+                        "filename": "mypackage-1.0.0.tar.gz",
+                        "packagetype": "sdist",
+                        "upload_time_iso_8601": "2024-01-01T00:00:00.000Z",
+                        "digests": { "sha256": "abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890" }
+                    },
+                    {
+                        "filename": "mypackage-1.0.0-py3-none-any.whl",
+                        "packagetype": "bdist_wheel",
+                        "upload_time_iso_8601": "2024-01-01T00:01:00.000Z",
+                        "digests": { "sha256": "0000000000000000000000000000000000000000000000000000000000000000" }
+                    }
+                ]
+            }
+        }"#;
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/pypi/mypackage/json"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(json))
+            .mount(&server)
+            .await;
+
+        let registry = PyPiRegistry::new(server.uri());
+        let meta = registry.get_metadata("mypackage", None).await.unwrap();
+
+        // Should prefer sdist sha256
+        assert_eq!(
+            meta.content_hash,
+            Some(
+                "sha256:abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890"
+                    .to_string()
+            )
+        );
+    }
+
+    // T-029-06: PyPI client falls back to first wheel when no sdist
+    #[tokio::test]
+    async fn pypi_falls_back_to_wheel_when_no_sdist() {
+        let json = r#"{
+            "info": {
+                "name": "mypackage",
+                "version": "2.0.0",
+                "summary": "Wheel only package",
+                "author": "Author",
+                "author_email": "",
+                "maintainer": "",
+                "maintainer_email": "",
+                "home_page": "",
+                "project_urls": null
+            },
+            "releases": {
+                "2.0.0": [
+                    {
+                        "filename": "mypackage-2.0.0-py3-none-any.whl",
+                        "packagetype": "bdist_wheel",
+                        "upload_time_iso_8601": "2024-06-01T00:00:00.000Z",
+                        "digests": { "sha256": "ffff000000000000000000000000000000000000000000000000000000001234" }
+                    }
+                ]
+            }
+        }"#;
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/pypi/mypackage/json"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(json))
+            .mount(&server)
+            .await;
+
+        let registry = PyPiRegistry::new(server.uri());
+        let meta = registry.get_metadata("mypackage", None).await.unwrap();
+
+        assert_eq!(
+            meta.content_hash,
+            Some(
+                "sha256:ffff000000000000000000000000000000000000000000000000000000001234"
+                    .to_string()
+            )
+        );
+    }
+
+    // T-029-07: PyPI client tolerates missing digests
+    #[tokio::test]
+    async fn pypi_tolerates_missing_digests() {
+        let json = r#"{
+            "info": {
+                "name": "mypackage",
+                "version": "3.0.0",
+                "summary": "No digests",
+                "author": "Author",
+                "author_email": "",
+                "maintainer": "",
+                "maintainer_email": "",
+                "home_page": "",
+                "project_urls": null
+            },
+            "releases": {
+                "3.0.0": [
+                    {
+                        "filename": "mypackage-3.0.0.tar.gz",
+                        "packagetype": "sdist",
+                        "upload_time_iso_8601": "2024-01-01T00:00:00.000Z",
+                        "digests": {}
+                    }
+                ]
+            }
+        }"#;
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/pypi/mypackage/json"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(json))
+            .mount(&server)
+            .await;
+
+        let registry = PyPiRegistry::new(server.uri());
+        let meta = registry.get_metadata("mypackage", None).await.unwrap();
+
+        assert_eq!(
+            meta.content_hash, None,
+            "content_hash should be None when no sha256 digest is available"
         );
     }
 }
