@@ -5,9 +5,55 @@ All notable changes to dep-scan are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased] — targeting v1.1.1
+## [1.1.1] — 2026-05-22
 
-### Added
+### Security
+
+This release bundles the v1.1.0 feature work with six hardening fixes
+identified by a post-v1.1.0 security audit. v1.1.0 itself was tagged but
+withdrawn before any binaries shipped; users should install v1.1.1 directly.
+
+- **Install command CLI flag injection** (task 037) — package names that
+  begin with `-` are now rejected before reaching the wrapped package
+  manager. Previously, a token like `--registry=http://attacker` supplied
+  as a package name would have been forwarded to `npm install` and
+  interpreted as a flag, redirecting the install to a hostile mirror that
+  dep-scan never inspected.
+- **Cache key now uses the resolved version, not literal "latest"**
+  (task 038) — verdicts are stored under `(name, resolved_version)` rather
+  than `(name, "latest")`. Closes a replay window where a CDN briefly
+  serving the old `dist.integrity` for a republished package could cause
+  a stale `pass` verdict to be honored for new bytes.
+- **PyPI provenance URL SSRF guard** (task 039) — provenance URLs returned
+  by the PyPI Simple Index are now validated to share host with the
+  configured registry (or appear in a small compile-time allowlist), to
+  be `https://`, and to not resolve to RFC1918 / link-local / loopback
+  addresses. Hostile mirrors can no longer redirect provenance fetches to
+  internal services or attacker-controlled hosts.
+- **SHA-1 content hashes no longer trust-gate the cache for npm**
+  (task 040) — npm `dist.shasum` is SHA-1. Cache rows whose content hash
+  starts with `sha1:` are now always re-verified (and new `pass`/`warn`
+  rows for sha1-only packages store `NULL` instead of the sha1 value).
+  Closes the SHAttered chosen-prefix collision window where a republished
+  tarball could match the cached hash and skip scanning.
+- **Go module path validation** (task 041) — module paths are validated
+  against the Go module-path grammar (alphanumerics, `.`, `-`, `_`, `/`;
+  no `..` segments; no `?`/`#`/spaces/control chars) before URL
+  composition. Closes a path-confusion primitive against Go proxy mirrors.
+- **Temp requirements file hardening** (task 042) — `TempReqFile` now uses
+  `tempfile::NamedTempFile` (CSPRNG entropy, `O_CREAT|O_EXCL`, mode 0600)
+  instead of a `SystemTime`-derived predictable suffix written with the
+  default umask. Closes a symlink-race + world-readability gap on
+  multi-user hosts.
+- Patched four transitive-dependency advisories surfaced by `cargo audit`:
+  RUSTSEC-2026-0098, -0099, -0104 (`rustls-webpki`: ignored URI name
+  constraints, wildcard escape through name-constraint subtrees, reachable
+  panic in CRL parsing during malformed-response handling) and
+  RUSTSEC-2026-0097 (`rand`: unsound aliased `&mut` in `ThreadRng` under
+  custom logger reseed race). Both crates are reached transitively via
+  `reqwest`; the patches are lockfile-only.
+
+### Added (from withdrawn v1.1.0 work, now shipping in v1.1.1)
 
 - Content-hash verification recorded at scan time and re-verified on every
   cache hit, so cached `pass` verdicts cannot be honored for tampered bytes
@@ -30,23 +76,12 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 - Local `fulcio-roots/` and `rekor-roots/` directories ship the pinned
   trust material with documented refresh procedures.
 
-### Security
-
-- Patched four transitive-dependency advisories surfaced by `cargo audit`:
-  RUSTSEC-2026-0098, -0099, -0104 (`rustls-webpki`: ignored URI name
-  constraints, wildcard escape through name-constraint subtrees, reachable
-  panic in CRL parsing during malformed-response handling) and
-  RUSTSEC-2026-0097 (`rand`: unsound aliased `&mut` in `ThreadRng` under
-  custom logger reseed race). Both crates are reached transitively via
-  `reqwest`; the patches are lockfile-only.
-- *Pending in v1.1.1:* hardening of the `install` subcommand and several
-  registry-client input-validation paths identified by a follow-up
-  security audit. Each ships as a separate task with paired test spec.
-
 ### Changed
 
-- `Cargo.toml` now pins `rust-version = "1.85"` to match the 2024 edition
+- `Cargo.toml` pins `rust-version = "1.85"` to match the 2024 edition
   features in use.
+- `tempfile` promoted from dev-dependency to runtime dependency
+  (consequence of task 042).
 
 ## [1.0.0] — 2026-04-04
 
@@ -92,5 +127,6 @@ before installation and gates the install on the verdict.
   by a `sha256sums.txt`.
 - Install script: `curl -fsSL https://raw.githubusercontent.com/tkdtaylor/dep-scan/main/install.sh | bash`
 
-[Unreleased]: https://github.com/tkdtaylor/dep-scan/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/tkdtaylor/dep-scan/compare/v1.1.1...HEAD
+[1.1.1]: https://github.com/tkdtaylor/dep-scan/releases/tag/v1.1.1
 [1.0.0]: https://github.com/tkdtaylor/dep-scan/releases/tag/v1.0.0
