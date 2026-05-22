@@ -9,6 +9,7 @@ mod signed_note;
 mod sigstore_verify;
 mod types;
 mod typosquat;
+mod validation;
 
 use std::path::Path;
 use std::process;
@@ -168,6 +169,23 @@ async fn run_check(
     lockfile_type_str: Option<String>,
 ) -> Result<i32> {
     let config = Config::load(config_path)?;
+
+    // Parse registry type early so we can pass it to the validator.
+    // (We re-parse below after reading the lockfile; this first parse is for validation only.)
+    let early_reg_type = match registry_flag.as_deref() {
+        Some(s) => s
+            .parse::<RegistryType>()
+            .map_err(|e| anyhow::anyhow!("{e}"))?,
+        None => RegistryType::Npm,
+    };
+
+    // Validate CLI-supplied package names before any network call or subprocess.
+    // Lockfile-sourced packages are structured data and are not validated here
+    // (the spec explicitly excludes them).
+    if let Err(e) = validation::validate_package_names(&packages, early_reg_type) {
+        eprintln!("dep-scan: {e}");
+        return Ok(2);
+    }
 
     // Parse lockfile if provided
     let mut all_packages = packages;
@@ -725,6 +743,16 @@ async fn run_install(
     registry_flag: String,
     force: bool,
 ) -> Result<i32> {
+    // 0. Validate package names before any scan or subprocess invocation.
+    //    A token starting with '-' could redirect the underlying package manager
+    //    to a hostile registry (H-1 security finding).
+    let reg_type_for_validation: RegistryType =
+        registry_flag.parse().map_err(|e| anyhow::anyhow!("{e}"))?;
+    if let Err(e) = validation::validate_package_names(&packages, reg_type_for_validation) {
+        eprintln!("dep-scan: {e}");
+        return Ok(2);
+    }
+
     // 1. Run the scan (reuse run_check logic)
     let scan_exit = run_check(
         config_path,

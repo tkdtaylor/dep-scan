@@ -47,7 +47,7 @@
 | 034 | Go checksum database signature verification | 034-go-sumdb-cross-check-test-spec.md | 22/22 | ✅ |
 | 035 | Full Fulcio root chain verification | 035-fulcio-chain-walk-test-spec.md | 19/19 | ✅ |
 | 036 | Rekor inclusion proof verification | 036-rekor-inclusion-proof-test-spec.md | 28/28 | ✅ |
-| 037 | Install command CLI flag injection hardening | 037-install-flag-injection-test-spec.md | 18/18 | ❌ |
+| 037 | Install command CLI flag injection hardening | 037-install-flag-injection-test-spec.md | 18/18 | ✅ |
 | 038 | Use resolved version as cache key instead of "latest" | 038-cache-resolved-version-key-test-spec.md | 13/13 | ❌ |
 | 039 | PyPI provenance URL SSRF hardening | 039-pypi-provenance-url-ssrf-test-spec.md | 17/17 | ❌ |
 | 040 | Reject SHA-1 content hashes as cache trust gates for npm | 040-npm-sha1-cache-bypass-test-spec.md | 14/14 | ❌ |

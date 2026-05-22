@@ -66,6 +66,270 @@ fn npm_json(name: &str, version: &str, hours_ago: i64) -> String {
 }
 
 // =========================================================================
+// T-037-10: Flag-like first positional package token rejected with exit 2.
+//
+// The exploit from H-1: an attacker supplies a token starting with '--' as
+// a package name.  Clap parses positional arguments after '--', so we use
+// the end-of-options separator to inject the flag-like token as a package.
+// =========================================================================
+#[tokio::test]
+async fn install_flag_like_first_arg_rejected_exit2() {
+    let server = MockServer::start().await;
+    let tmp = TempDir::new().unwrap();
+    let cache_path = tmp.path().join("cache.db");
+    let config = write_config(&server.uri(), cache_path.to_str().unwrap());
+
+    // We intentionally mount NO routes — any call to the mock server would prove
+    // that validation did NOT fire before the network call.
+    dep_scan()
+        .args([
+            "--config",
+            config.path().to_str().unwrap(),
+            "install",
+            "--registry",
+            "npm",
+            "--",                         // end of options: everything after is positional
+            "--registry=http://attacker", // flag-like package token
+            "express",
+        ])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("must not start with '-'"));
+
+    // Confirm zero requests hit the mock server.
+    assert_eq!(
+        server.received_requests().await.unwrap().len(),
+        0,
+        "no registry calls should occur when validation fails"
+    );
+}
+
+// =========================================================================
+// T-037-11: Single-dash flag token as a package name is rejected before exec
+// =========================================================================
+#[tokio::test]
+async fn install_single_dash_flag_rejected_exit2() {
+    let server = MockServer::start().await;
+    let tmp = TempDir::new().unwrap();
+    let cache_path = tmp.path().join("cache.db");
+    let config = write_config(&server.uri(), cache_path.to_str().unwrap());
+
+    dep_scan()
+        .args([
+            "--config",
+            config.path().to_str().unwrap(),
+            "install",
+            "--registry",
+            "npm",
+            "--", // end of options
+            "-i", // flag-like package token
+            "pkg",
+        ])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("-i"));
+
+    assert_eq!(
+        server.received_requests().await.unwrap().len(),
+        0,
+        "no registry calls should occur when validation fails"
+    );
+}
+
+// =========================================================================
+// T-037-12: '--global' supplied as a package token is rejected
+//           (--global is a real npm flag that elevates privileges)
+// =========================================================================
+#[tokio::test]
+async fn install_global_flag_rejected_exit2() {
+    let server = MockServer::start().await;
+    let tmp = TempDir::new().unwrap();
+    let cache_path = tmp.path().join("cache.db");
+    let config = write_config(&server.uri(), cache_path.to_str().unwrap());
+
+    dep_scan()
+        .args([
+            "--config",
+            config.path().to_str().unwrap(),
+            "install",
+            "--registry",
+            "npm",
+            "--",       // end of options
+            "--global", // flag-like package token
+            "pkg",
+        ])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("must not start with '-'"));
+
+    assert_eq!(
+        server.received_requests().await.unwrap().len(),
+        0,
+        "no registry calls should occur when validation fails"
+    );
+}
+
+// =========================================================================
+// T-037-13: Flag-like package name is also rejected in the `check` subcommand
+// =========================================================================
+#[tokio::test]
+async fn check_flag_like_arg_rejected_exit2() {
+    let server = MockServer::start().await;
+    let tmp = TempDir::new().unwrap();
+    let cache_path = tmp.path().join("cache.db");
+    let config = write_config(&server.uri(), cache_path.to_str().unwrap());
+
+    dep_scan()
+        .args([
+            "--config",
+            config.path().to_str().unwrap(),
+            "check",
+            "--registry",
+            "npm",
+            "--",                     // end of options
+            "--registry=http://evil", // flag-like positional arg
+            "express",
+        ])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("must not start with '-'"));
+
+    assert_eq!(
+        server.received_requests().await.unwrap().len(),
+        0,
+        "no registry calls should occur when validation fails"
+    );
+}
+
+// =========================================================================
+// T-037-14: Legitimate multi-package install proceeds normally
+// =========================================================================
+#[tokio::test]
+async fn install_legitimate_packages_proceed() {
+    let server = MockServer::start().await;
+    let tmp = TempDir::new().unwrap();
+    let cache_path = tmp.path().join("cache.db");
+    let config = write_config(&server.uri(), cache_path.to_str().unwrap());
+
+    Mock::given(method("GET"))
+        .and(path("/express"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(npm_json("express", "4.18.2", 72)))
+        .mount(&server)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path("/lodash"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(npm_json("lodash", "4.17.21", 72)))
+        .mount(&server)
+        .await;
+
+    let output = dep_scan()
+        .args([
+            "--config",
+            config.path().to_str().unwrap(),
+            "install",
+            "express",
+            "lodash",
+            "--registry",
+            "npm",
+        ])
+        .output()
+        .expect("run dep-scan");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("must not start with '-'"),
+        "legitimate packages should not trigger flag-injection error, got stderr: {stderr}"
+    );
+}
+
+// =========================================================================
+// T-037-15: Scoped npm package (@babel/core) is accepted by the validator
+// =========================================================================
+#[tokio::test]
+async fn install_scoped_npm_package_accepted() {
+    let server = MockServer::start().await;
+    let tmp = TempDir::new().unwrap();
+    let cache_path = tmp.path().join("cache.db");
+    let config = write_config(&server.uri(), cache_path.to_str().unwrap());
+
+    Mock::given(method("GET"))
+        .and(path("/@babel/core"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(npm_json(
+            "@babel/core",
+            "7.23.0",
+            72,
+        )))
+        .mount(&server)
+        .await;
+
+    let output = dep_scan()
+        .args([
+            "--config",
+            config.path().to_str().unwrap(),
+            "install",
+            "@babel/core",
+            "--registry",
+            "npm",
+        ])
+        .output()
+        .expect("run dep-scan");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("must not start with '-'"),
+        "scoped npm package should not trigger flag-injection error, got stderr: {stderr}"
+    );
+}
+
+// =========================================================================
+// T-037-16: Error message includes the bad token verbatim
+// =========================================================================
+#[tokio::test]
+async fn install_error_message_contains_bad_token_verbatim() {
+    let server = MockServer::start().await;
+    let tmp = TempDir::new().unwrap();
+    let cache_path = tmp.path().join("cache.db");
+    let config = write_config(&server.uri(), cache_path.to_str().unwrap());
+
+    let bad_token = "--config-settings=build_backend=foo";
+
+    // Use '--' so clap does not try to parse the bad token as a flag.
+    dep_scan()
+        .args([
+            "--config",
+            config.path().to_str().unwrap(),
+            "install",
+            "--registry",
+            "npm",
+            "--",
+            bad_token,
+        ])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains(bad_token));
+}
+
+// =========================================================================
+// T-037-18: `dep-scan install --registry npm` (no packages) produces usage
+//           error, not a panic — handled by clap (required = true).
+// =========================================================================
+#[test]
+fn install_no_packages_gives_usage_error() {
+    dep_scan()
+        .args(["install", "--registry", "npm"])
+        .assert()
+        .code(predicate::ne(0))
+        .stderr(predicate::str::is_empty().not());
+}
+
+// =========================================================================
+// T-037-17 (regression): All task 024 install tests still pass after adding
+// the flag-injection validator.  The tests below are the original T-024 suite;
+// none of them use flag-like package names, so their behavior is unchanged.
+// =========================================================================
+
+// =========================================================================
 // T-024-03: Install blocks on policy violation
 //
 // Setup: wiremock returns npm JSON for a 1h-old package (fails age policy).
