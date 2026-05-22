@@ -78,6 +78,44 @@ The two layers above defend against an attacker who controls **what bytes the re
 
 These limits are documented so callers don't over-trust the feature.
 
+## Notes on sigstore verification mechanics (post-v1.2 audit)
+
+Three details that fell out of the v1.2 LOW-severity audit pass are recorded
+here so future readers don't repeat the trip-ups:
+
+- **Structural Fulcio OID check is belt-and-braces (L-1).** `sigstore_verify.rs`
+  runs the structural Fulcio OID extension check *after* the full chain walk
+  succeeds. The chain walk against the embedded Fulcio roots is already the
+  primary trust gate; the OID extension check exists as defense-in-depth and
+  may legitimately fail for any future bundle whose issuer doesn't carry the
+  OID extension. Today no such bundle exists; if one ever does, prefer
+  removing the extension check over softening the chain walk.
+- **First URI SAN wins on identity extraction (L-2).** `extract_subject_identity`
+  returns the first URI SAN in a Fulcio leaf certificate. Today, Fulcio
+  certificates carry exactly one URI SAN (the OIDC subject), so this is
+  unambiguous. If Fulcio ever ships multi-URI certs, this becomes an
+  arbitrary-choice bug — at that point, the right fix is to fail closed on
+  multiplicity rather than to pick one silently.
+- **Rekor key name is pinned (L-8).** `REKOR_KEY_NAME = "rekor.sigstore.dev"`
+  is a compile-time constant, matching the pattern documented for the Fulcio
+  roots (`fulcio-roots/*.der`) and the sum.golang.org public key in
+  `src/policy/go_sumdb.rs`. A rename of the Rekor production deployment would
+  require a dep-scan release, same as a Fulcio root rotation.
+
+## Build/dependency notes (post-v1.2)
+
+- **HTTP/3 (quinn) is not linked.** `reqwest` is configured with
+  `default-features = false, features = ["json", "rustls-tls"]`, which omits the
+  `http3` feature gate. `cargo tree -p dep-scan | grep -i quinn` returns
+  nothing — verified during the v1.1.1 dependency audit and re-verified in
+  the v1.2.0 LOW-severity audit pass.
+- **`reqwest` remains on 0.12.x.** Task 056 (bump to 0.13) was attempted and
+  reverted during the v1.2.0 cut because reqwest 0.13's `rustls` feature
+  pulls `aws-lc-rs` (BoringSSL fork) which requires `cmake` at build time;
+  the release workflow's aarch64-linux `cross` runner does not ship `cmake`.
+  See `docs/tasks/backlog/056-bump-reqwest-0-13.md` for the three viable
+  re-attempt paths.
+
 ## Implementation order
 
 | Priority | Task | Scope |

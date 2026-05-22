@@ -106,10 +106,10 @@ fn verify_hash(cached: Option<&str>, registry: Option<&str>) -> HashVerifyDecisi
     let cached_norm = cached.map(normalize_hash_prefix);
     // SHA-1 hashes are never accepted as a cache trust gate (H-4 security fix).
     // The check is performed on the normalized prefix so that "SHA1:…" is also rejected.
-    if let Some(ref c) = cached_norm {
-        if c.starts_with("sha1:") {
-            return HashVerifyDecision::Reverify;
-        }
+    if let Some(ref c) = cached_norm
+        && c.starts_with("sha1:")
+    {
+        return HashVerifyDecision::Reverify;
     }
     match (
         cached_norm.as_deref(),

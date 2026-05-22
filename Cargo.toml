@@ -1,8 +1,8 @@
 [package]
 name = "dep-scan"
-version = "1.1.1"
+version = "1.2.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.88"
 description = "A cross-platform CLI tool that scans dependencies for supply chain attacks before installation"
 license = "MIT"
 repository = "https://github.com/tkdtaylor/dep-scan"

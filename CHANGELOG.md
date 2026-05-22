@@ -5,6 +5,123 @@ All notable changes to dep-scan are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.0] — 2026-05-22
+
+A maintenance release that lands the MEDIUM and LOW findings from the
+v1.1.0 security audit, refreshes two transitive dependencies, and tightens
+several false-positive paths. No breaking changes.
+
+### Security (MEDIUM findings, tasks 043–050)
+
+- **Signed-note verifiers iterate across multiple signature lines**
+  (task 043 / M-7) — `verify_ed25519` and `verify_ecdsa_p256` in
+  `src/signed_note.rs` now skip past a non-matching `key_id` and try the
+  next signature line instead of returning `Invalid` immediately. Closes
+  a false-rejection during Rekor key-rotation windows where multiple
+  signatures coexist on a note.
+- **Signed-note boundary parser uses em-dash walk** (task 044 / M-8) — the
+  fragile `rfind("\n\n")` boundary detection is replaced with a single-pass
+  scan that stops at the first em-dash signature line. Robust against blank
+  lines that may legitimately appear inside the note body in future Rekor
+  formats.
+- **Obfuscation policy: regex cache + script size cap** (task 045 / M-1) —
+  the six regex patterns compile once via `OnceLock` instead of fresh on
+  every `evaluate()` call; install-script content is scanned up to the
+  first 1 MB. A 10 MB postinstall can no longer inflate scan time.
+- **`verify_hash` lowercases the algorithm prefix** (task 046 / M-2) —
+  cached `sha512:<hex>` and registry-served `SHA512-<hex>` now compare
+  equal. Closes spurious re-scans driven by registry case inconsistency.
+- **Cache I/O errors surface to stderr** (task 047 / M-3) — `cache.lookup`
+  errors are no longer silently dropped at the call site; the user sees a
+  warning. Fail-open behavior preserved (the scan continues on a
+  cache-lookup failure), but tampering of the cache DB is now visible.
+- **Maintainer policy: opt-in first-seen warning** (task 048 / M-4) — new
+  `maintainer_first_seen_warning` config flag (default `false`, no
+  regression). When enabled, packages observed for the first time with
+  zero downloads emit a `Warn` to defend against typosquat-from-day-one
+  attacks where the attacker is also the first observer.
+- **PyPI Simple Index requires correct Content-Type** (task 049 / M-5) —
+  responses without `application/vnd.pypi.simple.v1+json` are rejected
+  before JSON parsing. A hostile mirror that omits the header and serves
+  poisoned-but-valid JSON is no longer accepted.
+- **`parse_tlog_entries` reports missing-field errors specifically**
+  (task 050 / M-6) — replaces `unwrap_or(0)` fallback with explicit
+  `Result<TlogEntry, String>` per-entry, emitting `"missing required
+  field: <name>"` diagnostics instead of the misleading
+  `"tree_size is zero"`.
+
+### Security (LOW findings, tasks 051–055)
+
+- **Install-script false-positive reduction** (task 051 / L-3 + L-4) — line
+  and block comments are stripped before substring matching, so a benign
+  `// Function() is the constructor for…` comment no longer trips the
+  scanner. The base64-shape detector now requires at least one of `+`, `/`,
+  or `=` to actually be present in the match, so pure-hex sequences
+  (SHA-256 digests, git SHAs) no longer false-positive.
+- **Levenshtein matrix bounded on name length** (task 052 / L-5) — names
+  longer than 256 chars short-circuit to "not similar" before any matrix
+  allocation.
+- **User-visible error output scrubbed by default** (task 053 / L-6) — the
+  outer `Error:` line now shows the outermost message only; the full
+  anyhow chain (which may include file paths) is gated behind `--verbose`.
+- **Cache DB hardened** (task 054 / L-7) — `Cache::new` now `chmod 0600`s
+  the SQLite database on Unix (and any future `-wal` / `-shm` companion
+  files) and enables `PRAGMA journal_mode = WAL` for durability. Closes
+  the privacy-of-usage leak on shared hosts.
+- **Sigstore re-verification on install path documented** (task 055 / L-9)
+  — `--verbose` now emits an audit log line at the install boundary
+  naming the locked version + hash and noting that sigstore is not
+  re-verified between scan-pass and `exec`. Source-level comments at each
+  install call site record the TOCTOU gap with a link to ADR 003.
+
+### Patched (transitive)
+
+- **`time` 0.3.45 → 0.3.47** — RUSTSEC-2026-0009 (DoS via stack exhaustion
+  in time parsing; medium). Pulled in transitively via `x509-parser`
+  → `asn1-rs` → `time` after the 058 bump. Patched at the lockfile level.
+
+### Documentation (L-1, L-2, L-8 from the LOW audit, plus quinn confirmation)
+
+- **ADR 003** gained a new section *Notes on sigstore verification mechanics*
+  recording the post-chain-walk Fulcio OID check as belt-and-braces, the
+  first-URI-SAN-wins identity extraction rule, and the pinned Rekor key
+  name pattern.
+- **ADR 003** gained a *Build/dependency notes* section confirming the
+  HTTP/3 (`quinn`) stack is not linked into the dep-scan release binary —
+  re-verified during the v1.2.0 audit pass.
+
+### Changed (dependency refreshes, tasks 057–058)
+
+- `rusqlite` 0.31 → 0.39 (8 minor versions), pulling `libsqlite3-sys`
+  0.28 → 0.37 (bundled SQLite ~3.45 → ~3.49). All call sites stable; no
+  code changes required.
+- `x509-parser` 0.16 → 0.18.1, pulling `asn1-rs` 0.6 → 0.7, `der-parser`
+  9 → 10, `oid-registry` 0.7 → 0.8. All call sites in `sigstore_verify.rs`
+  stable; the Fulcio chain walk and Rekor inclusion proof verifications
+  remain byte-identical against the existing test fixtures.
+- **Minimum Supported Rust Version (MSRV)** raised from 1.85 to 1.88 to
+  accommodate the patched `time` crate's compiler requirement.
+
+### Deferred
+
+- **`reqwest` 0.12 → 0.13** (task 056) — attempted, reverted before cut.
+  reqwest 0.13's only stable feature flag that picks a crypto provider is
+  `rustls`, which pulls `aws-lc-rs` (a BoringSSL fork with a `cmake`
+  build-time dependency). The release workflow's aarch64-linux cross
+  build under `cross-rs/cross` would likely fail because the default
+  `cross` image does not ship `cmake`. The task file in
+  `docs/tasks/backlog/056-bump-reqwest-0-13.md` documents three paths
+  to re-attempt this in a future release.
+
+### Stats
+
+- 715 tests passing (up from 534 at v1.1.1 — +181 new tests across the
+  15 tasks that landed in this release).
+- `cargo clippy --all-targets --all-features -- -D warnings` clean (two
+  small lint fixes for clippy 1.95: `manual_is_multiple_of` in the Rekor
+  proof verifier, `collapsible_if` in `verify_hash`).
+- `cargo audit` clean.
+
 ## [1.1.1] — 2026-05-22
 
 ### Security
@@ -127,6 +244,7 @@ before installation and gates the install on the verdict.
   by a `sha256sums.txt`.
 - Install script: `curl -fsSL https://raw.githubusercontent.com/tkdtaylor/dep-scan/main/install.sh | bash`
 
-[Unreleased]: https://github.com/tkdtaylor/dep-scan/compare/v1.1.1...HEAD
+[Unreleased]: https://github.com/tkdtaylor/dep-scan/compare/v1.2.0...HEAD
+[1.2.0]: https://github.com/tkdtaylor/dep-scan/releases/tag/v1.2.0
 [1.1.1]: https://github.com/tkdtaylor/dep-scan/releases/tag/v1.1.1
 [1.0.0]: https://github.com/tkdtaylor/dep-scan/releases/tag/v1.0.0

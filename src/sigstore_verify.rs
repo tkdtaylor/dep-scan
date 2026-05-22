@@ -819,10 +819,10 @@ pub fn verify_merkle_path(
                 "audit path is longer than the tree depth".to_string(),
             ));
         }
-        if fan % 2 != 0 || fan == sn {
+        if !fan.is_multiple_of(2) || fan == sn {
             r = rfc6962_internal_hash(p, &r);
             // Promote up while we're a left-child boundary.
-            while fan % 2 == 0 && fan != 0 {
+            while fan.is_multiple_of(2) && fan != 0 {
                 fan >>= 1;
                 sn >>= 1;
             }
