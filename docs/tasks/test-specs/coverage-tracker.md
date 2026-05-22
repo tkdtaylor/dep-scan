@@ -58,6 +58,7 @@
 | 041 | Go module path validation before URL composition | 041-go-module-path-validation-test-spec.md | 26/26 | ✅ |
 | 042 | Harden TempReqFile against predictable filename / symlink attack | 042-temp-file-symlink-hardening-test-spec.md | 14/14 | ✅ |
 | 043 | Signed-note multi-signature iteration for key rotation | 043-signed-note-multi-sig-iteration-test-spec.md | 0/15 | ❌ |
+| 044 | Signed-note boundary parser — em-dash walk replaces rfind | 044-signed-note-boundary-parser-test-spec.md | 0/17 | ❌ |
 
 ## Status key
 
