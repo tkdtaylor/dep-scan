@@ -41,6 +41,22 @@ pub struct ScanContext {
     pub install_scripts: Vec<InstallScript>,
     /// Previous maintainers, if maintainer history is available.
     pub previous_maintainers: Option<Vec<String>>,
+    /// Pre-fetched npm provenance attestation bundles (task 032).
+    ///
+    /// `None` means the attestation endpoint was not queried (e.g. non-npm package
+    /// or the npm_provenance policy is disabled).
+    /// `Some(vec![])` means the endpoint returned 404 (no attestations published).
+    /// `Some(bundles)` contains one or more parsed attestation bundles.
+    pub npm_attestations: Option<Vec<crate::registry::npm_attestation::AttestationBundle>>,
+    /// Network or parse error that occurred while fetching attestations, if any.
+    ///
+    /// When set, the provenance policy must surface this as an error rather
+    /// than silently treating it as "no attestations".
+    pub npm_attestation_fetch_error: Option<String>,
+    /// Verified Fulcio OIDC subject identity from a valid npm provenance
+    /// attestation, populated by `main.rs` after policy evaluation for
+    /// persisting to `scanned_packages.provenance_identity`.
+    pub provenance_identity: Option<String>,
 }
 
 impl ScanContext {
@@ -51,6 +67,9 @@ impl ScanContext {
             vulnerabilities: Vec::new(),
             install_scripts: Vec::new(),
             previous_maintainers: None,
+            npm_attestations: None,
+            npm_attestation_fetch_error: None,
+            provenance_identity: None,
         }
     }
 }
@@ -243,6 +262,9 @@ mod tests {
                 content: "echo hello".to_string(),
             }],
             previous_maintainers: Some(vec!["old-maintainer".to_string()]),
+            npm_attestations: None,
+            npm_attestation_fetch_error: None,
+            provenance_identity: None,
         };
 
         assert_eq!(ctx.metadata, meta);

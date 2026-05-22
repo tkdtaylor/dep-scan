@@ -170,6 +170,9 @@ mod tests {
             vulnerabilities: vec![],
             install_scripts: scripts,
             previous_maintainers: None,
+            npm_attestations: None,
+            npm_attestation_fetch_error: None,
+            provenance_identity: None,
         }
     }
 

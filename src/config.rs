@@ -96,10 +96,24 @@ pub struct PolicyConfig {
     /// Check for obfuscated code in install scripts
     #[serde(default = "default_true")]
     pub check_obfuscation: bool,
+    /// Check npm packages for sigstore provenance attestations (task 032).
+    ///
+    /// When `true`, the policy queries the npm attestation endpoint and
+    /// verifies any DSSE bundles found there.
+    #[serde(default = "default_true")]
+    pub check_npm_provenance: bool,
+    /// When `true`, a missing npm provenance attestation escalates from
+    /// `Warn` to `Block`. Invalid attestations always block regardless.
+    #[serde(default = "default_false")]
+    pub require_npm_provenance: bool,
 }
 
 fn default_true() -> bool {
     true
+}
+
+fn default_false() -> bool {
+    false
 }
 
 impl Default for PolicyConfig {
@@ -111,6 +125,8 @@ impl Default for PolicyConfig {
             check_maintainer_changes: true,
             check_vulnerabilities: true,
             check_obfuscation: true,
+            check_npm_provenance: true,
+            require_npm_provenance: false,
         }
     }
 }

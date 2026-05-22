@@ -16,6 +16,10 @@ pub struct CacheEntry {
     /// `None` for rows that were inserted before task 029 (legacy rows)
     /// or when no digest was available from the registry.
     pub content_hash: Option<String>,
+    /// Verified Fulcio OIDC subject identity from the npm provenance attestation
+    /// (task 032). `None` when no valid attestation was found or the package is
+    /// not from npm.
+    pub provenance_identity: Option<String>,
 }
 
 /// Local SQLite cache for storing scan results so already-scanned packages
@@ -34,12 +38,13 @@ impl Cache {
         let conn = Connection::open(path)?;
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS scanned_packages (
-                name         TEXT NOT NULL,
-                version      TEXT NOT NULL,
-                registry     TEXT NOT NULL,
-                result       TEXT NOT NULL,
-                scanned_at   TEXT NOT NULL,
-                content_hash TEXT,
+                name                TEXT NOT NULL,
+                version             TEXT NOT NULL,
+                registry            TEXT NOT NULL,
+                result              TEXT NOT NULL,
+                scanned_at          TEXT NOT NULL,
+                content_hash        TEXT,
+                provenance_identity TEXT,
                 PRIMARY KEY (name, version, registry)
             );
             CREATE TABLE IF NOT EXISTS maintainer_history (
@@ -51,18 +56,26 @@ impl Cache {
             );",
         )?;
 
-        // Additive migration: add content_hash column to existing databases that
-        // predate task 029. The column-exists check makes this idempotent.
-        let column_exists: bool = conn
+        // Collect existing column names for additive migrations.
+        let existing_columns: Vec<String> = conn
             .prepare("PRAGMA table_info(scanned_packages)")?
             .query_map([], |row| {
                 let name: String = row.get(1)?;
                 Ok(name)
             })?
-            .any(|r| r.map(|n| n == "content_hash").unwrap_or(false));
+            .filter_map(|r| r.ok())
+            .collect();
 
-        if !column_exists {
+        // Additive migration (task 029): add content_hash column.
+        if !existing_columns.iter().any(|n| n == "content_hash") {
             conn.execute_batch("ALTER TABLE scanned_packages ADD COLUMN content_hash TEXT;")?;
+        }
+
+        // Additive migration (task 032): add provenance_identity column.
+        if !existing_columns.iter().any(|n| n == "provenance_identity") {
+            conn.execute_batch(
+                "ALTER TABLE scanned_packages ADD COLUMN provenance_identity TEXT;",
+            )?;
         }
 
         Ok(Self { conn })
@@ -79,7 +92,8 @@ impl Cache {
     /// Returns `None` if no entry exists for the given key.
     pub fn lookup(&self, name: &str, version: &str, registry: &str) -> Result<Option<CacheEntry>> {
         let mut stmt = self.conn.prepare(
-            "SELECT result, scanned_at, content_hash FROM scanned_packages
+            "SELECT result, scanned_at, content_hash, provenance_identity
+             FROM scanned_packages
              WHERE name = ?1 AND version = ?2 AND registry = ?3",
         )?;
 
@@ -88,6 +102,7 @@ impl Cache {
                 result: row.get(0)?,
                 scanned_at: row.get(1)?,
                 content_hash: row.get(2)?,
+                provenance_identity: row.get(3)?,
             })
         })?;
 
@@ -104,6 +119,9 @@ impl Cache {
     ///
     /// `content_hash` should be formatted as `<algo>:<hex>` (e.g. `sha512:<hex>`),
     /// or `None` when no digest was available from the registry.
+    ///
+    /// `provenance_identity` is the verified Fulcio OIDC subject identity from
+    /// the npm provenance attestation (task 032), or `None`.
     pub fn insert(
         &self,
         name: &str,
@@ -111,13 +129,22 @@ impl Cache {
         registry: &str,
         result: &str,
         content_hash: Option<&str>,
+        provenance_identity: Option<&str>,
     ) -> Result<()> {
         let scanned_at = Utc::now().to_rfc3339();
         self.conn.execute(
             "INSERT OR REPLACE INTO scanned_packages
-             (name, version, registry, result, scanned_at, content_hash)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            rusqlite::params![name, version, registry, result, scanned_at, content_hash],
+             (name, version, registry, result, scanned_at, content_hash, provenance_identity)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            rusqlite::params![
+                name,
+                version,
+                registry,
+                result,
+                scanned_at,
+                content_hash,
+                provenance_identity
+            ],
         )?;
         Ok(())
     }
@@ -201,7 +228,7 @@ mod tests {
     fn insert_and_lookup() {
         let cache = Cache::in_memory().unwrap();
         cache
-            .insert("lodash", "4.17.21", "npm", "pass", None)
+            .insert("lodash", "4.17.21", "npm", "pass", None, None)
             .unwrap();
 
         let entry = cache.lookup("lodash", "4.17.21", "npm").unwrap();
@@ -222,10 +249,10 @@ mod tests {
     fn insert_upserts_on_conflict() {
         let cache = Cache::in_memory().unwrap();
         cache
-            .insert("lodash", "4.17.21", "npm", "pass", None)
+            .insert("lodash", "4.17.21", "npm", "pass", None, None)
             .unwrap();
         cache
-            .insert("lodash", "4.17.21", "npm", "block", None)
+            .insert("lodash", "4.17.21", "npm", "block", None, None)
             .unwrap();
 
         let entry = cache.lookup("lodash", "4.17.21", "npm").unwrap().unwrap();
@@ -237,7 +264,7 @@ mod tests {
     fn invalidate_removes_entry() {
         let cache = Cache::in_memory().unwrap();
         cache
-            .insert("lodash", "4.17.21", "npm", "pass", None)
+            .insert("lodash", "4.17.21", "npm", "pass", None, None)
             .unwrap();
         cache.invalidate("lodash", "4.17.21", "npm").unwrap();
 
@@ -260,9 +287,13 @@ mod tests {
     #[test]
     fn clear_removes_all_entries() {
         let cache = Cache::in_memory().unwrap();
-        cache.insert("a", "1.0", "npm", "pass", None).unwrap();
-        cache.insert("b", "2.0", "pypi", "block", None).unwrap();
-        cache.insert("c", "3.0", "cargo", "warn", None).unwrap();
+        cache.insert("a", "1.0", "npm", "pass", None, None).unwrap();
+        cache
+            .insert("b", "2.0", "pypi", "block", None, None)
+            .unwrap();
+        cache
+            .insert("c", "3.0", "cargo", "warn", None, None)
+            .unwrap();
 
         cache.clear().unwrap();
 
@@ -275,8 +306,12 @@ mod tests {
     #[test]
     fn different_registries_are_distinct() {
         let cache = Cache::in_memory().unwrap();
-        cache.insert("foo", "1.0", "npm", "pass", None).unwrap();
-        cache.insert("foo", "1.0", "pypi", "block", None).unwrap();
+        cache
+            .insert("foo", "1.0", "npm", "pass", None, None)
+            .unwrap();
+        cache
+            .insert("foo", "1.0", "pypi", "block", None, None)
+            .unwrap();
 
         let npm_entry = cache.lookup("foo", "1.0", "npm").unwrap().unwrap();
         let pypi_entry = cache.lookup("foo", "1.0", "pypi").unwrap().unwrap();
@@ -295,7 +330,7 @@ mod tests {
         {
             let cache = Cache::new(&db_path).unwrap();
             cache
-                .insert("lodash", "4.17.21", "npm", "pass", None)
+                .insert("lodash", "4.17.21", "npm", "pass", None, None)
                 .unwrap();
         }
         // Cache is dropped here, connection closed.
@@ -353,7 +388,7 @@ mod tests {
         let cache = Cache::in_memory().unwrap();
         let before = Utc::now();
         cache
-            .insert("lodash", "4.17.21", "npm", "pass", None)
+            .insert("lodash", "4.17.21", "npm", "pass", None, None)
             .unwrap();
         let after = Utc::now();
 
@@ -468,6 +503,7 @@ mod tests {
                 "npm",
                 "pass",
                 Some("sha512:abcdef1234567890"),
+                None,
             )
             .unwrap();
 
@@ -486,7 +522,7 @@ mod tests {
     fn insert_none_content_hash_stores_null() {
         let cache = Cache::in_memory().unwrap();
         cache
-            .insert("lodash", "4.17.21", "npm", "pass", None)
+            .insert("lodash", "4.17.21", "npm", "pass", None, None)
             .unwrap();
 
         let entry = cache
@@ -543,10 +579,10 @@ mod tests {
     fn re_insert_updates_content_hash() {
         let cache = Cache::in_memory().unwrap();
         cache
-            .insert("pkg", "1.0.0", "npm", "pass", Some("sha256:aaaa"))
+            .insert("pkg", "1.0.0", "npm", "pass", Some("sha256:aaaa"), None)
             .unwrap();
         cache
-            .insert("pkg", "1.0.0", "npm", "pass", Some("sha256:bbbb"))
+            .insert("pkg", "1.0.0", "npm", "pass", Some("sha256:bbbb"), None)
             .unwrap();
 
         let entry = cache
@@ -557,6 +593,115 @@ mod tests {
             entry.content_hash,
             Some("sha256:bbbb".to_string()),
             "content_hash should be updated by re-insert"
+        );
+    }
+
+    // T-032-14: Cache::new on fresh DB creates provenance_identity column
+    #[test]
+    fn new_creates_provenance_identity_column() {
+        let cache = Cache::in_memory().unwrap();
+        let mut stmt = cache
+            .conn
+            .prepare("PRAGMA table_info(scanned_packages)")
+            .unwrap();
+        let col = stmt
+            .query_map([], |row| {
+                let name: String = row.get(1)?;
+                let col_type: String = row.get(2)?;
+                let not_null: i64 = row.get(3)?;
+                Ok((name, col_type, not_null))
+            })
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .find(|(name, _, _)| name == "provenance_identity");
+
+        let col = col.expect("T-032-14: provenance_identity column should exist");
+        assert_eq!(
+            col.1.to_uppercase(),
+            "TEXT",
+            "T-032-14: column type should be TEXT"
+        );
+        assert_eq!(
+            col.2, 0,
+            "T-032-14: column should be nullable (not_null = 0)"
+        );
+    }
+
+    // T-032-15: Cache::new on a post-029 DB adds provenance_identity in place
+    #[test]
+    fn new_migrates_post_029_db_adds_provenance_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("v1_1.db");
+
+        // Manually create the v1.1 schema (has content_hash but no provenance_identity)
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE scanned_packages (
+                    name         TEXT NOT NULL,
+                    version      TEXT NOT NULL,
+                    registry     TEXT NOT NULL,
+                    result       TEXT NOT NULL,
+                    scanned_at   TEXT NOT NULL,
+                    content_hash TEXT,
+                    PRIMARY KEY (name, version, registry)
+                );",
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO scanned_packages
+                 (name, version, registry, result, scanned_at, content_hash)
+                 VALUES ('legacy-pkg', '1.0.0', 'npm', 'pass',
+                         '2025-01-01T00:00:00Z', 'sha512:aaaa')",
+                [],
+            )
+            .unwrap();
+        }
+
+        // Open with Cache::new — should add provenance_identity without error
+        let cache = Cache::new(&db_path).expect("T-032-15: migration should succeed");
+
+        // Existing row must be preserved; provenance_identity should be NULL.
+        let entry = cache
+            .lookup("legacy-pkg", "1.0.0", "npm")
+            .unwrap()
+            .expect("T-032-15: legacy row must still exist");
+        assert_eq!(entry.result, "pass");
+        assert_eq!(
+            entry.content_hash,
+            Some("sha512:aaaa".to_string()),
+            "T-032-15: content_hash must be preserved"
+        );
+        assert_eq!(
+            entry.provenance_identity, None,
+            "T-032-15: provenance_identity must be NULL for legacy rows"
+        );
+    }
+
+    // T-032-16: insert/lookup round-trips provenance_identity
+    #[test]
+    fn insert_and_lookup_roundtrips_provenance_identity() {
+        let cache = Cache::in_memory().unwrap();
+        let identity = "https://github.com/lodash/.github/workflows/release.yml@refs/tags/v4.17.21";
+        cache
+            .insert(
+                "lodash",
+                "4.17.21",
+                "npm",
+                "pass",
+                Some("sha512:abcdef"),
+                Some(identity),
+            )
+            .unwrap();
+
+        let entry = cache
+            .lookup("lodash", "4.17.21", "npm")
+            .unwrap()
+            .expect("T-032-16: entry should exist");
+        assert_eq!(
+            entry.provenance_identity,
+            Some(identity.to_string()),
+            "T-032-16: provenance_identity must round-trip"
         );
     }
 }

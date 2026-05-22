@@ -31,6 +31,7 @@ check_install_scripts = true
 check_maintainer_changes = true
 check_typosquatting = true
 check_vulnerabilities = true
+check_npm_provenance = false
 
 [osv]
 osv_url = "{osv_url}"
@@ -68,6 +69,7 @@ check_install_scripts = {check_install_scripts}
 check_maintainer_changes = true
 check_typosquatting = true
 check_vulnerabilities = {check_vulnerabilities}
+check_npm_provenance = false
 
 [osv]
 osv_url = "{osv_url}"

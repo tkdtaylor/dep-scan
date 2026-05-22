@@ -5,6 +5,7 @@ mod lockfile;
 mod osv;
 mod policy;
 mod registry;
+mod sigstore_verify;
 mod types;
 mod typosquat;
 
@@ -24,6 +25,7 @@ use policy::age::AgePolicy;
 use policy::dependency_confusion::DependencyConfusionPolicy;
 use policy::install_script::InstallScriptPolicy;
 use policy::maintainer::MaintainerChangePolicy;
+use policy::npm_provenance::{NpmProvenancePolicy, extract_provenance_identity};
 use policy::obfuscation::ObfuscationPolicy;
 use policy::popularity::PopularityPolicy;
 use policy::typosquatting::TyposquattingPolicy;
@@ -32,8 +34,10 @@ use policy::{Policy, PolicyDetail, aggregate_results};
 use registry::crates::CratesRegistry;
 use registry::go::GoRegistry;
 use registry::npm::NpmRegistry;
+use registry::npm_attestation::NpmAttestationClient;
 use registry::pypi::PyPiRegistry;
 use registry::{Registry, RegistryType};
+use sigstore_verify::RealSigstoreVerifier;
 use types::ScanContext;
 
 /// Decision returned by `verify_hash` for a cache-hit entry.
@@ -227,6 +231,17 @@ async fn run_check(
         config.dependency_confusion.internal_prefixes.clone(),
     )));
 
+    // npm provenance attestation check (npm only; wired per-package in the scan loop)
+    // The policy is added to the pipeline when check_npm_provenance is enabled.
+    // Non-npm packages get npm_attestations = None, so the policy returns Pass for them.
+    if config.policies.check_npm_provenance {
+        use std::sync::Arc;
+        policies.push(Box::new(NpmProvenancePolicy::new(
+            config.policies.require_npm_provenance,
+            Arc::new(RealSigstoreVerifier),
+        )));
+    }
+
     // Create OSV client for vulnerability lookups
     let osv_client = if config.policies.check_vulnerabilities {
         Some(OsvClient::new(config.osv.osv_url.clone()))
@@ -362,10 +377,29 @@ async fn run_check(
             None
         };
 
+        // Fetch npm provenance attestations (npm only).
+        // A 404 from the endpoint → Ok(vec![]) → "no attestations" Warn path.
+        // A network/parse error → surfaced as Block (fail-closed per ADR 003).
+        let (npm_attestations, npm_attestation_fetch_error) =
+            if config.policies.check_npm_provenance && reg_type == RegistryType::Npm {
+                let att_client = NpmAttestationClient::new(config.registries.npm_url.clone());
+                match att_client
+                    .get_attestations(&metadata.name, &metadata.version)
+                    .await
+                {
+                    Ok(bundles) => (Some(bundles), None),
+                    Err(e) => (Some(vec![]), Some(e.to_string())),
+                }
+            } else {
+                (None, None)
+            };
+
         // Build scan context and enrich
         let mut ctx = ScanContext::from_metadata(metadata.clone());
         ctx.install_scripts = install_scripts;
         ctx.previous_maintainers = previous_maintainers;
+        ctx.npm_attestations = npm_attestations;
+        ctx.npm_attestation_fetch_error = npm_attestation_fetch_error;
 
         // Query OSV for known vulnerabilities
         if let Some(ref osv) = osv_client {
@@ -399,6 +433,19 @@ async fn run_check(
             has_failure = true;
         }
 
+        // Extract and persist the provenance identity for npm packages that passed
+        // attestation verification (task 032).  We run the verifier a second time
+        // here to extract the identity without changing the Policy trait surface.
+        if config.policies.check_npm_provenance
+            && reg_type == RegistryType::Npm
+            && result_str == "pass"
+            && let (Some(bundles), Some(hash)) = (&ctx.npm_attestations, &metadata.content_hash)
+            && let Some((algo, hex)) = hash.split_once(':')
+        {
+            ctx.provenance_identity =
+                extract_provenance_identity(bundles, algo, hex, &RealSigstoreVerifier);
+        }
+
         // Record current maintainers in cache for future comparisons
         if config.policies.check_maintainer_changes {
             let _ = cache.record_maintainers(pkg_name, &reg_str, &metadata.maintainers);
@@ -411,6 +458,7 @@ async fn run_check(
             &reg_str,
             &result_str,
             metadata.content_hash.as_deref(),
+            ctx.provenance_identity.as_deref(),
         );
 
         results.push(CheckResult {

@@ -40,6 +40,7 @@ check_maintainer_changes = true
 check_typosquatting = true
 check_vulnerabilities = true
 check_obfuscation = true
+check_npm_provenance = false
 
 [osv]
 osv_url = "{osv_url}"
@@ -79,6 +80,7 @@ check_maintainer_changes = true
 check_typosquatting = true
 check_vulnerabilities = true
 check_obfuscation = true
+check_npm_provenance = false
 
 [osv]
 osv_url = "{osv_url}"

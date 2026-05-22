@@ -28,6 +28,7 @@ check_min_age = true
 check_typosquatting = true
 check_install_scripts = true
 check_maintainer_changes = true
+check_npm_provenance = false
 "#
     )
     .expect("write temp config");

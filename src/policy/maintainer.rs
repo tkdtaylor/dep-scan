@@ -88,6 +88,9 @@ mod tests {
             vulnerabilities: Vec::new(),
             install_scripts: Vec::new(),
             previous_maintainers: previous,
+            npm_attestations: None,
+            npm_attestation_fetch_error: None,
+            provenance_identity: None,
         }
     }
 

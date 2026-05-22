@@ -38,6 +38,7 @@ check_maintainer_changes = false
 check_typosquatting = false
 check_vulnerabilities = false
 check_obfuscation = false
+check_npm_provenance = false
 
 [dependency_confusion]
 internal_prefixes = []

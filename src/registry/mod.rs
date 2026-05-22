@@ -1,6 +1,7 @@
 pub mod crates;
 pub mod go;
 pub mod npm;
+pub mod npm_attestation;
 pub mod pypi;
 
 use std::fmt;

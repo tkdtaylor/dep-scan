@@ -22,6 +22,13 @@ thiserror = "2"
 chrono = { version = "0.4", features = ["serde"] }
 regex = "1"
 base64 = "0.22"
+# Task 032 — npm provenance attestation verification
+# p256 for ECDSA P-256 signature verification (Fulcio leaf cert key type for npm)
+p256 = { version = "0.13", features = ["ecdsa"] }
+# x509-parser for X.509 certificate chain parsing
+x509-parser = "0.16"
+# sha2 for computing digests (already transitively pulled in by many deps)
+sha2 = "0.10"
 
 [dev-dependencies]
 wiremock = "0.6"
