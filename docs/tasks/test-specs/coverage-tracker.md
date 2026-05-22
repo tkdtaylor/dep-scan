@@ -64,7 +64,7 @@
 | 047 | Cache I/O error surfacing | 047-cache-io-error-surfacing-test-spec.md | 12/12 | ✅ |
 | 048 | Maintainer policy trust-on-first-use warning | 048-maintainer-first-seen-warning-test-spec.md | 0/14 | ❌ |
 | 049 | PyPI Simple Index strict content-type enforcement | 049-pypi-simple-index-content-type-test-spec.md | 11/11 | ✅ |
-| 050 | parse_tlog_entries missing-field diagnostics | 050-tlog-entry-missing-field-diagnostics-test-spec.md | 0/17 | ❌ |
+| 050 | parse_tlog_entries missing-field diagnostics | 050-tlog-entry-missing-field-diagnostics-test-spec.md | 17/17 | ✅ |
 
 ## Status key
 
