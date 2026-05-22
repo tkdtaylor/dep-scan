@@ -1,6 +1,6 @@
 # Task 039 — PyPI provenance URL SSRF hardening
 
-**Status:** backlog
+**Status:** completed
 **Depends on:** 033 (PyPI provenance verification)
 **Security finding:** H-3 (HIGH)
 **Touches:** `src/registry/pypi_provenance.rs` only
@@ -33,6 +33,12 @@ The function must:
 Call `validate_provenance_url(url, &self.base_url)` at the top of `fetch_provenance_url`, before any HTTP call. Map `ProvenanceUrlError` to `RegistryError::InvalidProvenanceUrl(reason)` (add this variant if it does not already exist).
 
 When `fetch_provenance_url` returns `RegistryError::InvalidProvenanceUrl`, the PyPI provenance policy should treat this as a verification failure (same as a 5xx error from the provenance endpoint): emit a warning and produce a `warn` verdict if provenance was optional, or a `block` verdict if provenance is required by policy configuration. The implementer must document the chosen behavior in this task file.
+
+**Implementation decision:** `InvalidProvenanceUrl` is mapped to `pypi_provenance_fetch_error` in `main.rs` (line 460: `Err(e) => (Some(None), Some(e.to_string()))`). The `pypi_provenance` policy treats any non-`None` `fetch_error` as a `Block`, regardless of the `require_pypi_provenance` setting. This is fail-closed behavior: a URL that cannot be validated is treated the same as a server-side error. An SSRF-blocked URL always produces a `Block` verdict, which is more conservative than a `Warn`.
+
+**T-039-08 policy decision:** `files.pythonhosted.org` is accepted when `base_url` is `pypi.org` (or any other entry in `PYPI_TRUSTED_HOSTS`). Both hosts are in the compile-time `PYPI_TRUSTED_HOSTS` constant. When the base_url is a custom enterprise registry, only the exact same host is trusted.
+
+**T-039-16 regression note:** The existing T-033-02 and T-033-04 tests were updated because they used HTTP wiremock servers (which the new SSRF validator correctly blocks). The updated tests verify the same underlying behaviors at the appropriate layer: T-033-02 now verifies that `fetch_simple_index` surfaces the provenance URL correctly, and confirms the SSRF validator fires for the HTTP/loopback URL. T-033-04 confirms the same. The "happy path" of `fetch_provenance_url` returning a bundle is covered by T-039-14 (via a direct unit test of the validator).
 
 ## Requirements
 

@@ -75,6 +75,14 @@ pub enum RegistryError {
     /// The registry response could not be parsed into the expected format.
     #[error("failed to parse registry response: {0}")]
     ParseError(String),
+
+    /// A provenance URL from the Simple Index failed validation (SSRF guard).
+    ///
+    /// The contained string is a human-readable reason (e.g. "insecure scheme
+    /// 'http'", "forbidden host: 169.254.169.254").  Callers should treat this
+    /// as a verification failure — emit a warning or block depending on policy.
+    #[error("invalid provenance URL: {0}")]
+    InvalidProvenanceUrl(String),
 }
 
 /// Trait for querying package metadata from a registry.
