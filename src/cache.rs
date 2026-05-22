@@ -40,8 +40,31 @@ impl Cache {
     /// Pass `":memory:"` to create an in-memory database for testing.
     /// The `scanned_packages` table is created automatically if it does not
     /// already exist.
+    ///
+    /// On Unix, the DB file is restricted to owner-only permissions (`0600`)
+    /// after open, regardless of the process umask.  The `-wal` and `-shm`
+    /// companion files SQLite creates in WAL mode inherit the same permissions
+    /// because SQLite uses the main-file mode when creating them via `open(2)`.
+    ///
+    /// Note: on Windows, the DB file inherits parent-directory ACLs.
     pub fn new(path: &Path) -> Result<Self> {
         let conn = Connection::open(path)?;
+
+        // Restrict the DB file to owner read/write only on Unix systems.
+        // Skip for `:memory:` databases which have no backing file.
+        #[cfg(unix)]
+        if path != Path::new(":memory:") {
+            use std::os::unix::fs::PermissionsExt;
+            let perms = std::fs::Permissions::from_mode(0o600);
+            std::fs::set_permissions(path, perms)?;
+        }
+
+        // Enable WAL journal mode for improved durability.  WAL is the
+        // SQLite-recommended mode for applications that perform frequent small
+        // writes, and it ensures that companion -wal/-shm files are created
+        // with the same owner as the main DB file.
+        conn.execute_batch("PRAGMA journal_mode = WAL;")?;
+
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS scanned_packages (
                 name                TEXT NOT NULL,
@@ -767,6 +790,173 @@ mod tests {
             entry.provenance_identity,
             Some(identity.to_string()),
             "T-032-16: provenance_identity must round-trip"
+        );
+    }
+
+    // ── T-054 tests — cache DB privacy hardening ─────────────────────────────
+
+    // T-054-01: Cache DB file created on Unix has mode 0600.
+    #[cfg(unix)]
+    #[test]
+    fn t054_01_new_file_has_mode_0600() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("cache.db");
+        let _cache = Cache::new(&db_path).expect("T-054-01: Cache::new should succeed");
+        let meta = std::fs::metadata(&db_path).unwrap();
+        let mode = meta.permissions().mode();
+        assert_eq!(
+            mode & 0o777,
+            0o600,
+            "T-054-01: DB file must have mode 0600, got {:#o}",
+            mode & 0o777
+        );
+    }
+
+    // T-054-02: No group or world read bits are set on a newly created cache DB.
+    #[cfg(unix)]
+    #[test]
+    fn t054_02_no_group_or_world_bits() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("cache.db");
+        let _cache = Cache::new(&db_path).expect("T-054-02: Cache::new should succeed");
+        let meta = std::fs::metadata(&db_path).unwrap();
+        let mode = meta.permissions().mode();
+        assert_eq!(
+            mode & 0o077,
+            0,
+            "T-054-02: no group or world permission bits must be set, got {:#o}",
+            mode & 0o077
+        );
+    }
+
+    // T-054-03: chmod 0600 is applied even if the file was created with a permissive umask.
+    //
+    // The implementation calls std::fs::set_permissions after Connection::open, which
+    // unconditionally sets the mode to 0600 regardless of the process umask.  We verify
+    // this by confirming the mode is exactly 0600 on a fresh DB — an umask of 0022
+    // (the typical default) would leave a mode of 0644 if the chmod step were absent.
+    #[cfg(unix)]
+    #[test]
+    fn t054_03_mode_0600_overrides_permissive_umask() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("umask_test.db");
+        let _cache = Cache::new(&db_path).expect("T-054-03: Cache::new should succeed");
+        let meta = std::fs::metadata(&db_path).unwrap();
+        let mode = meta.permissions().mode();
+        // A typical umask of 0022 would produce 0644 if set_permissions were not called.
+        // The implementation always calls set_permissions(0o600), so we expect exactly 0600.
+        assert_eq!(
+            mode & 0o777,
+            0o600,
+            "T-054-03: mode must be 0600 regardless of umask, got {:#o}",
+            mode & 0o777
+        );
+    }
+
+    // T-054-04: Re-opening an existing cache DB does not widen its permissions.
+    #[cfg(unix)]
+    #[test]
+    fn t054_04_reopen_does_not_widen_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("cache.db");
+
+        // First open: create and establish 0600.
+        {
+            let _cache = Cache::new(&db_path).expect("T-054-04: first open should succeed");
+        }
+
+        // Second open: should keep 0600, not widen.
+        {
+            let _cache = Cache::new(&db_path).expect("T-054-04: second open should succeed");
+        }
+
+        let meta = std::fs::metadata(&db_path).unwrap();
+        let mode = meta.permissions().mode();
+        assert_eq!(
+            mode & 0o777,
+            0o600,
+            "T-054-04: mode must still be 0600 after re-open, got {:#o}",
+            mode & 0o777
+        );
+    }
+
+    // T-054-05: WAL journal mode is set after Cache::new.
+    #[test]
+    fn t054_05_wal_journal_mode_set() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("wal_test.db");
+        let cache = Cache::new(&db_path).expect("T-054-05: Cache::new should succeed");
+        let mode: String = cache
+            .conn
+            .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+            .expect("T-054-05: PRAGMA journal_mode query should succeed");
+        assert_eq!(
+            mode, "wal",
+            "T-054-05: journal_mode must be 'wal', got '{mode}'"
+        );
+    }
+
+    // T-054-06: WAL mode is present even when opening an existing database that was in DELETE mode.
+    #[test]
+    fn t054_06_wal_upgrades_from_delete_mode() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("delete_mode.db");
+
+        // Create the DB with DELETE journal mode.
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute_batch("PRAGMA journal_mode = DELETE;").unwrap();
+            conn.execute_batch("CREATE TABLE IF NOT EXISTS dummy (id INTEGER PRIMARY KEY);")
+                .unwrap();
+        }
+
+        // Open with Cache::new — should upgrade to WAL.
+        let cache = Cache::new(&db_path).expect("T-054-06: Cache::new should succeed");
+        let mode: String = cache
+            .conn
+            .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+            .expect("T-054-06: PRAGMA journal_mode query should succeed");
+        assert_eq!(
+            mode, "wal",
+            "T-054-06: Cache::new must upgrade journal_mode to 'wal', got '{mode}'"
+        );
+    }
+
+    // T-054-07: Insert and lookup still work after WAL is enabled.
+    #[test]
+    fn t054_07_insert_lookup_after_wal() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("wal_rw.db");
+        let cache = Cache::new(&db_path).expect("T-054-07: Cache::new should succeed");
+        cache
+            .insert("pkg", "1.0.0", "npm", "pass", None, None)
+            .expect("T-054-07: insert should succeed");
+        let entry = cache
+            .lookup("pkg", "1.0.0", "npm")
+            .expect("T-054-07: lookup should succeed");
+        assert!(
+            entry.is_some(),
+            "T-054-07: lookup should return Some after insert"
+        );
+        assert_eq!(
+            entry.unwrap().result,
+            "pass",
+            "T-054-07: CacheEntry.result must match the inserted value"
+        );
+    }
+
+    // T-054-08: Cache::in_memory() is unaffected by the chmod step.
+    #[test]
+    fn t054_08_in_memory_unaffected_by_chmod() {
+        let result = Cache::in_memory();
+        assert!(
+            result.is_ok(),
+            "T-054-08: Cache::in_memory() must succeed without chmod error: {:?}",
+            result.err()
         );
     }
 }
