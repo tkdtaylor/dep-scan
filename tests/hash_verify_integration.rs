@@ -181,6 +181,13 @@ const HASH_A: &str = "sha512:000102";
 const SRI_B: &str = "sha512-AQ==";
 const HASH_B: &str = "sha512:01";
 
+// Uppercase-prefix SRI for T-046-13: "SHA512-AAEC" — same bytes as SRI_A but
+// with an uppercase algorithm prefix.  parse_npm_integrity passes the prefix
+// through verbatim, so this produces the cached hash "SHA512:000102" from the
+// registry side.  After normalize_hash_prefix, both sides become "sha512:000102"
+// and verify_hash returns HonorCache.
+const SRI_A_UPPER: &str = "SHA512-AAEC";
+
 // ── T-030-06 ──────────────────────────────────────────────────────────────────
 
 // T-030-06: Cache hit with matching hash skips re-scan
@@ -686,4 +693,65 @@ async fn verify_loop_closes_second_run_is_clean_hit() {
         .assert()
         .code(0)
         .stderr(predicate::str::contains("cache hit (verified)"));
+}
+
+// ── T-046-13 ──────────────────────────────────────────────────────────────────
+
+// T-046-13: Package whose registry later returns an uppercase algorithm prefix
+// is still recognized as a cache hit.
+//
+// Cache is pre-populated with content_hash = "sha512:000102" (lowercase prefix).
+// wiremock returns dist.integrity = "SHA512-AAEC" (uppercase prefix SRI).
+// parse_npm_integrity converts this to "SHA512:000102" (prefix NOT lowercased).
+// verify_hash normalizes both sides: "sha512:000102" == "sha512:000102" → HonorCache.
+// Expected: exit 0, stderr contains "cache hit (verified)", exactly 1 registry call.
+#[tokio::test]
+async fn uppercase_sri_prefix_still_produces_cache_hit() {
+    let server = MockServer::start().await;
+    let tmp = TempDir::new().unwrap();
+    let db_path = tmp.path().join("cache.db");
+    let db_str = db_path.to_str().unwrap();
+
+    // T-046-13: seed cache with lowercase prefix hash
+    seed_cache(
+        db_str,
+        "verify-case-pkg",
+        "1.0.0",
+        "npm",
+        "pass",
+        Some(HASH_A), // "sha512:000102"
+    );
+
+    let config = write_config(&server.uri(), db_str);
+
+    // Registry returns the same bytes but with an uppercase SRI prefix.
+    Mock::given(method("GET"))
+        .and(path("/verify-case-pkg"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_string(npm_json_with_integrity(
+                "verify-case-pkg",
+                "1.0.0",
+                72,
+                SRI_A_UPPER, // "SHA512-AAEC" → produces "SHA512:000102" after parse
+            )),
+        )
+        .expect(1) // exactly one metadata call — the verification fetch
+        .mount(&server)
+        .await;
+
+    dep_scan()
+        .args([
+            "--config",
+            config.path().to_str().unwrap(),
+            "--verbose",
+            "check",
+            "verify-case-pkg",
+            "--registry",
+            "npm",
+        ])
+        .assert()
+        .code(0)
+        .stderr(predicate::str::contains("cache hit (verified)"));
+
+    // wiremock will assert expect(1) on drop (exactly one registry call)
 }

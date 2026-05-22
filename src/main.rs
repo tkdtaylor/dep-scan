@@ -57,6 +57,23 @@ enum HashVerifyDecision {
     Reverify,
 }
 
+/// Normalize the algorithm prefix of a content-hash string to lowercase.
+///
+/// Content-hash strings have the form `<algo>:<hex>`.  This function lowercases
+/// the `<algo>` portion only; the `<hex>` portion is left unchanged.  If the
+/// string contains no `:` separator, it is returned as-is (degenerate case).
+///
+/// Examples:
+/// - `"SHA512:abcdef"` → `"sha512:abcdef"`
+/// - `"sha256:AABB"`  → `"sha256:AABB"` (hex unchanged)
+/// - `"nodash"`       → `"nodash"` (no separator, returned as-is)
+fn normalize_hash_prefix(hash: &str) -> String {
+    match hash.split_once(':') {
+        Some((algo, rest)) => format!("{}:{}", algo.to_lowercase(), rest),
+        None => hash.to_string(),
+    }
+}
+
 /// Decide whether to honor a cached verdict based on the content hash pair.
 ///
 /// Implements the decision table from ADR 003 § "Secure default":
@@ -69,19 +86,35 @@ enum HashVerifyDecision {
 /// | None        | Some(b)       | Reverify      |
 /// | None        | None          | Reverify (fail-closed) |
 ///
-/// Additionally, if the cached hash is `sha1:`-prefixed, always returns `Reverify`
-/// regardless of whether the registry hash matches.  SHA-1 is broken for collision
-/// resistance (SHAttered-class attacks); a matching `sha1:` hash cannot be trusted
-/// as a cache gate (REQ-040-01).  This also handles old database rows that were
-/// stored before this policy was introduced.
+/// Additionally, if the cached hash is `sha1:`-prefixed (case-insensitive on the
+/// prefix), always returns `Reverify` regardless of whether the registry hash
+/// matches.  SHA-1 is broken for collision resistance (SHAttered-class attacks);
+/// a matching `sha1:` hash cannot be trusted as a cache gate (REQ-040-01).
+/// This also handles old database rows that were stored before this policy was
+/// introduced.
+///
+/// The algorithm prefix is normalized to lowercase on both sides before
+/// comparison so that `"SHA512:abc"` and `"sha512:abc"` are treated as equal
+/// (REQ-046-01, REQ-046-02).  Empty hash strings are treated as missing and
+/// return `Reverify` (fail-closed).
 fn verify_hash(cached: Option<&str>, registry: Option<&str>) -> HashVerifyDecision {
+    // Fail-closed on empty strings — not a valid hash.
+    if cached.is_some_and(|c| c.is_empty()) || registry.is_some_and(|r| r.is_empty()) {
+        return HashVerifyDecision::Reverify;
+    }
+    // Normalize algorithm prefix to lowercase on both sides.
+    let cached_norm = cached.map(normalize_hash_prefix);
     // SHA-1 hashes are never accepted as a cache trust gate (H-4 security fix).
-    if let Some(c) = cached {
+    // The check is performed on the normalized prefix so that "SHA1:…" is also rejected.
+    if let Some(ref c) = cached_norm {
         if c.starts_with("sha1:") {
             return HashVerifyDecision::Reverify;
         }
     }
-    match (cached, registry) {
+    match (
+        cached_norm.as_deref(),
+        registry.map(normalize_hash_prefix).as_deref(),
+    ) {
         (Some(c), Some(r)) if c == r => HashVerifyDecision::HonorCache,
         _ => HashVerifyDecision::Reverify,
     }
@@ -1126,6 +1159,161 @@ mod tests {
             "T-040-09: matching sha512 hashes should still produce HonorCache (no regression)"
         );
     }
+
+    // ── T-046 unit tests — verify_hash algorithm-prefix case normalization ───
+
+    // T-046-01: Matching sha512 hashes (lowercase on both sides) → HonorCache
+    #[test]
+    fn verify_hash_t046_01_lowercase_both_honor_cache() {
+        // T-046-01
+        let decision = verify_hash(Some("sha512:abcdef"), Some("sha512:abcdef"));
+        assert_eq!(
+            decision,
+            HashVerifyDecision::HonorCache,
+            "T-046-01: matching lowercase sha512 hashes must return HonorCache"
+        );
+    }
+
+    // T-046-02: Cached has uppercase prefix, registry lowercase — HonorCache (primary bug fix)
+    #[test]
+    fn verify_hash_t046_02_uppercase_cached_lowercase_registry_honor_cache() {
+        // T-046-02
+        let decision = verify_hash(Some("SHA512:abcdef"), Some("sha512:abcdef"));
+        assert_eq!(
+            decision,
+            HashVerifyDecision::HonorCache,
+            "T-046-02: SHA512 cached vs sha512 registry must return HonorCache after prefix normalization"
+        );
+    }
+
+    // T-046-03: Cached has lowercase prefix, registry uppercase — HonorCache
+    #[test]
+    fn verify_hash_t046_03_lowercase_cached_uppercase_registry_honor_cache() {
+        // T-046-03
+        let decision = verify_hash(Some("sha512:abcdef"), Some("SHA512:abcdef"));
+        assert_eq!(
+            decision,
+            HashVerifyDecision::HonorCache,
+            "T-046-03: sha512 cached vs SHA512 registry must return HonorCache after prefix normalization"
+        );
+    }
+
+    // T-046-04: Both sides uppercase prefix, same hex — HonorCache
+    #[test]
+    fn verify_hash_t046_04_both_uppercase_prefix_honor_cache() {
+        // T-046-04
+        let decision = verify_hash(Some("SHA512:ABCDEF"), Some("SHA512:ABCDEF"));
+        assert_eq!(
+            decision,
+            HashVerifyDecision::HonorCache,
+            "T-046-04: both uppercase SHA512 prefix with same hex must return HonorCache"
+        );
+    }
+
+    // T-046-05: Same algorithm prefix, different hex — Reverify
+    #[test]
+    fn verify_hash_t046_05_same_prefix_different_hex_reverify() {
+        // T-046-05
+        let decision = verify_hash(Some("sha512:aaa"), Some("sha512:bbb"));
+        assert_eq!(
+            decision,
+            HashVerifyDecision::Reverify,
+            "T-046-05: same prefix but different hex must return Reverify"
+        );
+    }
+
+    // T-046-06: Different algorithms (sha256 vs sha512) — Reverify
+    #[test]
+    fn verify_hash_t046_06_different_algorithms_reverify() {
+        // T-046-06
+        let decision = verify_hash(Some("sha256:abcdef"), Some("sha512:abcdef"));
+        assert_eq!(
+            decision,
+            HashVerifyDecision::Reverify,
+            "T-046-06: sha256 vs sha512 with same hex must return Reverify"
+        );
+    }
+
+    // T-046-07: Mixed-case different algorithms — Reverify
+    #[test]
+    fn verify_hash_t046_07_mixed_case_different_algorithms_reverify() {
+        // T-046-07
+        let decision = verify_hash(Some("SHA256:abcdef"), Some("sha512:abcdef"));
+        assert_eq!(
+            decision,
+            HashVerifyDecision::Reverify,
+            "T-046-07: SHA256 vs sha512 (different algorithms) must return Reverify"
+        );
+    }
+
+    // T-046-08: sha1-prefixed cached hash — Reverify (existing task 040 behavior preserved)
+    #[test]
+    fn verify_hash_t046_08_sha1_cached_matching_reverify() {
+        // T-046-08
+        let decision = verify_hash(Some("sha1:deadbeef"), Some("sha1:deadbeef"));
+        assert_eq!(
+            decision,
+            HashVerifyDecision::Reverify,
+            "T-046-08: sha1 prefix must always Reverify (task 040 behavior preserved)"
+        );
+    }
+
+    // T-046-09: SHA1-uppercase cached hash — Reverify (sha1 rejection is case-insensitive on prefix)
+    #[test]
+    fn verify_hash_t046_09_sha1_uppercase_cached_reverify() {
+        // T-046-09
+        let decision = verify_hash(Some("SHA1:deadbeef"), Some("SHA1:deadbeef"));
+        assert_eq!(
+            decision,
+            HashVerifyDecision::Reverify,
+            "T-046-09: uppercase SHA1 prefix must also Reverify (normalization makes sha1 guard fire)"
+        );
+    }
+
+    // T-046-10: None on both sides — Reverify (fail-closed, unchanged)
+    #[test]
+    fn verify_hash_t046_10_both_none_reverify() {
+        // T-046-10
+        let decision = verify_hash(None, None);
+        assert_eq!(
+            decision,
+            HashVerifyDecision::Reverify,
+            "T-046-10: both None must return Reverify (fail-closed)"
+        );
+    }
+
+    // T-046-11: Hash string with no colon separator — treated as no-prefix, compared as-is
+    #[test]
+    fn verify_hash_t046_11_no_colon_separator_compared_as_is() {
+        // T-046-11: no colon → normalize_hash_prefix returns string unchanged
+        let decision = verify_hash(Some("nodash"), Some("nodash"));
+        assert_eq!(
+            decision,
+            HashVerifyDecision::HonorCache,
+            "T-046-11: hash with no colon separator must compare as-is without panic"
+        );
+    }
+
+    // T-046-12: Empty string hash — Reverify (not a valid hash, fail-closed)
+    #[test]
+    fn verify_hash_t046_12_empty_string_reverify() {
+        // T-046-12
+        let decision = verify_hash(Some(""), Some(""));
+        assert_eq!(
+            decision,
+            HashVerifyDecision::Reverify,
+            "T-046-12: empty string hash must return Reverify (fail-closed)"
+        );
+    }
+
+    // T-046-14 / T-046-15 regression: All task 030 and 040 test cases are covered
+    // by the existing test functions above (verify_hash_matching_hashes_honor_cache,
+    // verify_hash_mismatched_hashes_reverify, verify_hash_legacy_null_cached_reverify,
+    // verify_hash_registry_none_reverify, verify_hash_both_none_reverify_fail_closed,
+    // verify_hash_sha1_cached_matching_returns_reverify,
+    // verify_hash_sha1_cached_sha512_registry_returns_reverify,
+    // verify_hash_sha512_matching_honor_cache_unaffected).
+    // Running cargo test exercises all of them.
 
     // ── T-031 unit tests ─────────────────────────────────────────────────────
 
