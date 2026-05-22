@@ -67,6 +67,7 @@
 | 050 | parse_tlog_entries missing-field diagnostics | 050-tlog-entry-missing-field-diagnostics-test-spec.md | 17/17 | ✅ |
 
 | 051 | Install-script false-positive reduction (L-3 + L-4) | 051-install-script-false-positive-reduction-test-spec.md | 18/18 | ❌ |
+| 052 | Bound Levenshtein matrix on package-name length (L-5) | 052-levenshtein-length-bound-test-spec.md | 13/13 | ❌ |
 
 ## Status key
 
