@@ -5,6 +5,7 @@ pub mod maintainer;
 pub mod npm_provenance;
 pub mod obfuscation;
 pub mod popularity;
+pub mod pypi_provenance;
 pub mod typosquatting;
 pub mod vulnerability;
 

@@ -57,7 +57,7 @@ min_downloads = 0
     f
 }
 
-/// Write a config for PyPI (npm provenance irrelevant).
+/// Write a config for PyPI (npm provenance irrelevant; pypi provenance disabled for this test).
 fn write_pypi_config(pypi_url: &str, cache_path: &str) -> NamedTempFile {
     let mut f = NamedTempFile::new().expect("create temp config");
     writeln!(
@@ -77,6 +77,7 @@ check_typosquatting = false
 check_vulnerabilities = false
 check_obfuscation = false
 check_npm_provenance = true
+check_pypi_provenance = false
 
 [dependency_confusion]
 internal_prefixes = []

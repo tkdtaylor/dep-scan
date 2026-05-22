@@ -190,6 +190,8 @@ mod tests {
             previous_maintainers: None,
             npm_attestations: None,
             npm_attestation_fetch_error: None,
+            pypi_attestation: None,
+            pypi_provenance_fetch_error: None,
             provenance_identity: None,
         }
     }

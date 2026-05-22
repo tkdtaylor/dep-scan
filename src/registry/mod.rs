@@ -3,6 +3,7 @@ pub mod go;
 pub mod npm;
 pub mod npm_attestation;
 pub mod pypi;
+pub mod pypi_provenance;
 
 use std::fmt;
 use std::str::FromStr;

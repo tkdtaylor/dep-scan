@@ -106,6 +106,16 @@ pub struct PolicyConfig {
     /// `Warn` to `Block`. Invalid attestations always block regardless.
     #[serde(default = "default_false")]
     pub require_npm_provenance: bool,
+    /// Check PyPI packages for PEP 740 sigstore provenance attestations (task 033).
+    ///
+    /// When `true`, the policy queries the PEP 691 Simple Index and verifies
+    /// any PEP 740 attestation bundles found there.
+    #[serde(default = "default_true")]
+    pub check_pypi_provenance: bool,
+    /// When `true`, a missing PyPI provenance attestation escalates from
+    /// `Warn` to `Block`. Invalid attestations always block regardless.
+    #[serde(default = "default_false")]
+    pub require_pypi_provenance: bool,
 }
 
 fn default_true() -> bool {
@@ -127,6 +137,8 @@ impl Default for PolicyConfig {
             check_obfuscation: true,
             check_npm_provenance: true,
             require_npm_provenance: false,
+            check_pypi_provenance: true,
+            require_pypi_provenance: false,
         }
     }
 }

@@ -42,21 +42,21 @@ require_pypi_provenance = false          # default: warn on missing; true ⇒ bl
 
 ## Acceptance criteria
 
-- [ ] `src/policy/pypi_provenance.rs`: `PyPiProvenancePolicy` implementing `Policy`
-- [ ] PyPI client gains `get_provenance(name, version, filename) -> Result<Option<AttestationBundle>>`
-- [ ] PyPI client switches its Simple Index fetch to `Accept: application/vnd.pypi.simple.v1+json` so the `provenance` field is available
-- [ ] The file selection rule mirrors task 029 exactly (sdist preferred, else first wheel)
-- [ ] sigstore verification reuses the helper introduced in task 032 — no duplicate verification code
-- [ ] Subject digest comparison uses `sha256` (PyPI), not `sha512` (npm) — distinct from task 032's path
-- [ ] Missing attestation ⇒ `Warn` by default; `Block` when `require_pypi_provenance = true`
-- [ ] Invalid attestation ⇒ `Block` unconditionally — no config silences this
-- [ ] Valid attestation ⇒ `Pass`, OIDC subject persisted to `scanned_packages.provenance_identity`
-- [ ] Policy is wired into the pipeline in `main.rs` behind `config.policies.check_pypi_provenance` (default true)
-- [ ] Network failure during provenance fetch surfaces as a scan error, not a silent skip
-- [ ] Unit tests use sigstore bundle fixtures parallel to task 032 (valid, tampered, mismatched subject)
-- [ ] Integration test against wiremock: full PyPI scan flow with the provenance URL mocked for the three cases above
-- [ ] Only PyPI is in scope; npm and Go paths unchanged
-- [ ] All tests pass, `cargo clippy` clean, `cargo fmt --check` clean
+- [x] `src/policy/pypi_provenance.rs`: `PyPiProvenancePolicy` implementing `Policy`
+- [x] PyPI client gains `get_provenance(name, version, filename) -> Result<Option<AttestationBundle>>` (in `src/registry/pypi_provenance.rs`)
+- [x] PyPI client switches its Simple Index fetch to `Accept: application/vnd.pypi.simple.v1+json` so the `provenance` field is available
+- [x] The file selection rule mirrors task 029 exactly (sdist preferred, else first wheel)
+- [x] sigstore verification reuses the helper introduced in task 032 — no duplicate verification code
+- [x] Subject digest comparison uses `sha256` (PyPI), not `sha512` (npm) — distinct from task 032's path
+- [x] Missing attestation ⇒ `Warn` by default; `Block` when `require_pypi_provenance = true`
+- [x] Invalid attestation ⇒ `Block` unconditionally — no config silences this
+- [x] Valid attestation ⇒ `Pass`, OIDC subject persisted to `scanned_packages.provenance_identity`
+- [x] Policy is wired into the pipeline in `main.rs` behind `config.policies.check_pypi_provenance` (default true)
+- [x] Network failure during provenance fetch surfaces as a scan error, not a silent skip
+- [x] Unit tests use sigstore bundle fixtures parallel to task 032 (valid, tampered, mismatched subject)
+- [x] Integration test against wiremock: full PyPI scan flow with the provenance URL mocked for the three cases above
+- [x] Only PyPI is in scope; npm and Go paths unchanged
+- [x] All tests pass, `cargo clippy` clean, `cargo fmt --check` clean
 
 ## Out of scope
 

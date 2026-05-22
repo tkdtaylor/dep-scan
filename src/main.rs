@@ -28,6 +28,7 @@ use policy::maintainer::MaintainerChangePolicy;
 use policy::npm_provenance::{NpmProvenancePolicy, extract_provenance_identity};
 use policy::obfuscation::ObfuscationPolicy;
 use policy::popularity::PopularityPolicy;
+use policy::pypi_provenance::{PyPiProvenancePolicy, extract_pypi_provenance_identity};
 use policy::typosquatting::TyposquattingPolicy;
 use policy::vulnerability::VulnerabilityPolicy;
 use policy::{Policy, PolicyDetail, aggregate_results};
@@ -36,6 +37,7 @@ use registry::go::GoRegistry;
 use registry::npm::NpmRegistry;
 use registry::npm_attestation::NpmAttestationClient;
 use registry::pypi::PyPiRegistry;
+use registry::pypi_provenance::PyPiProvenanceClient;
 use registry::{Registry, RegistryType};
 use sigstore_verify::RealSigstoreVerifier;
 use types::ScanContext;
@@ -242,6 +244,16 @@ async fn run_check(
         )));
     }
 
+    // PyPI provenance attestation check (PyPI only; wired per-package in the scan loop).
+    // Non-PyPI packages get pypi_attestation = None, so the policy returns Pass for them.
+    if config.policies.check_pypi_provenance {
+        use std::sync::Arc;
+        policies.push(Box::new(PyPiProvenancePolicy::new(
+            config.policies.require_pypi_provenance,
+            Arc::new(RealSigstoreVerifier),
+        )));
+    }
+
     // Create OSV client for vulnerability lookups
     let osv_client = if config.policies.check_vulnerabilities {
         Some(OsvClient::new(config.osv.osv_url.clone()))
@@ -394,12 +406,48 @@ async fn run_check(
                 (None, None)
             };
 
+        // Fetch PyPI PEP 740 provenance attestation (PyPI only).
+        // Uses the PEP 691 Simple Index to discover the provenance URL for the
+        // selected file (sdist preferred, else first wheel — same rule as task 029).
+        // A missing provenance URL → Ok(None) → "no attestation" Warn path.
+        // A server error → surfaced as Block (fail-closed).
+        let (pypi_attestation, pypi_provenance_fetch_error) =
+            if config.policies.check_pypi_provenance && reg_type == RegistryType::PyPI {
+                let prov_client = PyPiProvenanceClient::new(config.registries.pypi_url.clone());
+                // Identify the selected file using the Simple Index.
+                match prov_client.fetch_simple_index(&metadata.name).await {
+                    Ok(Some(files)) => {
+                        // Select the file using the same rule as task 029.
+                        match registry::pypi_provenance::PyPiProvenanceClient::select_file(&files) {
+                            Some(selected_file) => {
+                                match selected_file.provenance_url.as_deref() {
+                                    None => (Some(None), None), // no provenance URL for this file
+                                    Some(url) => {
+                                        match prov_client.fetch_provenance_url(url).await {
+                                            Ok(bundle) => (Some(bundle), None),
+                                            Err(e) => (Some(None), Some(e.to_string())),
+                                        }
+                                    }
+                                }
+                            }
+                            None => (Some(None), None), // no suitable file found
+                        }
+                    }
+                    Ok(None) => (Some(None), None), // legacy mirror — degrade to Warn
+                    Err(e) => (Some(None), Some(e.to_string())), // fail-closed
+                }
+            } else {
+                (None, None)
+            };
+
         // Build scan context and enrich
         let mut ctx = ScanContext::from_metadata(metadata.clone());
         ctx.install_scripts = install_scripts;
         ctx.previous_maintainers = previous_maintainers;
         ctx.npm_attestations = npm_attestations;
         ctx.npm_attestation_fetch_error = npm_attestation_fetch_error;
+        ctx.pypi_attestation = pypi_attestation;
+        ctx.pypi_provenance_fetch_error = pypi_provenance_fetch_error;
 
         // Query OSV for known vulnerabilities
         if let Some(ref osv) = osv_client {
@@ -444,6 +492,19 @@ async fn run_check(
         {
             ctx.provenance_identity =
                 extract_provenance_identity(bundles, algo, hex, &RealSigstoreVerifier);
+        }
+
+        // Extract and persist the provenance identity for PyPI packages that passed
+        // PEP 740 attestation verification (task 033).
+        if config.policies.check_pypi_provenance
+            && reg_type == RegistryType::PyPI
+            && result_str == "pass"
+            && let Some(Some(bundle)) = &ctx.pypi_attestation
+            && let Some(hash) = &metadata.content_hash
+            && let Some((algo, hex)) = hash.split_once(':')
+        {
+            ctx.provenance_identity =
+                extract_pypi_provenance_identity(bundle, algo, hex, &RealSigstoreVerifier);
         }
 
         // Record current maintainers in cache for future comparisons

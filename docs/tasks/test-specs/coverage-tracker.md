@@ -43,7 +43,7 @@
 | 030 | Verify content hash on cache hit | 030-content-hash-verify-test-spec.md | 13/13 | ✅ |
 | 031 | Pip --require-hashes passthrough | 031-pip-require-hashes-passthrough-test-spec.md | 13/13 | ✅ |
 | 032 | npm provenance attestation verification | 032-npm-provenance-verification-test-spec.md | 21/21 | ✅ |
-| 033 | PyPI sigstore attestation verification (PEP 740) | 033-pypi-provenance-verification-test-spec.md | 0/22 | ❌ |
+| 033 | PyPI sigstore attestation verification (PEP 740) | 033-pypi-provenance-verification-test-spec.md | 22/22 | ✅ |
 | 034 | Go checksum database cross-check | 034-go-sumdb-cross-check-test-spec.md | 0/24 | ❌ |
 
 ## Status key

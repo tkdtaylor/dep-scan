@@ -53,7 +53,19 @@ pub struct ScanContext {
     /// When set, the provenance policy must surface this as an error rather
     /// than silently treating it as "no attestations".
     pub npm_attestation_fetch_error: Option<String>,
-    /// Verified Fulcio OIDC subject identity from a valid npm provenance
+    /// Pre-fetched PyPI provenance attestation bundle (task 033 — PEP 740).
+    ///
+    /// `None` means the provenance URL was not queried (e.g. non-PyPI package
+    /// or the pypi_provenance policy is disabled).
+    /// `Some(None)` means no provenance attestation was published for this file.
+    /// `Some(Some(bundle))` contains the parsed attestation bundle.
+    pub pypi_attestation: Option<Option<crate::registry::npm_attestation::AttestationBundle>>,
+    /// Network or parse error that occurred while fetching the PyPI provenance
+    /// attestation, if any.
+    ///
+    /// When set, the provenance policy must surface this as a Block (fail-closed).
+    pub pypi_provenance_fetch_error: Option<String>,
+    /// Verified Fulcio OIDC subject identity from a valid npm or PyPI provenance
     /// attestation, populated by `main.rs` after policy evaluation for
     /// persisting to `scanned_packages.provenance_identity`.
     pub provenance_identity: Option<String>,
@@ -69,6 +81,8 @@ impl ScanContext {
             previous_maintainers: None,
             npm_attestations: None,
             npm_attestation_fetch_error: None,
+            pypi_attestation: None,
+            pypi_provenance_fetch_error: None,
             provenance_identity: None,
         }
     }
@@ -264,6 +278,8 @@ mod tests {
             previous_maintainers: Some(vec!["old-maintainer".to_string()]),
             npm_attestations: None,
             npm_attestation_fetch_error: None,
+            pypi_attestation: None,
+            pypi_provenance_fetch_error: None,
             provenance_identity: None,
         };
 
