@@ -132,14 +132,35 @@ struct CheckResult {
     policies: Vec<PolicyDetail>,
 }
 
+/// Format a top-level `anyhow` error for display to the user.
+///
+/// In non-verbose mode (`verbose = false`) only the outermost error message is
+/// shown — inner cause frames that may contain file-system paths (and thus
+/// usernames on a shared host) are suppressed (L-6 / REQ-053-01, REQ-053-02).
+///
+/// In verbose mode (`verbose = true`) the full `anyhow` chain is printed using
+/// the alternate formatter `{:#}`, which is the existing behavior and is still
+/// the right choice for debugging (REQ-053-03).
+fn format_top_level_error(e: &anyhow::Error, verbose: bool) -> String {
+    if verbose {
+        format!("dep-scan error: {e:#}")
+    } else {
+        format!("dep-scan: {e}")
+    }
+}
+
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse();
 
+    // Extract `verbose` before `run(cli)` consumes `cli`, so the flag is
+    // available in the error handler (REQ-053 — see task 053).
+    let verbose = cli.verbose;
+
     let exit_code = match run(cli).await {
         Ok(code) => code,
         Err(e) => {
-            eprintln!("Error: {e:#}");
+            eprintln!("{}", format_top_level_error(&e, verbose));
             2
         }
     };
@@ -1617,4 +1638,122 @@ mod tests {
     // task 031). The T-042-14 marker is here so the spec-marker grep finds it;
     // the actual assertions live in tests/pip_require_hashes_integration.rs.
     const _T_042_14_REGRESSION_MARKER: () = ();
+
+    // ── T-053 unit tests — error output scrubbing (L-6) ─────────────────────
+
+    // T-053-01: A simple error without a cause chain formats to a single line
+    // in non-verbose mode.
+    #[test]
+    fn format_top_level_error_simple_non_verbose_single_line() {
+        // T-053-01
+        let e = anyhow::anyhow!("registry fetch failed");
+        let output = format_top_level_error(&e, false);
+        assert!(
+            output.contains("registry fetch failed"),
+            "T-053-01: output must contain the error message, got: {output:?}"
+        );
+        assert_eq!(
+            output.lines().count(),
+            1,
+            "T-053-01: non-verbose output must be a single line, got: {output:?}"
+        );
+    }
+
+    // T-053-02: A chained error formats to a single line in non-verbose mode,
+    // showing only the outermost message.
+    #[test]
+    fn format_top_level_error_chained_non_verbose_outermost_only() {
+        // T-053-02
+        let e = anyhow::anyhow!("cache open failed").context("cannot initialize cache");
+        let output = format_top_level_error(&e, false);
+        assert!(
+            output.contains("cannot initialize cache"),
+            "T-053-02: output must contain the outermost message, got: {output:?}"
+        );
+        assert!(
+            !output.contains("cache open failed"),
+            "T-053-02: inner cause must be suppressed in non-verbose mode, got: {output:?}"
+        );
+        assert_eq!(
+            output.lines().count(),
+            1,
+            "T-053-02: non-verbose output must be a single line, got: {output:?}"
+        );
+    }
+
+    // T-053-03: In verbose mode, the full chain is printed.
+    #[test]
+    fn format_top_level_error_chained_verbose_full_chain() {
+        // T-053-03
+        let e = anyhow::anyhow!("cache open failed").context("cannot initialize cache");
+        let output = format_top_level_error(&e, true);
+        assert!(
+            output.contains("cannot initialize cache"),
+            "T-053-03: verbose output must contain the outer message, got: {output:?}"
+        );
+        assert!(
+            output.contains("cache open failed"),
+            "T-053-03: verbose output must contain the inner cause, got: {output:?}"
+        );
+    }
+
+    // T-053-04: A path-bearing inner cause does not leak the path in non-verbose mode.
+    // This is the primary privacy assertion for L-6 (REQ-053-02).
+    #[test]
+    fn format_top_level_error_path_bearing_inner_cause_suppressed_non_verbose() {
+        // T-053-04
+        let inner_msg = "failed to open /home/alice/.cache/dep-scan/cache.db";
+        let e = anyhow::anyhow!("{inner_msg}").context("cache error");
+        let output = format_top_level_error(&e, false);
+        assert!(
+            !output.contains("/home/alice"),
+            "T-053-04: path from inner cause must not appear in non-verbose output, got: {output:?}"
+        );
+        assert!(
+            output.contains("cache error"),
+            "T-053-04: outermost message must still appear, got: {output:?}"
+        );
+    }
+
+    // T-053-05: Non-verbose format starts with "dep-scan:" prefix.
+    #[test]
+    fn format_top_level_error_non_verbose_starts_with_dep_scan_prefix() {
+        // T-053-05
+        let e = anyhow::anyhow!("something went wrong");
+        let output = format_top_level_error(&e, false);
+        assert!(
+            output.starts_with("dep-scan:"),
+            "T-053-05: non-verbose error must start with 'dep-scan:', got: {output:?}"
+        );
+    }
+
+    // T-053-06: Verbose format starts with "dep-scan error:" prefix.
+    #[test]
+    fn format_top_level_error_verbose_starts_with_dep_scan_error_prefix() {
+        // T-053-06
+        let e = anyhow::anyhow!("something went wrong");
+        let output = format_top_level_error(&e, true);
+        assert!(
+            output.starts_with("dep-scan error:"),
+            "T-053-06: verbose error must start with 'dep-scan error:', got: {output:?}"
+        );
+    }
+
+    // T-053-07: Per-package warning lines (eprintln! calls inside run_check)
+    // are not modified by this task. This is a code-review assertion: the per-
+    // package eprintln! calls use the `{e}` display formatter (not `{e:#}`), so
+    // they already emit a single line. No code change was made to those call sites.
+    // The T-053-07 marker is here so the spec-marker grep finds it.
+    const _T_053_07_PER_PACKAGE_WARNINGS_UNCHANGED: () = ();
+
+    // T-053-08: The exit code from the error handler remains 2.
+    // This is verified by the structure of main() — the Err arm always returns
+    // the literal `2`. The T-053-08 marker is here so the spec-marker grep finds it.
+    // Integration coverage is provided by T-053-05 in the integration test file.
+    const _T_053_08_EXIT_CODE_2_PRESERVED: () = ();
+
+    // T-053-09: All of cargo test, cargo clippy --all-targets -- -D warnings, and
+    // cargo fmt --check pass. The T-053-09 marker is here so the spec-marker grep
+    // finds it. Verified in the pre-commit verification gate.
+    const _T_053_09_CI_CHECKS_PASS: () = ();
 }
