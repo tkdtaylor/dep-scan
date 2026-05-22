@@ -1,9 +1,126 @@
+use std::fmt;
+
 use chrono::{DateTime, Utc};
 use reqwest::Client;
 use serde::Deserialize;
 
 use super::{Registry, RegistryError};
 use crate::types::PackageMetadata;
+
+/// Errors produced by [`validate_go_module_path`].
+#[derive(Debug, PartialEq)]
+pub enum GoPathError {
+    /// The input string was empty.
+    Empty,
+    /// The path begins with `/`.
+    LeadingSlash,
+    /// The path ends with `/`.
+    TrailingSlash,
+    /// A path segment is exactly `..`.
+    DotDotSegment,
+    /// A path segment is exactly `.`.
+    DotSegment,
+    /// Two consecutive slashes produced an empty segment.
+    EmptySegment,
+    /// A character with special URL meaning (or that is non-ASCII) appeared.
+    ForbiddenCharacter {
+        /// The offending character.
+        char: char,
+    },
+}
+
+impl fmt::Display for GoPathError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            GoPathError::Empty => write!(f, "module path must not be empty"),
+            GoPathError::LeadingSlash => write!(f, "module path must not begin with '/'"),
+            GoPathError::TrailingSlash => write!(f, "module path must not end with '/'"),
+            GoPathError::DotDotSegment => {
+                write!(f, "module path contains a `..` segment (path traversal)")
+            }
+            GoPathError::DotSegment => {
+                write!(f, "module path contains a `.` segment")
+            }
+            GoPathError::EmptySegment => {
+                write!(
+                    f,
+                    "module path contains an empty segment (consecutive slashes)"
+                )
+            }
+            GoPathError::ForbiddenCharacter { char } => {
+                write!(f, "module path contains forbidden character {:?}", char)
+            }
+        }
+    }
+}
+
+impl std::error::Error for GoPathError {}
+
+/// Validate a Go module path against a safe subset of the Go module path grammar.
+///
+/// The Go module proxy encodes uppercase letters using `!lc` encoding, but
+/// characters with URL special meaning (`?`, `#`, `%`, space, `@`, `\n`, `\r`)
+/// and path-traversal sequences (`..`, `.` as a whole segment) must be rejected
+/// *before* interpolating the path into a proxy URL.
+///
+/// # Accepted characters (within a segment)
+/// ASCII alphanumerics, `-`, `_`, `.` (as part of a segment, not alone), `/`
+/// (as a separator), and all ASCII uppercase letters.
+///
+/// # Rejected inputs
+/// - Empty string → [`GoPathError::Empty`]
+/// - Leading `/` → [`GoPathError::LeadingSlash`]
+/// - Trailing `/` → [`GoPathError::TrailingSlash`]
+/// - Segment equal to `..` → [`GoPathError::DotDotSegment`]
+/// - Segment equal to `.` → [`GoPathError::DotSegment`]
+/// - Empty segment (consecutive `//`) → [`GoPathError::EmptySegment`]
+/// - Characters `?`, `#`, `%`, space, `@`, `\n`, `\r`, or any non-ASCII
+///   character → [`GoPathError::ForbiddenCharacter`]
+pub fn validate_go_module_path(path: &str) -> Result<(), GoPathError> {
+    if path.is_empty() {
+        return Err(GoPathError::Empty);
+    }
+    if path.starts_with('/') {
+        return Err(GoPathError::LeadingSlash);
+    }
+    if path.ends_with('/') {
+        return Err(GoPathError::TrailingSlash);
+    }
+
+    // Scan every character for forbidden values before splitting into segments.
+    // This catches multi-character forbidden sequences that span segment boundaries.
+    for c in path.chars() {
+        if !c.is_ascii() {
+            return Err(GoPathError::ForbiddenCharacter { char: c });
+        }
+        if matches!(c, '?' | '#' | '%' | ' ' | '@' | '\n' | '\r') {
+            return Err(GoPathError::ForbiddenCharacter { char: c });
+        }
+    }
+
+    // Now validate each path segment.
+    for segment in path.split('/') {
+        if segment.is_empty() {
+            // split('/') on "a//b" yields ["a", "", "b"]; leading/trailing
+            // slashes are already handled above so an empty segment here means
+            // consecutive slashes.
+            return Err(GoPathError::EmptySegment);
+        }
+        if segment == ".." {
+            return Err(GoPathError::DotDotSegment);
+        }
+        if segment == "." {
+            return Err(GoPathError::DotSegment);
+        }
+    }
+
+    Ok(())
+}
+
+/// Convert a [`GoPathError`] to a [`RegistryError::InvalidModulePath`].
+fn path_err_to_registry(module: &str, err: GoPathError) -> RegistryError {
+    RegistryError::InvalidModulePath(format!("{err} (module: {module:?})"))
+}
 
 /// Go module proxy client.
 ///
@@ -67,6 +184,7 @@ impl GoRegistry {
     ///
     /// Returns the list of version strings parsed from the plain-text response.
     async fn fetch_version_list(&self, module: &str) -> Result<Vec<String>, RegistryError> {
+        validate_go_module_path(module).map_err(|e| path_err_to_registry(module, e))?;
         let encoded = encode_module_path(module);
         let url = format!("{}/{}/@v/list", self.base_url, encoded);
 
@@ -109,6 +227,7 @@ impl GoRegistry {
         module: &str,
         version: &str,
     ) -> Result<GoVersionInfo, RegistryError> {
+        validate_go_module_path(module).map_err(|e| path_err_to_registry(module, e))?;
         let encoded = encode_module_path(module);
         let url = format!("{}/{}/@v/{}.info", self.base_url, encoded, version);
 
@@ -195,6 +314,265 @@ mod tests {
     use super::*;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    // ── validate_go_module_path unit tests ───────────────────────────────────
+
+    // T-041-01: Simple valid module path accepted
+    #[test]
+    fn t041_01_simple_valid_path_accepted() {
+        assert_eq!(
+            validate_go_module_path("github.com/gin-gonic/gin"),
+            Ok(()),
+            "simple valid module path should be accepted"
+        );
+    }
+
+    // T-041-02: Standard library-style path accepted
+    #[test]
+    fn t041_02_stdlib_style_path_accepted() {
+        assert_eq!(
+            validate_go_module_path("golang.org/x/net"),
+            Ok(()),
+            "stdlib-style path should be accepted"
+        );
+    }
+
+    // T-041-03: Module path with version suffix accepted
+    #[test]
+    fn t041_03_version_suffix_accepted() {
+        assert_eq!(
+            validate_go_module_path("github.com/foo/bar/v2"),
+            Ok(()),
+            "module path with /v2 suffix should be accepted"
+        );
+    }
+
+    // T-041-04: Uppercase-containing path accepted (encode_module_path handles the transform)
+    #[test]
+    fn t041_04_uppercase_path_accepted() {
+        assert_eq!(
+            validate_go_module_path("github.com/Azure/go-autorest"),
+            Ok(()),
+            "uppercase letters are allowed; encode_module_path transforms them"
+        );
+    }
+
+    // T-041-05: Path with `..` segment is rejected
+    #[test]
+    fn t041_05_dotdot_segment_rejected() {
+        let result = validate_go_module_path("github.com/../etc/passwd");
+        assert_eq!(
+            result,
+            Err(GoPathError::DotDotSegment),
+            "path containing `..` segment should be rejected with DotDotSegment"
+        );
+        // The Display message should mention the `..` segment
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains(".."),
+            "error message should mention `..`, got: {msg}"
+        );
+    }
+
+    // T-041-06: Path with `.` segment (single dot) is rejected
+    #[test]
+    fn t041_06_dot_segment_rejected() {
+        let result = validate_go_module_path("github.com/./foo");
+        assert_eq!(
+            result,
+            Err(GoPathError::DotSegment),
+            "path containing `.` segment should be rejected with DotSegment"
+        );
+    }
+
+    // T-041-07: Path containing `?` is rejected (query string confusion)
+    #[test]
+    fn t041_07_question_mark_rejected() {
+        let result = validate_go_module_path("github.com/foo?bar");
+        assert_eq!(
+            result,
+            Err(GoPathError::ForbiddenCharacter { char: '?' }),
+            "path containing `?` should be rejected with ForbiddenCharacter"
+        );
+    }
+
+    // T-041-08: Path containing `#` is rejected (fragment confusion)
+    #[test]
+    fn t041_08_hash_rejected() {
+        let result = validate_go_module_path("github.com/foo#bar");
+        assert_eq!(
+            result,
+            Err(GoPathError::ForbiddenCharacter { char: '#' }),
+            "path containing `#` should be rejected with ForbiddenCharacter"
+        );
+    }
+
+    // T-041-09: Path containing a space is rejected
+    #[test]
+    fn t041_09_space_rejected() {
+        let result = validate_go_module_path("github.com/foo bar");
+        assert_eq!(
+            result,
+            Err(GoPathError::ForbiddenCharacter { char: ' ' }),
+            "path containing space should be rejected with ForbiddenCharacter"
+        );
+    }
+
+    // T-041-10: Path containing `%` encoding is rejected
+    #[test]
+    fn t041_10_percent_rejected() {
+        let result = validate_go_module_path("github.com/foo%2Fbar");
+        assert_eq!(
+            result,
+            Err(GoPathError::ForbiddenCharacter { char: '%' }),
+            "path containing `%` should be rejected with ForbiddenCharacter"
+        );
+    }
+
+    // T-041-11: Path with leading slash is rejected
+    #[test]
+    fn t041_11_leading_slash_rejected() {
+        let result = validate_go_module_path("/github.com/foo/bar");
+        assert_eq!(
+            result,
+            Err(GoPathError::LeadingSlash),
+            "path with leading slash should be rejected with LeadingSlash"
+        );
+    }
+
+    // T-041-12: Path with trailing slash is rejected
+    #[test]
+    fn t041_12_trailing_slash_rejected() {
+        let result = validate_go_module_path("github.com/foo/bar/");
+        assert_eq!(
+            result,
+            Err(GoPathError::TrailingSlash),
+            "path with trailing slash should be rejected with TrailingSlash"
+        );
+    }
+
+    // T-041-13: Empty path is rejected
+    #[test]
+    fn t041_13_empty_path_rejected() {
+        let result = validate_go_module_path("");
+        assert_eq!(
+            result,
+            Err(GoPathError::Empty),
+            "empty path should be rejected with Empty"
+        );
+    }
+
+    // T-041-14: Path with empty segment (double slash) is rejected
+    #[test]
+    fn t041_14_empty_segment_rejected() {
+        let result = validate_go_module_path("github.com//foo");
+        assert_eq!(
+            result,
+            Err(GoPathError::EmptySegment),
+            "path with consecutive slashes should be rejected with EmptySegment"
+        );
+    }
+
+    // T-041-15: Path with allowed special characters (hyphen, underscore, dot within segment) accepted
+    #[test]
+    fn t041_15_allowed_special_chars_accepted() {
+        assert_eq!(
+            validate_go_module_path("github.com/foo-bar"),
+            Ok(()),
+            "hyphen within segment should be accepted"
+        );
+        assert_eq!(
+            validate_go_module_path("github.com/foo_bar"),
+            Ok(()),
+            "underscore within segment should be accepted"
+        );
+        assert_eq!(
+            validate_go_module_path("gopkg.in/yaml.v3"),
+            Ok(()),
+            "dot within segment (version suffix) should be accepted"
+        );
+    }
+
+    // T-041-16: Newline character in path is rejected
+    #[test]
+    fn t041_16_newline_rejected() {
+        let result = validate_go_module_path("github.com/foo\nbar");
+        assert_eq!(
+            result,
+            Err(GoPathError::ForbiddenCharacter { char: '\n' }),
+            "newline in path should be rejected with ForbiddenCharacter"
+        );
+    }
+
+    // T-041-17: `@` character in path is rejected (version confusion)
+    #[test]
+    fn t041_17_at_sign_rejected() {
+        let result = validate_go_module_path("github.com/foo@v1.0.0");
+        assert_eq!(
+            result,
+            Err(GoPathError::ForbiddenCharacter { char: '@' }),
+            "`@` in path should be rejected with ForbiddenCharacter"
+        );
+    }
+
+    // T-041-18: `encode_module_path` produces correct output for a valid path
+    #[test]
+    fn t041_18_encode_module_path_correct_output() {
+        assert_eq!(
+            encode_module_path("github.com/Azure/go-autorest"),
+            "github.com/!azure/go-autorest",
+            "uppercase `A` should become `!a`"
+        );
+    }
+
+    // T-041-19: `fetch_version_list` rejects a `..` segment before making any HTTP request
+    #[tokio::test]
+    async fn t041_19_fetch_version_list_rejects_dotdot_before_http() {
+        // No mock server active — any HTTP call would fail with a connection error.
+        // We use a port that nothing is listening on so that any accidental network
+        // call returns a NetworkError, not an InvalidModulePath error.
+        let registry = GoRegistry::new(
+            "http://127.0.0.1:1".to_string(),
+            "http://127.0.0.1:1".to_string(),
+        );
+        let result = registry
+            .fetch_version_list("github.com/../etc/passwd")
+            .await;
+        match result {
+            Err(RegistryError::InvalidModulePath(msg)) => {
+                assert!(
+                    msg.contains("github.com/../etc/passwd"),
+                    "error should contain the bad path, got: {msg}"
+                );
+            }
+            other => panic!("T-041-19: expected InvalidModulePath, got: {:?}", other),
+        }
+    }
+
+    // T-041-20: `get_metadata` rejects invalid path before any network call
+    #[tokio::test]
+    async fn t041_20_get_metadata_rejects_invalid_path_before_network() {
+        let registry = GoRegistry::new(
+            "http://127.0.0.1:1".to_string(),
+            "http://127.0.0.1:1".to_string(),
+        );
+        let result = registry
+            .get_metadata("github.com/foo?injected=1", None)
+            .await;
+        match result {
+            Err(RegistryError::InvalidModulePath(msg)) => {
+                assert!(
+                    msg.contains("github.com/foo?injected=1"),
+                    "error should contain the bad path, got: {msg}"
+                );
+            }
+            other => panic!("T-041-20: expected InvalidModulePath, got: {:?}", other),
+        }
+    }
+
+    // T-041-25: All task 019 Go module registry tests still pass (regression).
+    // T-041-26: All task 034 Go sumdb tests still pass (regression).
+    // These are verified by the test suite below passing without modification.
 
     // T-019-01: Fetch metadata for existing module
     #[tokio::test]

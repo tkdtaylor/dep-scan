@@ -83,6 +83,14 @@ pub enum RegistryError {
     /// as a verification failure — emit a warning or block depending on policy.
     #[error("invalid provenance URL: {0}")]
     InvalidProvenanceUrl(String),
+
+    /// A Go module path failed validation before URL composition.
+    ///
+    /// The contained string is a human-readable description of the violation
+    /// (e.g. "`..` segment in path", "forbidden character '?'").  Callers should
+    /// treat this as user input error — exit code 2 at the CLI layer.
+    #[error("invalid Go module path: {0}")]
+    InvalidModulePath(String),
 }
 
 /// Trait for querying package metadata from a registry.

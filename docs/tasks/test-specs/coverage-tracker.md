@@ -51,7 +51,7 @@
 | 038 | Use resolved version as cache key instead of "latest" | 038-cache-resolved-version-key-test-spec.md | 13/13 | ✅ |
 | 039 | PyPI provenance URL SSRF hardening | 039-pypi-provenance-url-ssrf-test-spec.md | 17/17 | ✅ |
 | 040 | Reject SHA-1 content hashes as cache trust gates for npm | 040-npm-sha1-cache-bypass-test-spec.md | 14/14 | ❌ |
-| 041 | Go module path validation before URL composition | 041-go-module-path-validation-test-spec.md | 26/26 | ❌ |
+| 041 | Go module path validation before URL composition | 041-go-module-path-validation-test-spec.md | 26/26 | ✅ |
 | 042 | Harden TempReqFile against predictable filename / symlink attack | 042-temp-file-symlink-hardening-test-spec.md | 14/14 | ❌ |
 
 ## Status key

@@ -187,6 +187,18 @@ async fn run_check(
         return Ok(2);
     }
 
+    // For Go modules, additionally validate each path against the Go module
+    // path grammar (H-5 security finding).  Characters like `?`, `#`, `..`,
+    // and spaces must be rejected before they are interpolated into proxy URLs.
+    if early_reg_type == RegistryType::Go {
+        for pkg in &packages {
+            if let Err(e) = registry::go::validate_go_module_path(pkg) {
+                eprintln!("dep-scan: invalid Go module path {pkg:?}: {e}");
+                return Ok(2);
+            }
+        }
+    }
+
     // Parse lockfile if provided
     let mut all_packages = packages;
     let mut lockfile_registry = None;
