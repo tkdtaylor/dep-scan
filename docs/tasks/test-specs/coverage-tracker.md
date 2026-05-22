@@ -71,6 +71,7 @@
 | 053 | Scrub user-visible error output (L-6) | 053-error-output-scrubbing-test-spec.md | 9/9 | ❌ |
 | 054 | Cache DB privacy hardening (L-7) | 054-cache-db-privacy-hardening-test-spec.md | 13/13 | ❌ |
 | 055 | Sigstore re-verification on install path (L-9) | 055-sigstore-install-path-audit-test-spec.md | 11/11 | ❌ |
+| 056 | Bump reqwest 0.12 → 0.13 | 056-bump-reqwest-0-13-test-spec.md | 12/12 | ❌ |
 
 ## Status key
 
