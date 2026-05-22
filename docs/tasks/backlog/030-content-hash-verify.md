@@ -15,24 +15,33 @@ In `run_check`'s cache-hit branch ([src/main.rs:218-240](../../../src/main.rs#L2
 
 1. Fetch package metadata from the registry (same call we'd make on a cache miss).
 2. Compare `metadata.content_hash` against `cache_entry.content_hash`.
-3. **Match** ⇒ return the cached verdict as today.
-4. **Mismatch** ⇒ `cache.invalidate(name, "latest", registry)`, log a clear message (`"cache hash mismatch for <pkg>; re-scanning"`), and fall through to the full scan pipeline.
-5. **Cached hash is NULL** (legacy row from before task 029) ⇒ treat as mismatch: invalidate and re-scan. This upgrades pre-029 cache rows organically.
-6. **Registry-fetched hash is None but cached is Some** ⇒ treat as mismatch (registry stopped publishing a digest is itself suspicious).
-7. **Both None** ⇒ honor the cached verdict (best-effort — nothing to verify against; logged at verbose level).
-8. **Registry fetch fails during verification** ⇒ fall through to the full scan path (which will surface the error consistently with the no-cache flow).
 
-`--force` on `install` continues to bypass *verdicts* but not the verification step itself — a hash mismatch always triggers a re-scan; the user can then `--force` past the resulting verdict if they choose.
+**Verification is always on, fail-closed, no opt-out.** The decision table (verbatim from [ADR 003](../../architecture/decisions/003-content-hash-cache-integrity.md)):
+
+| Cached hash | Registry hash | Action |
+|-------------|---------------|--------|
+| `Some(a)`   | `Some(a)`     | Honor cache |
+| `Some(a)`   | `Some(b)`     | Invalidate row, re-scan |
+| `Some(a)`   | `None`        | Invalidate row, re-scan |
+| `None`      | `Some(b)`     | Invalidate row, re-scan (legacy pre-029 row upgrades in place) |
+| `None`      | `None`        | Invalidate row, re-scan (**fail-closed** — an attacker who controls the registry can engineer this state) |
+| `Some(a)`   | fetch fails / parse error / version-not-found / malformed digest | Invalidate row, re-scan |
+
+On any `Reverify` outcome: `cache.invalidate(name, "latest", registry)`, log a one-line message to stderr (`"cache hash mismatch for <pkg>; re-scanning"`), and fall through to the full scan pipeline. After a successful re-scan, the new cache row stores the freshly-observed hash, closing the verify loop.
+
+`--force` on `install` bypasses *verdicts* but not the verification step itself — a hash mismatch always triggers a re-scan; the user can then `--force` past the resulting verdict if they choose. This prevents `--force` from silently honoring a stale `pass`.
 
 ## Acceptance criteria
 
 - [ ] `run_check` cache-hit branch fetches metadata and compares `content_hash` before returning the cached result
-- [ ] Mismatch invalidates the cache row via `Cache::invalidate` and continues into the full scan
-- [ ] NULL cached hash (legacy row) is treated as mismatch — triggers re-scan; new scan populates the hash
-- [ ] When the full scan succeeds after a mismatch, the resulting cache row contains the *new* hash (closes the verify loop)
-- [ ] Verbose output distinguishes: `cache hit (verified)`, `cache hit (no hash to verify)`, `cache hash mismatch — re-scanning`
+- [ ] All `Reverify` cases from the decision table invalidate the cache row via `Cache::invalidate` and fall through to the full scan
+- [ ] **Both-None is fail-closed:** when cached hash and registry hash are both `None`, the cache is *not* honored — a re-scan runs
+- [ ] After a successful re-scan, the resulting cache row contains the *new* hash (closes the verify loop)
+- [ ] Verification has no opt-out flag (no `--skip-cache-verify` or equivalent in this task)
+- [ ] Verbose output distinguishes: `cache hit (verified)`, `cache hash mismatch — re-scanning`
 - [ ] Non-verbose output stays quiet on the happy path; mismatch always prints a one-line notice to stderr
 - [ ] `--force` on install does not bypass the verification step (only verdicts)
+- [ ] Registry fetch errors during verification surface identically to the cache-miss path (no new failure modes; consistent fail-closed)
 - [ ] Integration test: cache populated with hash A, registry returns hash B, `dep-scan check` re-scans and produces a fresh verdict
 - [ ] Integration test: cache populated with hash A, registry returns hash A, `dep-scan check` returns cached result and does NOT execute policy logic
 - [ ] No new public API surface; no schema change (all schema work was in 029)
@@ -42,4 +51,5 @@ In `run_check`'s cache-hit branch ([src/main.rs:218-240](../../../src/main.rs#L2
 
 - Downloading and locally re-hashing the tarball — deferred `--paranoid` mode
 - Row-level HMAC against local cache tampering — out of scope for v1.1
-- Skipping verification for performance (a future `--skip-cache-verify` flag is not part of this task)
+- Skipping verification for performance — explicitly *not* added; secure default is no opt-out
+- Closing the TOCTOU window between dep-scan's verification and the package manager's own fetch — task 031 handles the pip case via `--require-hashes` passthrough

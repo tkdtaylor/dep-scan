@@ -20,9 +20,10 @@ These cover the decision table in the task — given `cached_hash` and `registry
 - cached = `Some("sha256:aaaa")`, registry = `None`
 - Expected: `Reverify`
 
-### T-030-05: Both None ⇒ best-effort honor
+### T-030-05: Both None ⇒ reverify (fail-closed)
 - cached = `None`, registry = `None`
-- Expected: `Skip` (nothing to verify against; log at verbose)
+- Expected: `Reverify`
+- Rationale: an attacker who controls the registry could engineer this state (serve metadata with no `dist.integrity`, ensure first scan stores NULL, then republish freely). Honoring the cache here would be a permanent verification bypass. Fail closed instead — re-scan and re-populate.
 
 ## Integration tests (assert_cmd + wiremock)
 
@@ -50,11 +51,12 @@ These cover the decision table in the task — given `cached_hash` and `registry
 - Run: `dep-scan check pkg --registry npm --verbose`
 - Expected: exit 0, verbose output shows `cache hash mismatch — re-scanning`, post-run the row has `content_hash = "sha512:abcd"`
 
-### T-030-10: Both hashes None ⇒ honor cache (legacy registry response)
-- Pre-populate cache with `content_hash = NULL`
-- wiremock returns metadata with no `dist.integrity` and no `dist.shasum`
+### T-030-10: Both hashes None ⇒ re-scan (fail-closed)
+- Pre-populate cache with `content_hash = NULL`, result = `pass`
+- wiremock returns metadata with no `dist.integrity` and no `dist.shasum` (so registry hash is also `None`)
 - Run: `dep-scan check pkg --registry npm --verbose`
-- Expected: exit 0, verbose output shows `cache hit (no hash to verify)`, no re-scan executed
+- Expected: exit 0, verbose output shows `cache hash mismatch — re-scanning`, the full policy pipeline executes, the resulting cache row reflects the fresh scan (still `content_hash = NULL` since registry has no digest, but verdict and `scanned_at` are refreshed)
+- Rationale: secure default — never short-circuit when there's nothing to verify against
 
 ### T-030-11: Registry fetch failure during verification falls through to scan path
 - Pre-populate cache with hash

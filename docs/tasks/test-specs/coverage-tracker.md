@@ -41,6 +41,7 @@
 | 028 | v1.0 polish and release | 028-v1-polish-test-spec.md | ✅ | Done |
 | 029 | Capture content hash in scan cache | 029-content-hash-capture-test-spec.md | 0/16 | ❌ |
 | 030 | Verify content hash on cache hit | 030-content-hash-verify-test-spec.md | 0/13 | ❌ |
+| 031 | Pip --require-hashes passthrough | 031-pip-require-hashes-passthrough-test-spec.md | 0/13 | ❌ |
 
 ## Status key
 
