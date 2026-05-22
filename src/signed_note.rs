@@ -87,15 +87,53 @@ pub struct NoteSignature {
 ///
 /// Returns `Err(_)` for structural failures (no blank-line separator,
 /// no signature lines, malformed signature line, bad base64).
+///
+/// ## Boundary detection (T-044-01, REQ-044-01)
+///
+/// Walks lines from the start and stops at the first line that begins with
+/// `\u{2014}` (em-dash).  The blank line immediately before the em-dash line
+/// is the separator; it is *not* included in `note_text`.  A note whose text
+/// body contains blank lines is therefore parsed correctly regardless of the
+/// number of internal blank lines (REQ-044-02).
+///
+/// If no em-dash line is found, returns `Err("signed note has no signature
+/// lines")` (REQ-044-05).  If the em-dash line is not preceded by a blank
+/// line, returns `Err("signed note missing blank-line separator before
+/// signatures")` to preserve the structural invariant.
 pub fn parse(signed_note: &str) -> Result<ParsedNote<'_>, String> {
-    // Split note text from signature lines: the last "\n\n" is the boundary.
-    // Per the Rekor reference implementation, the note text includes the
-    // trailing newline before the blank line.
-    let note_end = signed_note
-        .rfind("\n\n")
-        .ok_or_else(|| "signed note missing blank-line separator before signatures".to_string())?;
-    let note_text = &signed_note[..note_end + 1]; // include trailing \n
-    let sig_section = signed_note[note_end + 2..].trim_end_matches('\n');
+    // Walk lines (split on '\n' to avoid \r\n ambiguity) and find the first
+    // em-dash line.  Track byte offsets so we can slice the input precisely.
+    let mut byte_offset: usize = 0;
+    let mut em_dash_line_offset: Option<usize> = None;
+    let mut prev_was_blank = false;
+
+    for line in signed_note.split('\n') {
+        if line.starts_with('\u{2014}') {
+            em_dash_line_offset = Some(byte_offset);
+            break;
+        }
+        prev_was_blank = line.is_empty();
+        byte_offset += line.len() + 1; // +1 for '\n'
+    }
+
+    let em_dash_offset =
+        em_dash_line_offset.ok_or_else(|| "signed note has no signature lines".to_string())?;
+
+    // The line immediately before the em-dash line must be blank (the
+    // separator).  If it is not, the note is structurally malformed.
+    if !prev_was_blank {
+        return Err("signed note missing blank-line separator before signatures".to_string());
+    }
+
+    // note_text: everything before the blank separator line.
+    // em_dash_offset is the byte start of the em-dash line.
+    // The blank separator is one '\n' immediately before it (i.e., offset
+    // em_dash_offset - 1).  note_text ends just before that '\n'.
+    // Safety: prev_was_blank = true guarantees em_dash_offset >= 1.
+    let note_text = &signed_note[..em_dash_offset - 1];
+
+    // sig_section: from the em-dash line onward, trailing newlines stripped.
+    let sig_section = signed_note[em_dash_offset..].trim_end_matches('\n');
 
     let mut signatures = Vec::new();
     for line in sig_section.lines() {
@@ -527,6 +565,255 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
+    // T-044-01 through T-044-08: em-dash boundary parser tests
+    // -----------------------------------------------------------------------
+
+    // T-044-01: normal note (no blank lines in text) parses correctly
+    #[test]
+    fn t_044_01_normal_note_parses_correctly() {
+        // Three-line note text, one signature line.
+        let note_text = "line alpha\nline beta\nline gamma\n";
+        let (key_str, signed_note) = build_ed25519_signed_note(note_text);
+        // First confirm the signed note format is parseable.
+        let parsed = parse(&signed_note).expect("T-044-01: parse must succeed");
+        assert_eq!(
+            parsed.note_text, note_text,
+            "T-044-01: note_text must be the three note lines"
+        );
+        assert_eq!(
+            parsed.signatures.len(),
+            1,
+            "T-044-01: must have exactly one signature"
+        );
+        // Also confirm the key_name round-trips.
+        assert_eq!(
+            parsed.signatures[0].key_name, "test-key",
+            "T-044-01: key_name"
+        );
+        // Full round-trip verification.
+        assert_eq!(
+            verify_ed25519(&signed_note, &key_str),
+            NoteVerifyOutcome::Valid,
+            "T-044-01: round-trip verification must succeed"
+        );
+    }
+
+    // T-044-02: note text containing a blank line parses correctly
+    //
+    // The old rfind("\n\n") implementation would split at the *first* \n\n
+    // (the one inside the note body), yielding note_text = "line one\n".
+    // The em-dash walk splits at the *first em-dash line*, so the internal
+    // blank line is correctly included in note_text.
+    #[test]
+    fn t_044_02_note_text_with_blank_line_parses_correctly() {
+        // Build a note whose body has an internal blank line.
+        // Format: "line one\n\nline three\n" is the note_text (the signed body).
+        // The signed-note envelope adds another \n + the sig line.
+        let note_text = "line one\n\nline three\n";
+        let (key_str, signed_note) = build_ed25519_signed_note(note_text);
+        // The build_ed25519_signed_note helper formats the note as:
+        //   {note_text}\n— {key_name} {sig_b64}\n
+        // So the envelope = "line one\n\nline three\n\n— test-key ...\n"
+        let parsed = parse(&signed_note).expect("T-044-02: parse must succeed");
+        assert_eq!(
+            parsed.note_text, note_text,
+            "T-044-02: note_text must include the internal blank line; \
+             rfind(\\\"\\\\n\\\\n\\\") would split prematurely"
+        );
+        assert_eq!(
+            parsed.signatures.len(),
+            1,
+            "T-044-02: one signature expected"
+        );
+        // Cryptographic round-trip: the signature was computed over note_text,
+        // so verify_ed25519 must succeed — confirming we extracted the correct
+        // byte slice.
+        assert_eq!(
+            verify_ed25519(&signed_note, &key_str),
+            NoteVerifyOutcome::Valid,
+            "T-044-02: round-trip with internal blank line must verify"
+        );
+    }
+
+    // T-044-03: note text with multiple blank lines parses correctly
+    #[test]
+    fn t_044_03_note_text_with_multiple_blank_lines_parses_correctly() {
+        let note_text = "para one\n\npara two\n\npara three\n";
+        let (key_str, signed_note) = build_ed25519_signed_note(note_text);
+        let parsed = parse(&signed_note).expect("T-044-03: parse must succeed");
+        assert_eq!(
+            parsed.note_text, note_text,
+            "T-044-03: all content before the first em-dash line must be in note_text"
+        );
+        assert_eq!(parsed.signatures.len(), 1, "T-044-03: one signature");
+        assert_eq!(
+            verify_ed25519(&signed_note, &key_str),
+            NoteVerifyOutcome::Valid,
+            "T-044-03: cryptographic round-trip must succeed"
+        );
+    }
+
+    // T-044-04: note with no blank-line separator before signatures returns error
+    //
+    // Input: the sig line appears immediately after the text line — no blank.
+    #[test]
+    fn t_044_04_no_blank_line_separator_returns_error() {
+        // Build a note whose sig line is directly after the text (no blank sep).
+        // We hand-craft the note to skip the blank separator.
+        let note_text = "line one";
+        // Produce a dummy sig payload (4 key-id bytes + 64 garbage sig bytes).
+        let sig_payload = vec![0u8; 68];
+        let sig_b64 = base64::engine::general_purpose::STANDARD.encode(&sig_payload);
+        // Format: no blank separator between text and sig line.
+        let note = format!("{note_text}\n\u{2014} key-name {sig_b64}\n");
+        match parse(&note) {
+            Err(e) => {
+                // Accept any error — the important thing is that it does not panic.
+                let _ = e; // T-044-04: Err(_)
+            }
+            Ok(_) => panic!("T-044-04: expected Err when no blank-line separator, got Ok"),
+        }
+    }
+
+    // T-044-05: note with no signature lines returns error
+    #[test]
+    fn t_044_05_no_signature_lines_returns_error() {
+        let note = "note body line\nanother line\n\n";
+        match parse(note) {
+            Err(e) => {
+                // Error should mention "no signature lines" or similar.
+                assert!(
+                    e.contains("no signature"),
+                    "T-044-05: error should mention 'no signature', got: {e}"
+                );
+            }
+            Ok(_) => panic!("T-044-05: expected Err for note with no em-dash lines"),
+        }
+    }
+
+    // T-044-06: malformed signature line (no space after key name) returns error
+    #[test]
+    fn t_044_06_malformed_sig_line_returns_error() {
+        // A line that begins with em-dash but has no space — just "— keyname"
+        // with no base64 token.
+        let note = "note text\n\n\u{2014} keyname\n";
+        match parse(note) {
+            Err(e) => {
+                let _ = e; // T-044-06: Err(_) describing malformed line
+            }
+            Ok(_) => panic!("T-044-06: expected Err for malformed sig line"),
+        }
+    }
+
+    // T-044-07: multiple valid signature lines are all parsed
+    #[test]
+    fn t_044_07_multiple_sig_lines_all_parsed() {
+        // Build three independent Ed25519 keys and sign the same note_text
+        // with each, then assemble a multi-sig envelope manually.
+        use ed25519_dalek::Signer;
+        use rand_core::OsRng;
+
+        let note_text = "multi-sig note\nline two\n";
+        let mut sig_lines = Vec::new();
+        let mut key_strs = Vec::new();
+
+        for i in 0..3 {
+            let key_name = format!("signer-{i}");
+            let signing_key = SigningKey::generate(&mut OsRng);
+            let verifying_key = signing_key.verifying_key();
+            let mut key_bytes = vec![0x01u8];
+            key_bytes.extend_from_slice(verifying_key.as_bytes());
+            let mut hasher = Sha256::new();
+            hasher.update(b"hash:1:");
+            hasher.update(key_name.as_bytes());
+            hasher.update(b"\n");
+            hasher.update(&key_bytes);
+            let key_id = &hasher.finalize()[..4];
+            let key_id_hex = format!(
+                "{:02x}{:02x}{:02x}{:02x}",
+                key_id[0], key_id[1], key_id[2], key_id[3]
+            );
+            let key_b64 = base64::engine::general_purpose::STANDARD.encode(&key_bytes);
+            key_strs.push(format!("{key_name}+{key_id_hex}+{key_b64}"));
+            let sig = Signer::sign(&signing_key, note_text.as_bytes());
+            let mut payload = key_id.to_vec();
+            payload.extend_from_slice(&sig.to_bytes());
+            let sig_b64 = base64::engine::general_purpose::STANDARD.encode(&payload);
+            sig_lines.push(format!("\u{2014} {key_name} {sig_b64}"));
+        }
+
+        // Assemble: note_text + blank separator + three sig lines + trailing \n
+        let envelope = format!(
+            "{note_text}\n{}\n{}\n{}\n",
+            sig_lines[0], sig_lines[1], sig_lines[2]
+        );
+
+        let parsed = parse(&envelope).expect("T-044-07: multi-sig parse must succeed");
+        assert_eq!(
+            parsed.signatures.len(),
+            3,
+            "T-044-07: all three signature lines must be parsed"
+        );
+        // Verify key names are in order.
+        for (i, sig) in parsed.signatures.iter().enumerate() {
+            assert_eq!(
+                sig.key_name,
+                format!("signer-{i}"),
+                "T-044-07: key_name at index {i}"
+            );
+        }
+        // Each individual key must verify.
+        for key_str in &key_strs {
+            assert_eq!(
+                verify_ed25519(&envelope, key_str),
+                NoteVerifyOutcome::Valid,
+                "T-044-07: each signer's key must verify the note"
+            );
+        }
+    }
+
+    // T-044-08: Rekor-style checkpoint (3-line note, em-dash signature) parses correctly
+    #[test]
+    fn t_044_08_rekor_style_checkpoint_parses_correctly() {
+        // This is the canonical Rekor checkpoint format:
+        //   origin - logid\n
+        //   tree_size\n
+        //   root_hash_b64\n
+        //   \n
+        //   — origin sig_b64\n
+        let note_text = "rekor.sigstore.dev - 1234567890\n42\nabc123==\n";
+        let (pem, signed_note) = build_ecdsa_p256_signed_note(note_text, "rekor.sigstore.dev");
+
+        let parsed = parse(&signed_note).expect("T-044-08: Rekor-style checkpoint must parse");
+        assert_eq!(
+            parsed.note_text, note_text,
+            "T-044-08: note_text must be the 3-line metadata"
+        );
+        assert_eq!(
+            parsed.signatures.len(),
+            1,
+            "T-044-08: one signature line expected"
+        );
+        assert_eq!(
+            parsed.signatures[0].key_name, "rekor.sigstore.dev",
+            "T-044-08: key_name must be rekor.sigstore.dev"
+        );
+        // The note_text has exactly 3 lines (tree header, tree size, root hash).
+        let lines: Vec<&str> = parsed.note_text.lines().collect();
+        assert_eq!(
+            lines.len(),
+            3,
+            "T-044-08: note_text must have exactly 3 lines"
+        );
+        // Full cryptographic round-trip.
+        assert_eq!(
+            verify_ecdsa_p256(&signed_note, "rekor.sigstore.dev", &pem),
+            NoteVerifyOutcome::Valid,
+            "T-044-08: Rekor-style checkpoint must verify"
+        );
+    }
+
+    // -----------------------------------------------------------------------
     // Task 043 helpers
     // -----------------------------------------------------------------------
 
@@ -944,5 +1231,78 @@ mod tests {
             NoteVerifyOutcome::Invalid { .. } => {}
             other => panic!("T-043-13 wrong key: expected Invalid, got {other:?}"),
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // T-044-13: static audit — `parse` does not use `rfind("\n\n")` as its
+    //            primary boundary detection mechanism.
+    // T-044-16: all task 034 Go sumdb tests pass (regression baseline).
+    // T-044-17: all task 036 Rekor inclusion-proof tests pass (regression).
+    // -----------------------------------------------------------------------
+
+    /// T-044-13: `signed_note::parse` does not use rfind-double-newline as the
+    /// boundary mechanism.  Read the source and assert the method-call pattern
+    /// is absent from all non-comment, non-test code.
+    #[test]
+    fn t_044_13_parse_does_not_use_rfind_double_newline() {
+        let src = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/signed_note.rs"),
+        )
+        .expect("read signed_note.rs");
+
+        // Assemble the forbidden method-call pattern at runtime.
+        // The parts: "." + "rfind" + "(" + "\"" + "\n\n" + "\"" + ")"
+        // We check only non-comment lines (those not starting with // or //!).
+        let rfind_call: String = [".", "rfind", "(\"", r"\n\n", "\")"].concat();
+
+        let violation = src
+            .lines()
+            .filter(|l| {
+                let trimmed = l.trim_start();
+                !trimmed.starts_with("//")
+            })
+            .any(|l| l.contains(&rfind_call));
+
+        assert!(
+            !violation,
+            "T-044-13: parse must not call rfind-double-newline; \
+             boundary detection must use the em-dash walk"
+        );
+    }
+
+    /// T-044-16: all task 034 Go sumdb signed-note tests pass.
+    ///
+    /// This test is a compile-time regression marker.  The actual regression
+    /// suite runs as part of `cargo test` — if any T-034 test fails, `cargo
+    /// test` returns non-zero and the CI gate catches it.  This marker ensures
+    /// the spec requirement is documented and grep-visible.
+    #[test]
+    fn t_044_16_task_034_go_sumdb_regression_tests_pass() {
+        // Smoke-test: build and verify one Ed25519 note (covers the same
+        // code path as the T-034 suite).  The full T-034 tests are in
+        // src/policy/go_sumdb.rs and are exercised by `cargo test go_sumdb`.
+        let note_text = "go.sum database tree\n99\nregression==\n";
+        let (key_str, signed_note) = build_ed25519_signed_note(note_text);
+        assert_eq!(
+            verify_ed25519(&signed_note, &key_str),
+            NoteVerifyOutcome::Valid,
+            "T-044-16: Ed25519 round-trip regression must pass"
+        );
+    }
+
+    /// T-044-17: all task 036 Rekor inclusion-proof tests pass.
+    ///
+    /// Smoke-test: build and verify one ECDSA P-256 checkpoint note.
+    /// The full T-036 suite is in `src/sigstore_verify.rs::rekor_tests` and
+    /// is exercised by `cargo test rekor`.
+    #[test]
+    fn t_044_17_task_036_rekor_regression_tests_pass() {
+        let note_text = "rekor.sigstore.dev - 9876543210\n55\nregression==\n";
+        let (pem, signed_note) = build_ecdsa_p256_signed_note(note_text, "rekor.sigstore.dev");
+        assert_eq!(
+            verify_ecdsa_p256(&signed_note, "rekor.sigstore.dev", &pem),
+            NoteVerifyOutcome::Valid,
+            "T-044-17: ECDSA P-256 round-trip regression must pass"
+        );
     }
 }

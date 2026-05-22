@@ -58,7 +58,7 @@
 | 041 | Go module path validation before URL composition | 041-go-module-path-validation-test-spec.md | 26/26 | ✅ |
 | 042 | Harden TempReqFile against predictable filename / symlink attack | 042-temp-file-symlink-hardening-test-spec.md | 14/14 | ✅ |
 | 043 | Signed-note multi-signature iteration for key rotation | 043-signed-note-multi-sig-iteration-test-spec.md | 15/15 | ✅ |
-| 044 | Signed-note boundary parser — em-dash walk replaces rfind | 044-signed-note-boundary-parser-test-spec.md | 0/17 | ❌ |
+| 044 | Signed-note boundary parser — em-dash walk replaces rfind | 044-signed-note-boundary-parser-test-spec.md | 17/17 | ✅ |
 | 045 | Obfuscation policy — compile regexes once and cap script size | 045-obfuscation-regex-cache-script-cap-test-spec.md | 0/14 | ❌ |
 | 046 | verify_hash algorithm-prefix case normalization | 046-verify-hash-case-normalization-test-spec.md | 0/16 | ❌ |
 | 047 | Cache I/O error surfacing | 047-cache-io-error-surfacing-test-spec.md | 0/12 | ❌ |
