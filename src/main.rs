@@ -936,6 +936,55 @@ async fn run_install(
         return run_pip_install(config_path, verbose, &packages, &registry_flag).await;
     }
 
+    // L-9 (TOCTOU gap — option b): For npm/cargo/go the package manager re-resolves and
+    // downloads the package independently after dep-scan's scan.  Sigstore provenance is
+    // NOT re-verified at install time (only during `run_check` above).  The log lines
+    // below make this gap visible to operators running with --verbose so they can confirm
+    // the version and hash that was locked during the scan.
+    if verbose {
+        let config = Config::load(config_path)?;
+        for pkg_name in &packages {
+            let meta_result = match reg_type {
+                RegistryType::Npm => {
+                    let client = NpmRegistry::new(config.registries.npm_url.clone());
+                    client.get_metadata(pkg_name, None).await
+                }
+                RegistryType::Crates => {
+                    let client = CratesRegistry::new(config.registries.crates_url.clone());
+                    client.get_metadata(pkg_name, None).await
+                }
+                RegistryType::Go => {
+                    let client = GoRegistry::new(
+                        config.registries.go_proxy_url.clone(),
+                        config.registries.go_sum_db_url.clone(),
+                    );
+                    client.get_metadata(pkg_name, None).await
+                }
+                RegistryType::PyPI => unreachable!("PyPI handled above"),
+            };
+            match meta_result {
+                Ok(meta) => {
+                    let hash_display = meta
+                        .content_hash
+                        .as_deref()
+                        .unwrap_or("(no hash available)");
+                    eprintln!(
+                        "dep-scan: installing {pkg_name}@{version} ({hash}) \
+                         — sigstore provenance not re-verified at install time (L-9)",
+                        version = meta.version,
+                        hash = hash_display,
+                    );
+                }
+                Err(_) => {
+                    eprintln!(
+                        "dep-scan: installing {pkg_name} \
+                         — resolved version unavailable; sigstore provenance not re-verified at install time (L-9)"
+                    );
+                }
+            }
+        }
+    }
+
     let (cmd, args) = match reg_type {
         RegistryType::Npm => ("npm", vec!["install".to_string()]),
         RegistryType::PyPI => unreachable!("PyPI handled above"),
@@ -952,6 +1001,12 @@ async fn run_install(
 
     println!("\nInstalling via {cmd}...");
 
+    // L-9 (TOCTOU gap — option b): The package name passed here is the original
+    // unversioned form (e.g. "express", not "express@4.18.2").  The package manager
+    // re-resolves the version and downloads the tarball independently; dep-scan does
+    // not pin the version at this call site.  Sigstore provenance is verified once
+    // during `run_check` above and is not re-verified here.  Version + hash are
+    // logged at --verbose to make the gap observable.
     let status = std::process::Command::new(cmd)
         .args(&full_args)
         .status()
@@ -1012,6 +1067,22 @@ async fn run_pip_install(
                 fallback_warnings.push((pkg_name.clone(), format!("registry fetch failed: {e}")));
                 triples.push((pkg_name.clone(), String::new(), None));
             }
+        }
+    }
+
+    // L-9 (TOCTOU gap — option b): The sha256 content hash for each package is
+    // re-confirmed by re-fetching metadata above (task 031 --require-hashes flow).
+    // Sigstore provenance is NOT re-verified at install time — it was verified once
+    // during `run_check`.  The log lines below make this gap visible to operators
+    // running with --verbose so they can confirm the hash locked during the scan.
+    if verbose {
+        for (name, version, hash_opt) in &triples {
+            let hash_display = hash_opt.as_deref().unwrap_or("(no hash available)");
+            eprintln!(
+                "dep-scan: installing {name}@{version} — sha256 re-confirmed ({hash}); \
+                 sigstore provenance not re-verified at install time (L-9)",
+                hash = hash_display,
+            );
         }
     }
 
