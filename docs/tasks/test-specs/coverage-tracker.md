@@ -62,6 +62,7 @@
 | 045 | Obfuscation policy — compile regexes once and cap script size | 045-obfuscation-regex-cache-script-cap-test-spec.md | 0/14 | ❌ |
 | 046 | verify_hash algorithm-prefix case normalization | 046-verify-hash-case-normalization-test-spec.md | 0/16 | ❌ |
 | 047 | Cache I/O error surfacing | 047-cache-io-error-surfacing-test-spec.md | 0/12 | ❌ |
+| 048 | Maintainer policy trust-on-first-use warning | 048-maintainer-first-seen-warning-test-spec.md | 0/14 | ❌ |
 
 ## Status key
 
