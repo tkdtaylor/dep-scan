@@ -396,7 +396,17 @@ async fn run_check(
         // cache lookup entirely and fall through to the error path below (REQ-038-06).
         if let Ok(fresh_meta) = &fetch_result {
             let resolved_version = &fresh_meta.version;
-            if let Ok(Some(entry)) = cache.lookup(pkg_name, resolved_version, &reg_str) {
+            // REQ-047-01: Surface cache lookup errors to stderr instead of silently
+            // dropping them.  A corrupted cache DB must not be invisible to the user.
+            // REQ-047-02: A lookup error is warn-only; the full scan proceeds for the
+            // affected package.  Exit code is determined by the policy verdict.
+            let lookup_result = cache.lookup(pkg_name, resolved_version, &reg_str);
+            if let Err(ref e) = lookup_result {
+                eprintln!(
+                    "dep-scan: cache lookup failed for {pkg_name}@{resolved_version}: {e} — re-scanning"
+                );
+            }
+            if let Ok(Some(entry)) = lookup_result {
                 let decision = verify_hash(
                     entry.content_hash.as_deref(),
                     fresh_meta.content_hash.as_deref(),

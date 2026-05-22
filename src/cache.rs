@@ -684,6 +684,65 @@ mod tests {
         );
     }
 
+    // ── T-047 unit tests — Cache I/O error surfacing ─────────────────────────────
+
+    // T-047-01: Cache::lookup on a valid in-memory database returns Ok(None) for
+    // an empty database (no entry exists yet).
+    #[test]
+    fn t047_01_lookup_empty_in_memory_returns_ok_none() {
+        let cache = Cache::in_memory().expect("T-047-01: in_memory cache should succeed");
+        let result = cache.lookup("pkg", "1.0.0", "npm");
+        assert!(
+            result.is_ok(),
+            "T-047-01: lookup on empty in-memory DB must return Ok, got: {:?}",
+            result
+        );
+        assert_eq!(
+            result.unwrap(),
+            None,
+            "T-047-01: lookup on empty in-memory DB must return Ok(None)"
+        );
+    }
+
+    // T-047-02: Cache::lookup after inserting an entry returns Ok(Some(entry)).
+    #[test]
+    fn t047_02_lookup_after_insert_returns_ok_some() {
+        let cache = Cache::in_memory().expect("T-047-02: in_memory cache should succeed");
+        cache
+            .insert("pkg", "1.0.0", "npm", "pass", None, None)
+            .expect("T-047-02: insert should succeed");
+        let result = cache.lookup("pkg", "1.0.0", "npm");
+        assert!(
+            result.is_ok(),
+            "T-047-02: lookup after insert must return Ok, got: {:?}",
+            result
+        );
+        let entry = result.unwrap();
+        assert!(
+            entry.is_some(),
+            "T-047-02: lookup after insert must return Some(entry)"
+        );
+        assert_eq!(
+            entry.unwrap().result,
+            "pass",
+            "T-047-02: CacheEntry.result must match the inserted value"
+        );
+    }
+
+    // T-047-03: Cache::new on a path that is a directory (not a file) returns Err.
+    // This verifies that the error surfaces at construction time, not silently at
+    // lookup time (REQ-047-03).
+    #[test]
+    fn t047_03_cache_new_on_directory_returns_err() {
+        // /tmp is always a directory; SQLite cannot open it as a DB file.
+        let result = Cache::new(Path::new("/tmp"));
+        assert!(
+            result.is_err(),
+            "T-047-03: Cache::new on a directory path must return Err (SQLite error surfaces at \
+             construction time)"
+        );
+    }
+
     // T-032-16: insert/lookup round-trips provenance_identity
     #[test]
     fn insert_and_lookup_roundtrips_provenance_identity() {
