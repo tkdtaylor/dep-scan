@@ -64,7 +64,7 @@ npm's legacy `dist.shasum` is SHA-1 and is **never trust-gated**. Any cache row 
 
 The cache is keyed by `(name, resolved_version, registry)` — never by the literal string `"latest"` — so a republished `pkg@latest` cannot ride past verification on a prior version's cached verdict.
 
-The cache DB file is created with mode `0600` and uses WAL journaling (v1.2.0) — not world-readable on shared hosts, and concurrent dep-scan runs do not block or corrupt each other.
+The cache DB file is created with mode `0600` and uses WAL journaling (v1.2.0) — not world-readable on shared hosts, and concurrent dep-scan runs do not block or corrupt each other. On Unix the DB file is created atomically with `O_CREAT|O_EXCL` and mode `0600` in a single syscall — there is no window where the file briefly exists as `0644` between `Connection::open` and the follow-up `chmod`.
 
 See [ADR 003](docs/architecture/decisions/003-content-hash-cache-integrity.md) for the threat model.
 
@@ -85,7 +85,10 @@ dep-scan config init    # creates .dep-scan.toml in current directory
 dep-scan config show    # prints effective configuration
 ```
 
-Example `.dep-scan.toml` (matches `dep-scan config init` output):
+Example `.dep-scan.toml`. The annotated comments below are explanatory
+only — `dep-scan config init` writes the same keys with the same default
+values, but without the comments (and with the multi-line array layout
+`toml::to_string_pretty` produces).
 
 ```toml
 min_package_age_hours = 48
@@ -145,7 +148,7 @@ All settings can be overridden via environment variables:
 | **npm** | `--registry npm` | Full support | age, install scripts, obfuscation, typosquatting, vulnerability (OSV), maintainer change, popularity, dependency confusion, **npm provenance** (sigstore Fulcio chain walk + Rekor inclusion proof + cert-validity window) |
 | **PyPI** | `--registry pypi` | Full support | age, typosquatting, vulnerability (OSV), maintainer change, popularity, dependency confusion, **PyPI provenance** (PEP 740 sigstore attestation; same sigstore verification as npm with sha256 subject digests). Provenance URL is host/scheme/IP-validated before fetch. `pip install` receives the verified hash via `--require-hashes`. |
 | **crates.io** | `--registry crates` | Full support | age, typosquatting, vulnerability (OSV), maintainer change, popularity, dependency confusion |
-| **Go modules** | `--registry go` | Full support | age, typosquatting, vulnerability (OSV), dependency confusion, **Go sumdb** (Ed25519 signed-tree-head verification against `sum.golang.org`). Module paths are validated against the Go module-path grammar before any URL composition. |
+| **Go modules** | `--registry go` | Full support | age, typosquatting, vulnerability (OSV), dependency confusion, **Go sumdb** (Ed25519 signed-tree-head verification against `sum.golang.org`). Module paths **and version strings** are validated against the Go module-path and semver/pseudo-version grammar before any URL composition. |
 
 ## Example output
 

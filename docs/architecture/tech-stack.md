@@ -66,6 +66,8 @@ Each directory ships a `README.md` documenting the source URL and rotation proce
 | `wiremock` | Async HTTP mocks for registry and sumdb integration tests |
 | `assert_cmd` + `predicates` | End-to-end CLI invocations |
 | `rcgen` (dev-dep) | Generating test cert chains for the Fulcio chain-walk tests |
+| `libc` (dev-dep) | Umask manipulation in the task-059 cache-DB create-then-chmod TOCTOU tests |
+| `rand_core` (dev-dep) | RNG plumbing for `ed25519_dalek` keygen in the sumdb / signed-note tests |
 
 ## Notes
 

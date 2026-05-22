@@ -3,6 +3,11 @@
 **Project:** dep-scan
 **Last updated:** 2026-05-22
 
+> **For authoritative contracts**, see [docs/spec/](../spec/) — the
+> external behaviors and security invariants the code MUST satisfy.
+> This document is the *descriptive* view ("how it's organized today");
+> the spec is the *contractual* view ("what it must do").
+
 ## What this is
 
 A cross-platform CLI tool that wraps package managers (npm, pip, cargo, go) to intercept and scan every dependency before installation. Detects supply chain attacks through multiple heuristics — install script analysis, typosquatting, minimum package age, maintainer change, known vulnerabilities — and verifies cryptographic provenance (sigstore for npm + PyPI, sumdb signature for Go) against embedded out-of-band trust roots. Local-first with a content-addressable SQLite cache.
@@ -20,7 +25,7 @@ dep-scan is organized into four layers plus a cross-cutting verification helper:
 - `sigstore_verify.rs` — Fulcio cert chain walk + DSSE signature verification + Rekor inclusion-proof + timestamp window check. Algorithm-agnostic (`sha512` for npm, `sha256` for PyPI). Used by both `policy/npm_provenance` and `policy/pypi_provenance`.
 - `signed_note.rs` — RFC sumdb-style signed-note parser + Ed25519/ECDSA-P256 verifier. Shared by `policy/go_sumdb` and `sigstore_verify` (Rekor uses the same envelope format).
 
-Supporting modules: `config.rs` (layered config: defaults < file < env < CLI flags), `lockfile.rs` (parses package-lock.json, requirements.txt, Cargo.lock, go.sum), `osv.rs` (OSV.dev vulnerability API client), `typosquat.rs` (edit-distance and popular package lists), `validation.rs` (CLI input validation — rejects package-name tokens that begin with `-` so they can't be re-interpreted as flags by the wrapped package manager, task 037), `types.rs` (shared data types including `ScanContext`).
+Supporting modules: `config.rs` (layered config: defaults < file < env < CLI flags), `lockfile.rs` (parses package-lock.json, requirements.txt, Cargo.lock, go.sum), `osv.rs` (OSV.dev vulnerability API client), `typosquat.rs` (edit-distance and popular package lists), `validation.rs` (CLI input validation — rejects package-name tokens that begin with `-` so they can't be re-interpreted as flags by the wrapped package manager, task 037), `types.rs` (shared data types including `ScanContext`). Registry-level URL inputs are validated in `registry/go.rs` (module paths via task 041, version strings via task 060) and surfaced through `RegistryError::{InvalidModulePath, InvalidVersion}` so URL composition is never reached with adversarial input.
 
 ## Cache schema
 
@@ -36,7 +41,7 @@ Supporting modules: `config.rs` (layered config: defaults < file < env < CLI fla
 
 A separate `maintainer_history` table caches `(name, registry) → maintainers` for change-detection (task 014).
 
-The cache DB file is created with mode `0600` and uses `PRAGMA journal_mode = WAL` (task 054). On a multi-user host, the file is not world-readable; concurrent dep-scan runs against the same cache do not block each other.
+The cache DB file is created with mode `0600` and uses `PRAGMA journal_mode = WAL` (task 054). On Unix the file is created atomically via `OpenOptions::new().write(true).create_new(true).mode(0o600).open(path)` before `Connection::open` (task 059) — closing the brief TOCTOU window where the file existed as `0644` between the SQLite create and the follow-up `chmod`. Legacy DBs created by older versions are narrowed to `0600` in place on next open. On a multi-user host, the file is not world-readable; concurrent dep-scan runs against the same cache do not block each other.
 
 ## Key decisions
 
@@ -57,6 +62,12 @@ User runs: dep-scan install express --registry npm
       → For --registry go: validate each module path against the Go
         module-path grammar (task 041) — no `..`, no `?`/`#`/spaces,
         etc. — before URL composition in registry/go.rs.
+      → For --registry go: also validate each version string against
+        the Go semver / pseudo-version grammar (task 060) — printable
+        ASCII only, no `/`, `?`, `#`, `%`, `@`, whitespace, CR/LF, no
+        `..`, no percent-encoded forms — before any proxy URL is built
+        in `fetch_version_info`. Failures surface as
+        `RegistryError::InvalidVersion`.
   → run_check (same path used by `dep-scan check`):
     → Load config (.dep-scan.toml + env + CLI flags)
     → Fetch metadata from npm registry → resolved version, e.g. "5.0.1"

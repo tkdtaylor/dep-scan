@@ -90,6 +90,38 @@ several false-positive paths. No breaking changes.
   HTTP/3 (`quinn`) stack is not linked into the dep-scan release binary —
   re-verified during the v1.2.0 audit pass.
 
+### Security (post-cut hardening, tasks 059–063)
+
+A follow-up security audit on the v1.2.0 prep branch surfaced five new
+LOW-severity findings, all fixed before tagging.
+
+- **Cache DB create-then-chmod TOCTOU** (task 059 / N-L-1) —
+  `Cache::new` now atomically pre-creates the SQLite file with
+  `OpenOptions::new().write(true).create_new(true).mode(0o600)` on Unix
+  before handing the path to `Connection::open`. Closes the brief window
+  where the file existed as `0644` between `Connection::open` and the
+  follow-up `chmod`.
+- **Go version-string validation** (task 060 / N-L-2) — version strings
+  are validated against printable-ASCII + Go semver/pseudo-version
+  grammar (no `/`, `?`, `#`, `%`, `@`, whitespace, CR/LF, no `..`, no
+  percent-encoded forms) before any `proxy.golang.org` URL composition.
+  Closes a path-confusion primitive that the task-041 module-path
+  validator did not cover.
+- **Verbose-gated `parse_tlog_entries` diagnostic** (task 061 / N-L-3)
+  — the missing-field diagnostic added in task 050 now only emits under
+  `--verbose`. The non-verbose error stays generic so registry-served
+  attestation shape doesn't leak by default.
+- **Single-parse Rekor checkpoint** (task 062 / N-L-4) —
+  `verify_ecdsa_p256` now returns `Result<ParsedNote<'_>, NoteVerifyOutcome>`,
+  and `verify_rekor_checkpoint_impl` reuses the parsed note instead of
+  invoking `signed_note::parse` a second time. Eliminates a benign but
+  duplicative parse on the hot path.
+- **Empty `note_text` rejection** (task 063 / N-L-5) —
+  `signed_note::parse` now returns `Err(NoteError::EmptyText)` when the
+  note body is zero bytes, before any signature-iteration loop runs.
+  Enforces the structural invariant up front instead of letting the
+  empty-text case fall through into signature checks.
+
 ### Changed (dependency refreshes, tasks 057–058)
 
 - `rusqlite` 0.31 → 0.39 (8 minor versions), pulling `libsqlite3-sys`
@@ -115,8 +147,8 @@ several false-positive paths. No breaking changes.
 
 ### Stats
 
-- 715 tests passing (up from 534 at v1.1.1 — +181 new tests across the
-  15 tasks that landed in this release).
+- 788 tests passing (up from 534 at v1.1.1 — +254 new tests across the
+  20 tasks that landed in this release).
 - `cargo clippy --all-targets --all-features -- -D warnings` clean (two
   small lint fixes for clippy 1.95: `manual_is_multiple_of` in the Rekor
   proof verifier, `collapsible_if` in `verify_hash`).
@@ -196,7 +228,8 @@ withdrawn before any binaries shipped; users should install v1.1.1 directly.
 ### Changed
 
 - `Cargo.toml` pins `rust-version = "1.85"` to match the 2024 edition
-  features in use.
+  features in use. *(Superseded in v1.2.0 — MSRV raised to 1.88 for the
+  patched `time` crate.)*
 - `tempfile` promoted from dev-dependency to runtime dependency
   (consequence of task 042).
 

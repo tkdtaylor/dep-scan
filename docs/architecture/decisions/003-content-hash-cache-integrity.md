@@ -101,6 +101,22 @@ here so future readers don't repeat the trip-ups:
   roots (`fulcio-roots/*.der`) and the sum.golang.org public key in
   `src/policy/go_sumdb.rs`. A rename of the Rekor production deployment would
   require a dep-scan release, same as a Fulcio root rotation.
+- **Single-parse Rekor checkpoint (N-L-4 / task 062).** `verify_ecdsa_p256`
+  in `src/signed_note.rs` returns
+  `Result<ParsedNote<'_>, NoteVerifyOutcome>`; `verify_rekor_checkpoint_impl`
+  in `src/sigstore_verify.rs` consumes that parsed note instead of invoking
+  `signed_note::parse` a second time. The pre-refactor code parsed the
+  checkpoint twice on the happy path. Verification semantics are byte-
+  identical; the refactor is structural-only.
+- **Empty `note_text` is rejected up front (N-L-5 / task 063).**
+  `signed_note::parse` returns `Err(NoteError::EmptyText)` when the parsed
+  note body is zero bytes, *before* the signature-iteration loop runs. The
+  structural invariant — "a signed note has a non-empty body" — is now
+  enforced at parse time rather than implicit in downstream consumers.
+- **`parse_tlog_entries` diagnostic is verbose-gated (N-L-3 / task 061).**
+  The missing-field diagnostic added by task 050 only emits the field name
+  under `--verbose`; the non-verbose error stays generic so that registry-
+  served attestation shape doesn't leak in default operation.
 
 ## Build/dependency notes (post-v1.2)
 
@@ -144,6 +160,55 @@ same ADR — no design change, only the wording the implementation must obey.
 | 12 | 040 — Reject SHA-1 as a cache trust gate for npm | NULL `dist.shasum` on cache write for `pass`/`warn` verdicts; force re-verify on any pre-existing `sha1:` row |
 | 13 | 041 — Go module path validation before URL composition | Validate module paths against the Go module-path grammar (no `..`, no `?`/`#`/spaces, etc.) before URL builders run |
 | 14 | 042 — Harden `TempReqFile` against predictable filename / symlink attack | Use `tempfile::NamedTempFile` (CSPRNG suffix, `O_CREAT\|O_EXCL`, mode 0600) instead of `SystemTime`-derived nanos with the default umask |
+
+### v1.2.0 MEDIUM-severity hardening (tasks 043–050)
+
+A second post-release audit on the v1.1.1 main surfaced eight MEDIUM
+findings. Each is small in surface area; together they tighten the verifier
+trust boundary and the install-script / cache hot paths.
+
+| Priority | Task | Scope |
+|----------|------|-------|
+| 15 | 043 — Signed-note multi-signature iteration for key rotation (M-7) | `verify_ed25519` / `verify_ecdsa_p256` iterate across all signature lines instead of returning on first non-matching `key_id`, so Rekor key-rotation windows don't false-reject |
+| 16 | 044 — Signed-note boundary parser em-dash walk (M-8) | Replace `rfind("\n\n")` with a single-pass scan that stops at the first em-dash signature line; robust to legitimate blank lines in note bodies |
+| 17 | 045 — Obfuscation policy regex cache + 1 MB script cap (M-1) | Compile the six obfuscation regexes once via `OnceLock`; cap install-script scan at the first 1 MB so a 10 MB postinstall can't inflate scan time |
+| 18 | 046 — `verify_hash` algorithm-prefix case normalization (M-2) | Lowercase the algorithm prefix before comparison so `sha512:...` and `SHA512-...` compare equal |
+| 19 | 047 — Cache I/O error surfacing (M-3) | Surface `cache.lookup` errors to stderr instead of silently dropping; fail-open behavior preserved |
+| 20 | 048 — Maintainer policy opt-in first-seen warning (M-4) | New `maintainer_first_seen_warning` config flag (default `false`) — when true, packages with zero downloads and no baseline emit `Warn` to defend against typosquat-from-day-one |
+| 21 | 049 — PyPI Simple Index strict content-type (M-5) | Reject Simple Index responses that lack `application/vnd.pypi.simple.v1+json` before JSON parsing |
+| 22 | 050 — `parse_tlog_entries` missing-field diagnostics (M-6) | Replace `unwrap_or(0)` fallback with explicit `Result<TlogEntry, String>`; emit field-name diagnostics instead of misleading "tree_size is zero" |
+
+### v1.2.0 LOW-severity hardening (tasks 051–055)
+
+| Priority | Task | Scope |
+|----------|------|-------|
+| 23 | 051 — Install-script false-positive reduction (L-3 + L-4) | Strip line/block comments before substring matching; require at least one of `+`, `/`, `=` in base64-shape detector so hex sequences don't false-positive |
+| 24 | 052 — Bound Levenshtein matrix on package-name length (L-5) | Short-circuit names longer than 256 chars to "not similar" before any matrix allocation |
+| 25 | 053 — Scrub user-visible error output (L-6) | Show only the outermost error message by default; full anyhow chain gated behind `--verbose` |
+| 26 | 054 — Cache DB privacy hardening (L-7) | `chmod 0600` on the SQLite DB (and any future `-wal` / `-shm` companion files); enable `PRAGMA journal_mode = WAL` for durability |
+| 27 | 055 — Sigstore re-verification on install path audit (L-9) | `--verbose` audit log line at install boundary naming locked version + hash; source-level comments record the TOCTOU gap between scan-pass and `exec` |
+
+### v1.2.0 dependency refreshes (tasks 057–058; 056 deferred)
+
+| Priority | Task | Scope |
+|----------|------|-------|
+| 28 | 057 — Bump `rusqlite` 0.31 → 0.39 | 8 minor versions, pulls `libsqlite3-sys` 0.28 → 0.37; no call-site changes |
+| 29 | 058 — Bump `x509-parser` 0.16 → 0.18 | Pulls `asn1-rs` 0.6 → 0.7, `der-parser` 9 → 10; sigstore verification fixtures byte-identical |
+| —  | 056 — Bump `reqwest` 0.12 → 0.13 | **Deferred** — `aws-lc-rs` requires `cmake` at build time which the aarch64 `cross` runner does not ship. See `docs/tasks/backlog/056-bump-reqwest-0-13.md` for re-attempt paths |
+
+### v1.2.0 post-cut hardening (tasks 059–063)
+
+A third audit on the v1.2.0 prep branch surfaced five new LOW-severity
+findings, all fixed before tagging. Each is recorded in the
+*Notes on sigstore verification mechanics* section above.
+
+| Priority | Task | Scope |
+|----------|------|-------|
+| 30 | 059 — Close cache DB create-then-chmod TOCTOU (N-L-1) | `OpenOptions::new().write(true).create_new(true).mode(0o600).open(path)` on Unix before `Connection::open`, closing the brief window where the DB file existed as `0644` |
+| 31 | 060 — Validate Go version strings before URL composition (N-L-2) | `validate_go_version` rejects `/?#%@\r\n`, `..`, and percent-encoded forms before any `proxy.golang.org` URL is built; surfaces as `RegistryError::InvalidVersion` |
+| 32 | 061 — Verbose-gate `parse_tlog_entries` malformed-entry diagnostic (N-L-3) | Missing-field name only emits under `--verbose`; default error stays generic |
+| 33 | 062 — Single-parse refactor for `verify_rekor_checkpoint_impl` (N-L-4) | `verify_ecdsa_p256` returns `Result<ParsedNote<'_>, NoteVerifyOutcome>`; checkpoint verifier reuses the parsed note |
+| 34 | 063 — Reject empty `note_text` in `signed_note::parse` (N-L-5) | Fail-closed on zero-byte note bodies before any signature iteration |
 
 ### Still on the roadmap
 
