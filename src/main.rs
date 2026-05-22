@@ -68,7 +68,19 @@ enum HashVerifyDecision {
 /// | Some(a)     | None          | Reverify      |
 /// | None        | Some(b)       | Reverify      |
 /// | None        | None          | Reverify (fail-closed) |
+///
+/// Additionally, if the cached hash is `sha1:`-prefixed, always returns `Reverify`
+/// regardless of whether the registry hash matches.  SHA-1 is broken for collision
+/// resistance (SHAttered-class attacks); a matching `sha1:` hash cannot be trusted
+/// as a cache gate (REQ-040-01).  This also handles old database rows that were
+/// stored before this policy was introduced.
 fn verify_hash(cached: Option<&str>, registry: Option<&str>) -> HashVerifyDecision {
+    // SHA-1 hashes are never accepted as a cache trust gate (H-4 security fix).
+    if let Some(c) = cached {
+        if c.starts_with("sha1:") {
+            return HashVerifyDecision::Reverify;
+        }
+    }
     match (cached, registry) {
         (Some(c), Some(r)) if c == r => HashVerifyDecision::HonorCache,
         _ => HashVerifyDecision::Reverify,
@@ -377,9 +389,27 @@ async fn run_check(
                     });
                     continue;
                 } else {
-                    // Hash mismatch (or both None) — invalidate and fall through to re-scan.
-                    eprintln!("cache hash mismatch for {pkg_name}; re-scanning");
-                    let _ = cache.invalidate(pkg_name, resolved_version, &reg_str);
+                    // Hash mismatch (or both None, or sha1-prefixed) — fall through to re-scan.
+                    //
+                    // Distinguish sha1-bypass from a genuine hash mismatch so the log
+                    // message is actionable for operators (REQ-040-05).
+                    let is_sha1_bypass = entry
+                        .content_hash
+                        .as_deref()
+                        .is_some_and(|h| h.starts_with("sha1:"));
+                    if is_sha1_bypass {
+                        if verbose {
+                            eprintln!(
+                                "sha1 hash not accepted for cache short-circuit; re-scanning {pkg_name}"
+                            );
+                        }
+                        // Do not invalidate the row — it may carry useful audit metadata
+                        // (provenance_identity, scanned_at).  The lookup will always reverify
+                        // on the next run because verify_hash refuses sha1 hashes.
+                    } else {
+                        eprintln!("cache hash mismatch for {pkg_name}; re-scanning");
+                        let _ = cache.invalidate(pkg_name, resolved_version, &reg_str);
+                    }
                     // `fetch_result` is already the fresh metadata; the full scan below
                     // will reuse it without making an extra network call.
                 }
@@ -599,12 +629,35 @@ async fn run_check(
         }
 
         // Store in cache using the resolved version string as the key (REQ-038-02).
+        //
+        // SHA-1 cache bypass (REQ-040-03): for `pass` and `warn` verdicts whose only
+        // available content hash is `sha1:`-prefixed, store `content_hash = NULL`.
+        // Storing NULL forces the task-030 hash-verify step to always return `Reverify`
+        // on the next lookup, preventing a sha1-collision attack from silently short-
+        // circuiting the full scan pipeline.  For `block` verdicts the sha1 hash is
+        // stored normally — caching a block is safe because the next scan would
+        // re-block, not silently pass (REQ-040-02).
+        let cache_hash = if matches!(result_str.as_str(), "pass" | "warn")
+            && metadata
+                .content_hash
+                .as_deref()
+                .is_some_and(|h| h.starts_with("sha1:"))
+        {
+            if verbose {
+                eprintln!(
+                    "sha1 hash not accepted for cache short-circuit; re-scanning will occur on next run for {pkg_name}"
+                );
+            }
+            None
+        } else {
+            metadata.content_hash.as_deref()
+        };
         let _ = cache.insert(
             pkg_name,
             &metadata.version,
             &reg_str,
             &result_str,
-            metadata.content_hash.as_deref(),
+            cache_hash,
             ctx.provenance_identity.as_deref(),
         );
 
@@ -1017,6 +1070,44 @@ mod tests {
             decision,
             HashVerifyDecision::Reverify,
             "both-None should produce Reverify (fail-closed)"
+        );
+    }
+
+    // T-040-07: sha1-prefixed cached hash always returns Reverify — even when
+    // registry hash matches (chosen-prefix collision protection).
+    #[test]
+    fn verify_hash_sha1_cached_matching_returns_reverify() {
+        // T-040-07: both hashes match but cached is sha1: — must Reverify
+        let decision = verify_hash(Some("sha1:deadbeef"), Some("sha1:deadbeef"));
+        assert_eq!(
+            decision,
+            HashVerifyDecision::Reverify,
+            "T-040-07: matching sha1 hashes must still produce Reverify (collision attack surface)"
+        );
+    }
+
+    // T-040-08: sha1 cached hash against a sha512 registry hash — still Reverify
+    #[test]
+    fn verify_hash_sha1_cached_sha512_registry_returns_reverify() {
+        // T-040-08: algorithms differ — cached sha1, registry sha512
+        let decision = verify_hash(Some("sha1:deadbeef"), Some("sha512:aaaa"));
+        assert_eq!(
+            decision,
+            HashVerifyDecision::Reverify,
+            "T-040-08: sha1 cached hash against sha512 registry hash must Reverify"
+        );
+    }
+
+    // T-040-09 (unit part): sha512 cached hash with matching registry hash → HonorCache
+    // (regression guard — sha512 short-circuit must be unaffected by the sha1 fix)
+    #[test]
+    fn verify_hash_sha512_matching_honor_cache_unaffected() {
+        // T-040-09: sha512 must still short-circuit — no regression
+        let decision = verify_hash(Some("sha512:aaaa"), Some("sha512:aaaa"));
+        assert_eq!(
+            decision,
+            HashVerifyDecision::HonorCache,
+            "T-040-09: matching sha512 hashes should still produce HonorCache (no regression)"
         );
     }
 

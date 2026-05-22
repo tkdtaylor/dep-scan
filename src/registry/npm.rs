@@ -682,6 +682,51 @@ mod tests {
         );
     }
 
+    // T-040-01: Package with SRI `integrity` field returns sha512 hash (unchanged)
+    // The `shasum` field is present but must be ignored in favour of `integrity`.
+    #[test]
+    fn extract_npm_content_hash_prefers_integrity_over_shasum() {
+        let dist = NpmDist {
+            integrity: Some("sha512-AAEC".to_string()),
+            shasum: Some("da39a3ee5e6b4b0d3255bfef95601890afd80709".to_string()),
+        };
+        let result = extract_npm_content_hash(Some(&dist));
+        // sha512-AAEC decodes to bytes [0x00,0x01,0x02] → "sha512:000102"
+        assert_eq!(
+            result,
+            Some("sha512:000102".to_string()),
+            "T-040-01: integrity sha512-AAEC should decode to sha512:000102, ignoring shasum"
+        );
+    }
+
+    // T-040-02: Package with only `shasum` (no `integrity`) returns `sha1:`-prefixed hash.
+    // This is existing behaviour that must remain unchanged — the function still
+    // extracts the sha1 for informational purposes; policy enforcement is in the cache layer.
+    #[test]
+    fn extract_npm_content_hash_returns_sha1_prefix_for_shasum_only() {
+        let dist = NpmDist {
+            integrity: None,
+            shasum: Some("da39a3ee5e6b4b0d3255bfef95601890afd80709".to_string()),
+        };
+        let result = extract_npm_content_hash(Some(&dist));
+        assert_eq!(
+            result,
+            Some("sha1:da39a3ee5e6b4b0d3255bfef95601890afd80709".to_string()),
+            "T-040-02: sha1 fallback must still return sha1:<shasum> for informational use"
+        );
+    }
+
+    // T-040-03: Package with neither `integrity` nor `shasum` returns `None`.
+    #[test]
+    fn extract_npm_content_hash_none_when_both_absent() {
+        let dist = NpmDist {
+            integrity: None,
+            shasum: None,
+        };
+        let result = extract_npm_content_hash(Some(&dist));
+        assert_eq!(result, None, "T-040-03: both absent should return None");
+    }
+
     // T-029-04: npm client tolerates missing dist
     #[tokio::test]
     async fn npm_tolerates_missing_dist() {
