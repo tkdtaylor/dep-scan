@@ -55,11 +55,8 @@
 
 use std::sync::Arc;
 
-use base64::Engine as _;
-use ed25519_dalek::{Signature as Ed25519Signature, VerifyingKey};
-use sha2::{Digest, Sha256};
-
 use crate::policy::{Policy, PolicyResult};
+use crate::signed_note::{self, NoteVerifyOutcome};
 use crate::types::ScanContext;
 
 // ---------------------------------------------------------------------------
@@ -140,184 +137,14 @@ impl SumDbVerifier for RealSumDbVerifier {
 ///
 /// Extracted as a free function so that tests can supply different key strings
 /// while exercising the same verification path.
-pub fn verify_signed_note(signed_note: &str, key_str: &str) -> SumDbVerifyOutcome {
-    // Parse the key string: "<name>+<id>+<base64>"
-    let key_parts: Vec<&str> = key_str.splitn(3, '+').collect();
-    if key_parts.len() != 3 {
-        return SumDbVerifyOutcome::Invalid {
-            reason: format!("malformed key string: expected 3 '+'-separated fields, got {key_str}"),
-        };
-    }
-    let key_name = key_parts[0];
-    let _key_id_hex = key_parts[1];
-    let key_b64 = key_parts[2];
-
-    // Decode the key bytes (includes 0x01 marker byte + 32-byte Ed25519 key)
-    let key_bytes = match base64::engine::general_purpose::STANDARD.decode(key_b64) {
-        Ok(b) => b,
-        Err(e) => {
-            return SumDbVerifyOutcome::Invalid {
-                reason: format!("failed to decode public key base64: {e}"),
-            };
-        }
-    };
-
-    if key_bytes.len() != 33 || key_bytes[0] != 0x01 {
-        return SumDbVerifyOutcome::Invalid {
-            reason: format!(
-                "public key has unexpected format (expected 33 bytes with 0x01 prefix, got {} bytes with prefix 0x{:02x})",
-                key_bytes.len(),
-                key_bytes.first().copied().unwrap_or(0)
-            ),
-        };
-    }
-
-    // Build the VerifyingKey from the 32-byte Ed25519 key material
-    let verifying_key =
-        match VerifyingKey::from_bytes(key_bytes[1..33].try_into().expect("slice is 32 bytes")) {
-            Ok(k) => k,
-            Err(e) => {
-                return SumDbVerifyOutcome::Invalid {
-                    reason: format!("invalid Ed25519 public key: {e}"),
-                };
-            }
-        };
-
-    // Compute the expected 4-byte key ID:
-    // SHA256("hash:1:" || key_name || "\n" || key_bytes_raw)
-    // (key_bytes_raw = the 33 bytes decoded from key_b64)
-    let mut hasher = Sha256::new();
-    hasher.update(b"hash:1:");
-    hasher.update(key_name.as_bytes());
-    hasher.update(b"\n");
-    hasher.update(&key_bytes);
-    let hash = hasher.finalize();
-    let expected_key_id = &hash[..4];
-
-    // Parse the signed note to find the note text and signature lines.
-    // Format: "<note-text>\n\n— <key-name> <sig-base64>\n"
-    // We find the last "\n\n" to split note text from signature lines.
-    let note_end = match signed_note.rfind("\n\n") {
-        Some(pos) => pos + 1, // include the first \n, stop before second \n
-        None => {
-            return SumDbVerifyOutcome::Invalid {
-                reason: "signed note is missing the blank-line separator before signature lines"
-                    .to_string(),
-            };
-        }
-    };
-
-    // The note text is everything up to and including the trailing newline
-    // before the blank line: signed_note[..note_end]
-    let note_text = &signed_note[..note_end];
-    let sig_section = signed_note[note_end + 1..].trim();
-
-    // Parse each signature line: "— <key-name> <sig-base64>"
-    let mut verified = false;
-    let mut found_key_name = false;
-
-    for line in sig_section.lines() {
-        // The em-dash is U+2014 (3 bytes: 0xE2 0x80 0x94)
-        let line = line.trim();
-        if !line.starts_with('\u{2014}') {
-            continue; // not a signature line
-        }
-        // Strip the em-dash prefix
-        let rest = line['\u{2014}'.len_utf8()..].trim();
-        let parts: Vec<&str> = rest.splitn(2, ' ').collect();
-        if parts.len() != 2 {
-            continue;
-        }
-        let sig_key_name = parts[0];
-        let sig_b64 = parts[1];
-
-        if sig_key_name != key_name {
-            continue; // different key — skip
-        }
-
-        found_key_name = true;
-
-        // Decode the signature bytes: [4-byte key-id] || [64-byte Ed25519 sig]
-        let sig_bytes = match base64::engine::general_purpose::STANDARD.decode(sig_b64) {
-            Ok(b) => b,
-            Err(e) => {
-                return SumDbVerifyOutcome::Invalid {
-                    reason: format!(
-                        "failed to decode signature base64 for key '{sig_key_name}': {e}"
-                    ),
-                };
-            }
-        };
-
-        if sig_bytes.len() < 68 {
-            return SumDbVerifyOutcome::Invalid {
-                reason: format!(
-                    "signature for key '{sig_key_name}' is too short: {} bytes (expected at least 68)",
-                    sig_bytes.len()
-                ),
-            };
-        }
-
-        // Verify the 4-byte key ID matches
-        let sig_key_id = &sig_bytes[..4];
-        if sig_key_id != expected_key_id {
-            return SumDbVerifyOutcome::Invalid {
-                reason: format!(
-                    "signature key ID {:02x}{:02x}{:02x}{:02x} does not match pinned key ID {:02x}{:02x}{:02x}{:02x}",
-                    sig_key_id[0],
-                    sig_key_id[1],
-                    sig_key_id[2],
-                    sig_key_id[3],
-                    expected_key_id[0],
-                    expected_key_id[1],
-                    expected_key_id[2],
-                    expected_key_id[3],
-                ),
-            };
-        }
-
-        // Extract the 64-byte Ed25519 signature
-        let ed25519_sig_bytes: [u8; 64] = match sig_bytes[4..].try_into() {
-            Ok(b) => b,
-            Err(_) => {
-                return SumDbVerifyOutcome::Invalid {
-                    reason: format!(
-                        "signature payload for key '{sig_key_name}' is not exactly 64 bytes (got {})",
-                        sig_bytes.len() - 4
-                    ),
-                };
-            }
-        };
-
-        let signature = Ed25519Signature::from_bytes(&ed25519_sig_bytes);
-
-        // Verify: Ed25519.Verify(verifying_key, note_text, signature)
-        use ed25519_dalek::Verifier as _;
-        match verifying_key.verify(note_text.as_bytes(), &signature) {
-            Ok(()) => {
-                verified = true;
-                break;
-            }
-            Err(e) => {
-                return SumDbVerifyOutcome::Invalid {
-                    reason: format!("Ed25519 signature verification failed: {e}"),
-                };
-            }
-        }
-    }
-
-    if !found_key_name {
-        return SumDbVerifyOutcome::Invalid {
-            reason: format!("no signature line found for key '{key_name}'"),
-        };
-    }
-
-    if verified {
-        SumDbVerifyOutcome::Valid
-    } else {
-        SumDbVerifyOutcome::Invalid {
-            reason: "signature did not verify".to_string(),
-        }
+///
+/// Internally delegates to the shared [`crate::signed_note::verify_ed25519`]
+/// primitive (task 036 extracted the note parsing + Ed25519 verifier out of
+/// this module so Rekor's signed-checkpoint code can share the parser).
+pub fn verify_signed_note(signed_note_str: &str, key_str: &str) -> SumDbVerifyOutcome {
+    match signed_note::verify_ed25519(signed_note_str, key_str) {
+        NoteVerifyOutcome::Valid => SumDbVerifyOutcome::Valid,
+        NoteVerifyOutcome::Invalid { reason } => SumDbVerifyOutcome::Invalid { reason },
     }
 }
 
@@ -737,8 +564,10 @@ mod tests {
     // We use ed25519-dalek to sign the note in the test.
 
     fn generate_test_key_and_signed_note(note_text: &str) -> (String, String) {
+        use base64::Engine as _;
         use ed25519_dalek::{Signer as _, SigningKey};
         use rand_core::OsRng;
+        use sha2::{Digest, Sha256};
 
         let signing_key = SigningKey::generate(&mut OsRng);
         let verifying_key = signing_key.verifying_key();
@@ -846,6 +675,8 @@ mod tests {
 
     #[test]
     fn t034_09_public_key_is_hardcoded() {
+        use base64::Engine as _;
+        use ed25519_dalek::VerifyingKey;
         // T-034-09: verify SUMDB_PUBLIC_KEY_STR is a const (compile-time check)
         // and that it contains the expected key name.
         assert!(

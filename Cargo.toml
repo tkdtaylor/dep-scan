@@ -24,7 +24,7 @@ regex = "1"
 base64 = "0.22"
 # Task 032 — npm provenance attestation verification
 # p256 for ECDSA P-256 signature verification (Fulcio leaf cert key type for npm)
-p256 = { version = "0.13", features = ["ecdsa"] }
+p256 = { version = "0.13", features = ["ecdsa", "pem"] }
 # Task 035 — full Fulcio root chain verification.
 # `verify` enables ring-backed signature verification for chain walk (P-256,
 # P-384 ecdsa, RSA — Fulcio v1 root + intermediate are both P-384/SHA384, leaf

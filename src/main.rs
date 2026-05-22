@@ -5,6 +5,7 @@ mod lockfile;
 mod osv;
 mod policy;
 mod registry;
+mod signed_note;
 mod sigstore_verify;
 mod types;
 mod typosquat;

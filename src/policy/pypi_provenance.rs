@@ -181,6 +181,7 @@ mod tests {
                 }],
             },
             verification_material: VerificationMaterial::X509CertChain(vec!["MIIB...".to_string()]),
+            tlog_entries: vec![],
         }
     }
 

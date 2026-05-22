@@ -39,6 +39,63 @@ pub struct AttestationBundle {
 
     /// The verification material (x509 cert chain or public key hint).
     pub verification_material: VerificationMaterial,
+
+    /// Rekor transparency log entries attached to this bundle.  Real bundles
+    /// have exactly one; empty for synthetic test fixtures and older
+    /// pre-task-036 unit tests.  Populated from `verificationMaterial.tlogEntries`
+    /// (npm) or `verification_material.transparency_entries` (PEP 740 PyPI).
+    pub tlog_entries: Vec<TlogEntry>,
+}
+
+/// A single Rekor transparency log entry attached to a sigstore bundle.
+///
+/// See [task 036 spec](../../docs/tasks/test-specs/036-rekor-inclusion-proof-test-spec.md)
+/// for the verification semantics applied to these fields.
+#[derive(Debug, Clone, PartialEq)]
+#[allow(dead_code)]
+pub struct TlogEntry {
+    /// 0-based position of this entry in the transparency log.
+    pub log_index: u64,
+    /// Base64-encoded SHA-256 of the transparency log's public key.
+    pub log_id: String,
+    /// Entry kind + version (e.g. `("intoto", "0.0.2")` or `("dsse", "0.0.1")`).
+    pub kind_version: KindVersion,
+    /// Unix seconds at which Rekor committed this entry.  Used by the
+    /// timestamp-window check to prove the leaf cert was alive at signing time.
+    pub integrated_time: i64,
+    /// Base64-decoded canonical JSON body — the leaf payload that Rekor's
+    /// Merkle tree commits to.  Its sha256 (with RFC 6962 `0x00` leaf prefix)
+    /// is what the inclusion proof verifies.
+    pub canonicalized_body: Vec<u8>,
+    /// Merkle inclusion proof for this entry against a signed Rekor tree head.
+    pub inclusion_proof: InclusionProof,
+}
+
+/// Entry-kind identifier from `tlogEntries[].kindVersion`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct KindVersion {
+    /// Entry-kind name (e.g. `"intoto"`, `"dsse"`, `"hashedrekord"`, `"helm"`).
+    pub kind: String,
+    /// Entry-kind version (e.g. `"0.0.1"`, `"0.0.2"`).
+    pub version: String,
+}
+
+/// Merkle inclusion proof + optional signed tree head (Rekor checkpoint).
+#[derive(Debug, Clone, PartialEq)]
+#[allow(dead_code)]
+pub struct InclusionProof {
+    /// 0-based position of the leaf within the tree at proof time.
+    pub log_index: u64,
+    /// Size of the tree at proof time (1-based count of leaves).
+    pub tree_size: u64,
+    /// Base64-encoded root hash of the tree at `tree_size`.
+    pub root_hash_b64: String,
+    /// Base64-encoded audit-path hashes (each is a 32-byte SHA-256).
+    pub hashes_b64: Vec<String>,
+    /// Optional signed-note envelope (the Rekor tree head signature).
+    /// Verifying this commits the rest of the proof to a Rekor-signed
+    /// checkpoint, which is the actual transparency-log root of trust.
+    pub checkpoint: Option<String>,
 }
 
 /// A DSSE (Dead Simple Signing Envelope) envelope.
@@ -304,14 +361,107 @@ pub fn parse_attestation_response(body: &[u8]) -> Result<Vec<AttestationBundle>,
                 VerificationMaterial::PublicKeyHint(String::new())
             };
 
+        // Parse tlogEntries — task 036. Real bundles have exactly one entry.
+        // We surface every entry to the verifier and let it enforce the
+        // exactly-one constraint (rejecting ≥2 with a dedicated error).
+        let tlog_entries = parse_tlog_entries(&vm["tlogEntries"]);
+
         bundles.push(AttestationBundle {
             predicate_type,
             dsse_envelope,
             verification_material,
+            tlog_entries,
         });
     }
 
     Ok(bundles)
+}
+
+// ---------------------------------------------------------------------------
+// tlogEntries parser (task 036)
+// ---------------------------------------------------------------------------
+
+/// Parse a sigstore `tlogEntries` JSON array into a `Vec<TlogEntry>`.
+///
+/// Accepts both the npm shape (camelCase keys: `logIndex`, `kindVersion`,
+/// `integratedTime`, `canonicalizedBody`, `inclusionProof`) and the PEP 740
+/// PyPI shape (the same camelCase keys appear inside
+/// `verification_material.transparency_entries`).
+///
+/// Returns an empty vec if the input is not a JSON array; this is safe
+/// because the consuming verifier rejects bundles whose `tlog_entries` is
+/// empty.
+pub fn parse_tlog_entries(value: &serde_json::Value) -> Vec<TlogEntry> {
+    use base64::Engine as _;
+
+    let arr = match value.as_array() {
+        Some(a) => a,
+        None => return Vec::new(),
+    };
+
+    let mut out = Vec::with_capacity(arr.len());
+    for entry in arr {
+        // Integer fields may arrive as JSON numbers or strings (Rekor's
+        // pubkey-fetching code sometimes string-encodes the index/tree-size
+        // because they exceed JS-safe integer range).
+        let log_index = entry["logIndex"].as_u64().or_else(|| {
+            entry["logIndex"]
+                .as_str()
+                .and_then(|s| s.parse::<u64>().ok())
+        });
+        let integrated_time = entry["integratedTime"].as_i64().or_else(|| {
+            entry["integratedTime"]
+                .as_str()
+                .and_then(|s| s.parse::<i64>().ok())
+        });
+
+        let kv = &entry["kindVersion"];
+        let kind = kv["kind"].as_str().unwrap_or("").to_string();
+        let version = kv["version"].as_str().unwrap_or("").to_string();
+
+        let canonicalized_body_b64 = entry["canonicalizedBody"].as_str().unwrap_or("");
+        let canonicalized_body = base64::engine::general_purpose::STANDARD
+            .decode(canonicalized_body_b64)
+            .unwrap_or_default();
+
+        let log_id = entry["logId"]["keyId"]
+            .as_str()
+            .or_else(|| entry["logId"].as_str())
+            .unwrap_or("")
+            .to_string();
+
+        let ip = &entry["inclusionProof"];
+        let inclusion_proof = InclusionProof {
+            log_index: ip["logIndex"]
+                .as_u64()
+                .or_else(|| ip["logIndex"].as_str().and_then(|s| s.parse::<u64>().ok()))
+                .unwrap_or(0),
+            tree_size: ip["treeSize"]
+                .as_u64()
+                .or_else(|| ip["treeSize"].as_str().and_then(|s| s.parse::<u64>().ok()))
+                .unwrap_or(0),
+            root_hash_b64: ip["rootHash"].as_str().unwrap_or("").to_string(),
+            hashes_b64: ip["hashes"]
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default(),
+            checkpoint: ip["checkpoint"]["envelope"].as_str().map(|s| s.to_string()),
+        };
+
+        out.push(TlogEntry {
+            log_index: log_index.unwrap_or(0),
+            log_id,
+            kind_version: KindVersion { kind, version },
+            integrated_time: integrated_time.unwrap_or(0),
+            canonicalized_body,
+            inclusion_proof,
+        });
+    }
+    out
 }
 
 // ---------------------------------------------------------------------------

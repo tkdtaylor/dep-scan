@@ -267,37 +267,57 @@ pub fn parse_simple_index(body: &[u8]) -> Result<Vec<SimpleIndexFile>, RegistryE
 
 /// Parse the PEP 740 provenance endpoint JSON body into an `AttestationBundle`.
 ///
-/// PEP 740 format (simplified):
-/// ```json
-/// {
-///   "attestations": [
-///     {
-///       "bundle": { /* sigstore bundle */ }
-///     }
-///   ]
-/// }
-/// ```
+/// Accepts two shapes:
+///
+/// 1. **Synthetic / test shape**:
+///    ```json
+///    { "attestations": [{ "bundle": { "dsseEnvelope": ..., "verificationMaterial": ... } }] }
+///    ```
+/// 2. **Real PEP 740 shape** (as served by pypi.org/integrity/...):
+///    ```json
+///    {
+///      "attestation_bundles": [{
+///        "attestations": [{
+///          "envelope": { "statement": "<b64>", "signature": "<b64>" },
+///          "verification_material": {
+///            "certificate": "<b64-DER>",
+///            "transparency_entries": [...]
+///          }
+///        }]
+///      }]
+///    }
+///    ```
 ///
 /// Returns `Ok(Some(bundle))` for the first usable bundle found.
-/// Returns `Ok(None)` when the array is empty.
-/// Returns `Err(ParseError)` for invalid JSON or missing required fields.
+/// Returns `Ok(None)` when no attestations are present.
+/// Returns `Err(ParseError)` for invalid JSON.
 pub fn parse_provenance_response(body: &[u8]) -> Result<Option<AttestationBundle>, RegistryError> {
-    // First try to detect non-JSON response.
     let raw: serde_json::Value = serde_json::from_slice(body).map_err(|e| {
         RegistryError::ParseError(format!("invalid JSON in provenance response: {e}"))
     })?;
 
-    let attestations = match raw["attestations"].as_array() {
-        Some(arr) => arr,
-        None => {
-            return Err(RegistryError::ParseError(
-                "missing 'attestations' array in provenance response".to_string(),
-            ));
-        }
+    // Dispatch on top-level shape.
+    if raw["attestation_bundles"].is_array() {
+        parse_real_pep740(&raw)
+    } else if raw["attestations"].is_array() {
+        parse_synthetic_shape(&raw)
+    } else {
+        Err(RegistryError::ParseError(
+            "missing 'attestations' or 'attestation_bundles' in provenance response".to_string(),
+        ))
+    }
+}
+
+fn parse_synthetic_shape(
+    raw: &serde_json::Value,
+) -> Result<Option<AttestationBundle>, RegistryError> {
+    use crate::registry::npm_attestation::{
+        DsseEnvelope, DsseSignature, VerificationMaterial, parse_tlog_entries,
     };
 
-    // Import the npm_attestation parsing types for reuse.
-    use crate::registry::npm_attestation::{DsseEnvelope, DsseSignature, VerificationMaterial};
+    let attestations = raw["attestations"]
+        .as_array()
+        .expect("checked in caller that 'attestations' is an array");
 
     for att_val in attestations {
         let bundle_val = &att_val["bundle"];
@@ -305,7 +325,6 @@ pub fn parse_provenance_response(body: &[u8]) -> Result<Option<AttestationBundle
             continue;
         }
 
-        // Parse DSSE envelope.
         let dsse = &bundle_val["dsseEnvelope"];
         if dsse.is_null() {
             continue;
@@ -332,7 +351,6 @@ pub fn parse_provenance_response(body: &[u8]) -> Result<Option<AttestationBundle
             signatures,
         };
 
-        // Parse verification material.
         let vm = &bundle_val["verificationMaterial"];
         let verification_material =
             if let Some(chain) = vm["x509CertificateChain"]["certificates"].as_array() {
@@ -348,8 +366,8 @@ pub fn parse_provenance_response(body: &[u8]) -> Result<Option<AttestationBundle
                 VerificationMaterial::PublicKeyHint(String::new())
             };
 
-        // PEP 740 bundles may not have a separate predicateType wrapper —
-        // extract from the DSSE payload type or default.
+        let tlog_entries = parse_tlog_entries(&vm["tlogEntries"]);
+
         let predicate_type = att_val["predicateType"]
             .as_str()
             .unwrap_or("https://docs.pypi.org/attestations/publish/v1")
@@ -359,7 +377,68 @@ pub fn parse_provenance_response(body: &[u8]) -> Result<Option<AttestationBundle
             predicate_type,
             dsse_envelope,
             verification_material,
+            tlog_entries,
         }));
+    }
+
+    Ok(None)
+}
+
+fn parse_real_pep740(raw: &serde_json::Value) -> Result<Option<AttestationBundle>, RegistryError> {
+    use crate::registry::npm_attestation::{
+        DsseEnvelope, DsseSignature, VerificationMaterial, parse_tlog_entries,
+    };
+
+    let bundles = raw["attestation_bundles"]
+        .as_array()
+        .expect("checked in caller that 'attestation_bundles' is an array");
+
+    for bundle_obj in bundles {
+        let attestations = match bundle_obj["attestations"].as_array() {
+            Some(a) => a,
+            None => continue,
+        };
+
+        for att in attestations {
+            let env = &att["envelope"];
+            if env.is_null() {
+                continue;
+            }
+
+            let payload_b64 = env["statement"].as_str().unwrap_or("").to_string();
+            // PEP 740's envelope is implicitly DSSE-shaped with payloadType
+            // application/vnd.in-toto+json (the in-toto Statement v1).
+            let payload_type = "application/vnd.in-toto+json".to_string();
+            let sig_b64 = env["signature"].as_str().unwrap_or("").to_string();
+
+            let dsse_envelope = DsseEnvelope {
+                payload_b64,
+                payload_type,
+                signatures: vec![DsseSignature {
+                    sig_b64,
+                    keyid: String::new(),
+                }],
+            };
+
+            let vm = &att["verification_material"];
+            // PEP 740 carries a single cert (the leaf) under
+            // verification_material.certificate. Wrap it as a single-element
+            // X509CertChain for compatibility with the existing verifier.
+            let verification_material = if let Some(cert) = vm["certificate"].as_str() {
+                VerificationMaterial::X509CertChain(vec![cert.to_string()])
+            } else {
+                VerificationMaterial::PublicKeyHint(String::new())
+            };
+
+            let tlog_entries = parse_tlog_entries(&vm["transparency_entries"]);
+
+            return Ok(Some(AttestationBundle {
+                predicate_type: "https://docs.pypi.org/attestations/publish/v1".to_string(),
+                dsse_envelope,
+                verification_material,
+                tlog_entries,
+            }));
+        }
     }
 
     Ok(None)
