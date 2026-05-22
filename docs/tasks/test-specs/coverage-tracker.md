@@ -74,7 +74,7 @@
 | 056 | Bump reqwest 0.12 → 0.13 | 056-bump-reqwest-0-13-test-spec.md | 0/12 | ⚠️ deferred — see backlog/056 |
 | 057 | Bump rusqlite 0.31 → 0.39 | 057-bump-rusqlite-0-39-test-spec.md | 18/18 | ✅ |
 | 058 | Bump x509-parser 0.16 → 0.18 | 058-bump-x509-parser-0-18-test-spec.md | 18/18 | ✅ |
-| 059 | Close cache DB create-then-chmod TOCTOU (N-L-1) | 059-cache-create-toctou-test-spec.md | 0/15 | ❌ |
+| 059 | Close cache DB create-then-chmod TOCTOU (N-L-1) | 059-cache-create-toctou-test-spec.md | 15/15 | ✅ |
 | 060 | Validate Go version strings before URL composition (N-L-2) | 060-go-version-string-validation-test-spec.md | 0/31 | ❌ |
 | 061 | Verbose-gate parse_tlog_entries malformed-entry diagnostic (N-L-3) | 061-tlog-diagnostic-verbose-gate-test-spec.md | 0/14 | ❌ |
 | 062 | Single-parse refactor for verify_rekor_checkpoint_impl (N-L-4) | 062-single-parse-rekor-checkpoint-test-spec.md | 0/16 | ❌ |

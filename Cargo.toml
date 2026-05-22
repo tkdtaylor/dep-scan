@@ -49,3 +49,6 @@ assert_cmd = "2"
 predicates = "3"
 # Task 035 — generate test cert chains (test trust root + leaves with custom EKUs)
 rcgen = "0.13"
+# Task 059 — umask manipulation in TOCTOU tests (already a transitive dep; declared
+# here so cfg(test) code can call libc::umask on Unix)
+libc = "0.2"

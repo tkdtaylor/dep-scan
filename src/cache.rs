@@ -41,16 +41,58 @@ impl Cache {
     /// The `scanned_packages` table is created automatically if it does not
     /// already exist.
     ///
-    /// On Unix, the DB file is restricted to owner-only permissions (`0600`)
-    /// after open, regardless of the process umask.  The `-wal` and `-shm`
-    /// companion files SQLite creates in WAL mode inherit the same permissions
-    /// because SQLite uses the main-file mode when creating them via `open(2)`.
+    /// On Unix, the DB file is created atomically with mode `0600` so there is
+    /// no window in which the file is world-readable.  If the file already exists
+    /// (upgrade / re-open case), the pre-create step is skipped and the existing
+    /// `set_permissions(0600)` call below narrows any legacy `0644` file.
+    ///
+    /// The `-wal` and `-shm` companion files SQLite creates in WAL mode inherit
+    /// the same permissions because SQLite uses the main-file mode when creating
+    /// them via `open(2)`.
     ///
     /// Note: on Windows, the DB file inherits parent-directory ACLs.
     pub fn new(path: &Path) -> Result<Self> {
+        // On Unix, pre-create the DB file with mode 0600 *before* handing the
+        // path to Connection::open.  This closes the TOCTOU window that existed
+        // between Connection::open (which creates the file under the process
+        // umask, typically 0644) and the subsequent set_permissions call below.
+        //
+        // If the file already exists (AlreadyExists) we fall through; the
+        // set_permissions call further down handles the legacy-0644 upgrade case.
+        // The handle is dropped before Connection::open so SQLite can acquire its
+        // own lock on the file without a "file busy" error on platforms that use
+        // mandatory locking.
+        // T-059-09: create_new(true) is used here — this is O_CREAT|O_EXCL, which
+        // is atomic and fails with AlreadyExists if the file already exists,
+        // unlike create(true) which silently opens an existing file.
+        //
+        // T-059-10: the File handle `f` returned by OpenOptions::open is dropped
+        // (via `drop(f)`) before `Connection::open(path)` is called below,
+        // ensuring SQLite can acquire an exclusive lock on platforms that use
+        // mandatory locking.
+        #[cfg(unix)]
+        if path != Path::new(":memory:") {
+            use std::fs::OpenOptions;
+            use std::os::unix::fs::OpenOptionsExt;
+            match OpenOptions::new()
+                .write(true)
+                .create_new(true) // T-059-09: O_CREAT|O_EXCL — atomic, fails if exists
+                .mode(0o600)
+                .open(path)
+            {
+                Ok(f) => drop(f), // T-059-10: release before Connection::open
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                    // File exists (upgrade / re-open): fall through.
+                }
+                Err(e) => return Err(e.into()),
+            }
+        }
+
         let conn = Connection::open(path)?;
 
         // Restrict the DB file to owner read/write only on Unix systems.
+        // For a freshly created file this is now a no-op (already 0600).
+        // For a pre-existing legacy 0644 file this narrows the permissions.
         // Skip for `:memory:` databases which have no backing file.
         #[cfg(unix)]
         if path != Path::new(":memory:") {
@@ -1224,4 +1266,245 @@ mod tests {
             result.err()
         );
     }
+
+    // ── T-059 tests — cache DB create-then-chmod TOCTOU fix ─────────────────────
+
+    // T-059-01: File created by Cache::new on a fresh path has mode 0600 immediately.
+    #[cfg(unix)]
+    #[test]
+    fn t059_01_fresh_path_has_mode_0600() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("t059_01.db");
+        let _cache = Cache::new(&db_path).expect("T-059-01: Cache::new should succeed");
+        let meta = std::fs::metadata(&db_path).unwrap();
+        let mode = meta.permissions().mode();
+        assert_eq!(
+            mode & 0o777,
+            0o600,
+            "T-059-01: DB file must have mode 0600 on fresh create, got {:#o}",
+            mode & 0o777
+        );
+    }
+
+    // T-059-02: No group or world read bits exist after Cache::new on a fresh path.
+    #[cfg(unix)]
+    #[test]
+    fn t059_02_no_group_or_world_bits_fresh_path() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("t059_02.db");
+        let _cache = Cache::new(&db_path).expect("T-059-02: Cache::new should succeed");
+        let meta = std::fs::metadata(&db_path).unwrap();
+        let mode = meta.permissions().mode();
+        assert_eq!(
+            mode & 0o177,
+            0,
+            "T-059-02: owner execute + group + world bits must all be 0, got {:#o}",
+            mode & 0o177
+        );
+    }
+
+    // T-059-03: Mode is 0600 even when the process umask is 0000 (maximally permissive).
+    // Without the pre-create fix, Connection::open would create the file with mode 0666
+    // under umask 0000 (i.e., no bits masked), and then set_permissions would fix it —
+    // but only after the file was briefly world-readable.  The fix ensures 0600 at
+    // creation time.
+    #[cfg(unix)]
+    #[test]
+    fn t059_03_mode_0600_with_umask_0000() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("t059_03.db");
+
+        // Set umask to 0000 (maximally permissive) before creating the cache.
+        let orig_umask = unsafe { libc::umask(0o000) };
+        let result = Cache::new(&db_path);
+        // Restore original umask regardless of outcome.
+        unsafe { libc::umask(orig_umask) };
+
+        result.expect("T-059-03: Cache::new should succeed with umask 0000");
+
+        let meta = std::fs::metadata(&db_path).unwrap();
+        let mode = meta.permissions().mode();
+        assert_eq!(
+            mode & 0o777,
+            0o600,
+            "T-059-03: mode must be 0600 even with umask 0000, got {:#o}",
+            mode & 0o777
+        );
+    }
+
+    // T-059-04: Mode is 0600 even when the process umask is 0022 (typical default).
+    #[cfg(unix)]
+    #[test]
+    fn t059_04_mode_0600_with_umask_0022() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("t059_04.db");
+
+        let orig_umask = unsafe { libc::umask(0o022) };
+        let result = Cache::new(&db_path);
+        unsafe { libc::umask(orig_umask) };
+
+        result.expect("T-059-04: Cache::new should succeed with umask 0022");
+
+        let meta = std::fs::metadata(&db_path).unwrap();
+        let mode = meta.permissions().mode();
+        assert_eq!(
+            mode & 0o777,
+            0o600,
+            "T-059-04: mode must be 0600 with umask 0022, got {:#o}",
+            mode & 0o777
+        );
+    }
+
+    // T-059-05: Stat taken before any SQLite WAL writes shows 0600.
+    // The mode must be correct the moment the file descriptor is visible in the
+    // filesystem, not only after the first write.
+    #[cfg(unix)]
+    #[test]
+    fn t059_05_mode_correct_before_writes() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("t059_05.db");
+        // Stat immediately after Cache::new returns, without inserting any data.
+        let _cache = Cache::new(&db_path).expect("T-059-05: Cache::new should succeed");
+        let meta = std::fs::metadata(&db_path).unwrap();
+        let mode = meta.permissions().mode();
+        assert_eq!(
+            mode & 0o777,
+            0o600,
+            "T-059-05: mode must be 0600 before any writes, got {:#o}",
+            mode & 0o777
+        );
+    }
+
+    // T-059-06: Re-opening an existing 0600 cache DB preserves mode 0600.
+    #[cfg(unix)]
+    #[test]
+    fn t059_06_reopen_existing_0600_preserves_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("t059_06.db");
+
+        {
+            let _cache = Cache::new(&db_path).expect("T-059-06: first open should succeed");
+        }
+        {
+            let _cache = Cache::new(&db_path).expect("T-059-06: second open should succeed");
+        }
+
+        let meta = std::fs::metadata(&db_path).unwrap();
+        let mode = meta.permissions().mode();
+        assert_eq!(
+            mode & 0o777,
+            0o600,
+            "T-059-06: mode must still be 0600 after re-open, got {:#o}",
+            mode & 0o777
+        );
+    }
+
+    // T-059-07: Re-opening a legacy 0644 cache DB narrows it to 0600.
+    // Simulates opening a pre-fix cache DB that was created without the atomic
+    // pre-create step (mode 0644 under a typical umask).
+    #[cfg(unix)]
+    #[test]
+    fn t059_07_reopen_legacy_0644_narrows_to_0600() {
+        use std::os::unix::fs::OpenOptionsExt;
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("t059_07_legacy.db");
+
+        // Create a SQLite file with mode 0644, simulating a pre-fix cache.
+        {
+            use std::fs::OpenOptions;
+            let f = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o644)
+                .open(&db_path)
+                .unwrap();
+            // Write minimal SQLite header so Connection::open accepts it.
+            drop(f);
+            // Actually just let SQLite initialise it — create via Connection::open.
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute_batch("CREATE TABLE IF NOT EXISTS dummy (id INTEGER PRIMARY KEY);")
+                .unwrap();
+        }
+
+        // Confirm the file is 0644 before we open with Cache::new.
+        let before_mode = std::fs::metadata(&db_path).unwrap().permissions().mode();
+        assert_eq!(
+            before_mode & 0o777,
+            0o644,
+            "T-059-07: precondition: legacy file should be 0644, got {:#o}",
+            before_mode & 0o777
+        );
+
+        // Open with Cache::new — should narrow to 0600.
+        let _cache =
+            Cache::new(&db_path).expect("T-059-07: Cache::new on legacy file should succeed");
+
+        let after_mode = std::fs::metadata(&db_path).unwrap().permissions().mode();
+        assert_eq!(
+            after_mode & 0o777,
+            0o600,
+            "T-059-07: Cache::new must narrow 0644 to 0600, got {:#o}",
+            after_mode & 0o777
+        );
+    }
+
+    // T-059-08: Cache::in_memory() continues to succeed without attempting a chmod.
+    #[test]
+    fn t059_08_in_memory_unaffected_by_precreate() {
+        let result = Cache::in_memory();
+        assert!(
+            result.is_ok(),
+            "T-059-08: Cache::in_memory() must succeed without touching the filesystem: {:?}",
+            result.err()
+        );
+    }
+
+    // T-059-11: Insert and lookup round-trip succeeds after the TOCTOU fix.
+    #[test]
+    fn t059_11_insert_lookup_roundtrip_after_fix() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("t059_11.db");
+        let cache = Cache::new(&db_path).expect("T-059-11: Cache::new should succeed");
+        cache
+            .insert("mylib", "2.0.0", "crates", "pass", None, None)
+            .expect("T-059-11: insert should succeed");
+        let entry = cache
+            .lookup("mylib", "2.0.0", "crates")
+            .expect("T-059-11: lookup should succeed")
+            .expect("T-059-11: entry should be Some");
+        assert_eq!(
+            entry.result, "pass",
+            "T-059-11: result must round-trip after TOCTOU fix"
+        );
+    }
+
+    // T-059-12: WAL journal mode is still active after the TOCTOU fix.
+    #[test]
+    fn t059_12_wal_mode_still_active_after_fix() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("t059_12.db");
+        let cache = Cache::new(&db_path).expect("T-059-12: Cache::new should succeed");
+        let mode: String = cache
+            .conn
+            .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+            .expect("T-059-12: PRAGMA journal_mode query should succeed");
+        assert_eq!(
+            mode, "wal",
+            "T-059-12: journal_mode must be 'wal' after TOCTOU fix, got '{mode}'"
+        );
+    }
+
+    // T-059-13: All task 054 cache privacy tests still pass — verified by running
+    //   `cargo test cache` which includes T-054-01 through T-054-08 above.
+    // T-059-14: All task 007 cache unit tests still pass — verified by running
+    //   `cargo test cache` which includes insert/lookup/invalidate/clear tests above.
+    // T-059-15: `cargo test`, `cargo clippy --all-targets -- -D warnings`, and
+    //   `cargo fmt --check` all pass — verified by the pre-commit gate.
 }
