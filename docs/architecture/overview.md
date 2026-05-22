@@ -20,7 +20,7 @@ dep-scan is organized into four layers plus a cross-cutting verification helper:
 - `sigstore_verify.rs` — Fulcio cert chain walk + DSSE signature verification + Rekor inclusion-proof + timestamp window check. Algorithm-agnostic (`sha512` for npm, `sha256` for PyPI). Used by both `policy/npm_provenance` and `policy/pypi_provenance`.
 - `signed_note.rs` — RFC sumdb-style signed-note parser + Ed25519/ECDSA-P256 verifier. Shared by `policy/go_sumdb` and `sigstore_verify` (Rekor uses the same envelope format).
 
-Supporting modules: `config.rs` (layered config: defaults < file < env < CLI flags), `lockfile.rs` (parses package-lock.json, requirements.txt, Cargo.lock, go.sum), `osv.rs` (OSV.dev vulnerability API client), `typosquat.rs` (edit-distance and popular package lists), `types.rs` (shared data types including `ScanContext`).
+Supporting modules: `config.rs` (layered config: defaults < file < env < CLI flags), `lockfile.rs` (parses package-lock.json, requirements.txt, Cargo.lock, go.sum), `osv.rs` (OSV.dev vulnerability API client), `typosquat.rs` (edit-distance and popular package lists), `validation.rs` (CLI input validation — rejects package-name tokens that begin with `-` so they can't be re-interpreted as flags by the wrapped package manager, task 037), `types.rs` (shared data types including `ScanContext`).
 
 ## Cache schema
 
@@ -35,6 +35,8 @@ Supporting modules: `config.rs` (layered config: defaults < file < env < CLI fla
 | `provenance_identity` | Task 032 | Verified OIDC subject (npm/PyPI) or `"sum.golang.org"` (Go) |
 
 A separate `maintainer_history` table caches `(name, registry) → maintainers` for change-detection (task 014).
+
+The cache DB file is created with mode `0600` and uses `PRAGMA journal_mode = WAL` (task 054). On a multi-user host, the file is not world-readable; concurrent dep-scan runs against the same cache do not block each other.
 
 ## Key decisions
 
@@ -70,6 +72,11 @@ User runs: dep-scan install express --registry npm
         typosquatting → vulnerability (OSV) → popularity →
         dependency_confusion → npm_provenance → (pypi_provenance) →
         (go_sumdb)
+      maintainer_change is opt-in for the first-observation case
+      (task 048): when `policies.maintainer_first_seen_warning = true`
+      AND the package has zero downloads AND no maintainer baseline
+      exists, the policy emits Warn instead of silently recording the
+      baseline. Default is false (no regression for existing users).
     → For npm/PyPI: sigstore_verify runs the Fulcio chain walk →
       DSSE signature verification → Rekor inclusion proof →
       integratedTime falls inside leaf cert validity window
@@ -77,9 +84,11 @@ User runs: dep-scan install express --registry npm
       rules before being fetched (task 039).
     → For Go: go_sumdb verifies the signed-note tree head against
       the pinned Ed25519 sum.golang.org key
-    → Cache result keyed on (name, <resolved version>, registry)
-      with content_hash and provenance_identity (sha1-only npm rows
-      store content_hash = NULL per task 040)
+    → Cache result keyed on (name, <resolved version>, registry).
+      For npm, `dist.shasum` (SHA-1) is captured at the registry
+      boundary for diagnostics, then NULLed on cache write for any
+      `pass`/`warn` verdict (task 040) — the row carries no trust-
+      gating hash and the next lookup falls through to a full scan.
     → Format output (table or JSON)
     → Exit 0 (pass) or 1 (warn/block)
   → If exit 0: scan-and-exec the wrapped package manager
@@ -89,6 +98,11 @@ User runs: dep-scan install express --registry npm
         O_CREAT|O_EXCL, mode 0600) and passes it through with
         `pip install --require-hashes` (task 031) to close the
         TOCTOU window between scan and install
+      → Under `--verbose`, an audit log line names the locked
+        version + hash and notes that sigstore is not re-verified
+        between the scan and the package-manager exec (task 055 /
+        L-9). For pip, the line also confirms the sha256 was
+        re-checked between scan-pass and exec via --require-hashes.
   → If exit 1: abort before the package manager runs
 ```
 
@@ -108,6 +122,8 @@ User runs: dep-scan install express --registry npm
 All registry URLs are configurable via `.dep-scan.toml` for testing and enterprise registries. The sumdb URL is configurable but the sumdb public key is hardcoded — rotation requires a dep-scan release.
 
 **No sigstore network calls at runtime.** The Fulcio root chain and Rekor signing key are embedded at build time (see *Embedded trust roots* below). Sigstore attestations themselves arrive in-band — bundled with the npm provenance JSON and PyPI integrity endpoint responses — so verification happens entirely offline once the registry metadata is fetched.
+
+**No HTTP/3 / `quinn` stack linked.** `reqwest` is configured with `default-features = false, features = ["json", "rustls-tls"]`, which omits the `http3` feature. See ADR 003's *Build/dependency notes* section for the verification command and the related deferral of task 056 (reqwest 0.13 bump).
 
 ## Embedded trust roots (build-time)
 

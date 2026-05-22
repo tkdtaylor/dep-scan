@@ -12,8 +12,8 @@ Local-first, fast, open source. Single Rust binary with no runtime dependencies.
 # One-liner install (Linux/macOS)
 curl -fsSL https://raw.githubusercontent.com/tkdtaylor/dep-scan/main/install.sh | bash
 
-# Or build from source
-cargo install --git https://github.com/tkdtaylor/dep-scan.git
+# Or build from source (requires Rust 1.88+)
+cargo install --locked --git https://github.com/tkdtaylor/dep-scan.git
 ```
 
 ## Quick start
@@ -45,11 +45,11 @@ dep-scan runs **11 security policies** against every package:
 | Policy | What it catches | Default |
 |--------|----------------|---------|
 | **Age** | Packages published less than 48 hours ago | Block |
-| **Install scripts** | Malicious `postinstall`/`preinstall` scripts (eval, child_process, subprocess) | Block |
+| **Install scripts** | Malicious `postinstall`/`preinstall` scripts (eval, child_process, subprocess). v1.2.0 tightened the heuristics — line/block comments are stripped before pattern matching and pure-hex sequences (SHA-256 digests, git SHAs) no longer false-positive as base64 blobs. | Block |
 | **Obfuscation** | Heavily encoded or unreadable install scripts (base64 blobs, hex strings, eval-of-string) | Block |
 | **Typosquatting** | Names suspiciously similar to popular packages (e.g. `expresss` vs `express`) | Warn/Block |
 | **Vulnerability** | Known CVEs via [OSV.dev](https://osv.dev) (free, no API key) | Block |
-| **Maintainer change** | Added/removed maintainers since last scan; full takeover detection | Warn/Block |
+| **Maintainer change** | Added/removed maintainers since last scan; full takeover detection. Opt-in `policies.maintainer_first_seen_warning = true` extends this to warn on first-observation of a package with zero downloads (defends against typosquat-from-day-one). Default: false (legacy behavior). | Warn/Block |
 | **Popularity** | Packages with very low download counts (configurable threshold) | Warn |
 | **Dependency confusion** | Internal-looking package names on public registries | Warn |
 | **npm provenance** | Sigstore-verified SLSA attestation (Fulcio chain walk + Rekor inclusion + cert-validity window). Defends against a lying npm registry. | Warn (missing) / Block (invalid) |
@@ -63,6 +63,8 @@ Every cached verdict is content-addressed. On a cache hit, dep-scan re-fetches t
 npm's legacy `dist.shasum` is SHA-1 and is **never trust-gated**. Any cache row whose digest starts with `sha1:` re-scans unconditionally, and new `pass`/`warn` rows for sha1-only packages store `NULL` for the digest — closes the SHAttered chosen-prefix-collision window.
 
 The cache is keyed by `(name, resolved_version, registry)` — never by the literal string `"latest"` — so a republished `pkg@latest` cannot ride past verification on a prior version's cached verdict.
+
+The cache DB file is created with mode `0600` and uses WAL journaling (v1.2.0) — not world-readable on shared hosts, and concurrent dep-scan runs do not block or corrupt each other.
 
 See [ADR 003](docs/architecture/decisions/003-content-hash-cache-integrity.md) for the threat model.
 
@@ -108,6 +110,8 @@ check_pypi_provenance = true
 require_pypi_provenance = false
 check_go_sumdb = true
 require_go_sumdb = false
+# Opt-in (v1.2.0): warn on first-observation of a zero-download package.
+maintainer_first_seen_warning = false
 
 [osv]
 osv_url = "https://api.osv.dev"
@@ -176,7 +180,7 @@ The easiest way to use dep-scan is to add it at the start of a project, before a
 ### 1. Install dep-scan
 
 ```bash
-# Build from source (Rust 1.85+ required — uses 2024 edition)
+# Build from source (Rust 1.88+ required — uses 2024 edition)
 git clone https://github.com/tkdtaylor/dep-scan.git
 cd dep-scan
 cargo build --release
@@ -246,7 +250,20 @@ dep-scan install github.com/gorilla/mux --registry go
 
 # Override a block (e.g. for an internal package you've vetted)
 dep-scan install internal-utils --registry npm --force
+
+# Print an audit line naming the locked version + hash before exec
+dep-scan install express --registry npm --verbose
+# → dep-scan: installing express@5.0.1 (sha512:…) — sigstore provenance
+#   not re-verified at install time (L-9)
 ```
+
+The `--verbose` audit line (v1.2.0) records exactly what version + content
+hash the wrapped package manager is about to fetch, and explicitly notes
+that sigstore provenance is verified only at scan time — not re-run between
+scan-pass and `npm/cargo/go install` (the documented TOCTOU gap in
+[ADR 003](docs/architecture/decisions/003-content-hash-cache-integrity.md)).
+For pip the audit line also confirms the sha256 was re-checked between
+scan-pass and `pip install --require-hashes`.
 
 `--registry` accepts `npm`, `pypi`, `crates`, or `go`. `--force` proceeds with the install even when policies block — use it sparingly. Without `--force`, a policy violation aborts before the package manager runs.
 
@@ -516,8 +533,12 @@ alias go='gods'
 # GitHub Actions example
 - uses: actions/checkout@v4
 
+- uses: dtolnay/rust-toolchain@stable
+  with:
+    toolchain: "1.88"  # dep-scan's MSRV
+
 - name: Install dep-scan
-  run: cargo install --path .  # or download pre-built binary
+  run: cargo install --locked --path .  # or download pre-built binary
 
 - name: Scan dependencies before install
   run: |
@@ -550,7 +571,7 @@ DEP_SCAN_SKIP=1 gods get something
 
 ## Building from source
 
-Requires Rust 1.85+ (the crate uses the 2024 edition).
+Requires Rust 1.88+ (the crate uses the 2024 edition; MSRV bumped from 1.85 in v1.2.0 to accommodate a patched `time` dep).
 
 ```bash
 git clone https://github.com/tkdtaylor/dep-scan.git

@@ -7,7 +7,7 @@
 
 | Layer | Technology | Rationale |
 |-------|-----------|-----------|
-| Language | Rust 1.85+ (2024 edition) | Cross-platform, fast, single binary, strong type system for analysis work ([ADR 001](decisions/001-language-choice.md)) |
+| Language | Rust 1.88+ (2024 edition) | Cross-platform, fast, single binary, strong type system for analysis work ([ADR 001](decisions/001-language-choice.md)) |
 | CLI framework | clap (derive) | Mature, ergonomic, auto-generates help and shell completions |
 | HTTP client | reqwest + tokio | Async HTTP for parallel registry API calls |
 | Serialization | serde + serde_json | Best-in-class JSON deserialization for registry metadata |
@@ -16,6 +16,7 @@
 | Error handling | anyhow / thiserror | Ergonomic error propagation |
 | Date/time | chrono | Package publish timestamps, cert validity windows |
 | Pattern matching | regex | Install script analysis, obfuscation detection |
+| Temp files (runtime) | tempfile | CSPRNG-suffixed `O_CREAT\|O_EXCL` files (mode 0600) — used to pass verified hashes through to `pip install --require-hashes` without symlink-race exposure (task 042) |
 | Infrastructure | — | Local-first CLI tool, no runtime services |
 
 ## Cryptography
