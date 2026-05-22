@@ -80,8 +80,11 @@ These limits are documented so callers don't over-trust the feature.
 | 1 | 029 — Capture content hash in cache | Schema column, registry-client digest extraction, cache write path |
 | 2 | 030 — Verify content hash on cache hit | Read path, mismatch handling, re-scan trigger, fail-closed semantics |
 | 3 | 031 — Close TOCTOU window for pip via `--require-hashes` | Pass verified hash through to pip install via a synthetic requirements file |
-| 4 | 032 — Verify provenance attestations | Out-of-band trust root for lying-registry defense (npm provenance, PyPI sigstore) |
-| 5 | (deferred) `--paranoid` byte-level verification | Download artifact, hash locally — defense in depth against metadata/bytes inconsistency (not a lying-registry fix) |
+| 4 | 032 — npm provenance attestation verification | Out-of-band trust root for npm via sigstore |
+| 5 | 033 — PyPI sigstore attestation verification (PEP 740) | Out-of-band trust root for PyPI via sigstore (reuses 032's verification helper) |
+| 6 | 034 — Go checksum database cross-check | Out-of-band trust root for Go via the sumdb transparency log |
+| 7 | (waiting on upstream) 035 — crates.io provenance | Sigstore integration on crates.io's roadmap but not GA as of 2026-05 |
+| 8 | (deferred) `--paranoid` byte-level verification | Download artifact, hash locally — defense in depth against metadata/bytes inconsistency (not a lying-registry fix) |
 
 ## Consequences
 
