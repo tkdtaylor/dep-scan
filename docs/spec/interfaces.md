@@ -303,7 +303,7 @@ Notable contract details:
 
 - `parse` and the verifiers take `&str` (UTF-8 signed-note text), not `&[u8]`.
 - `parse` returns the parsed note structure on success; on failure the `String` carries the human-readable reason (e.g. `"signed note has empty note_text: …"`).
-- `verify_ed25519` returns the outcome directly (not wrapped in `Result`). The success case is `NoteVerifyOutcome::Valid { … }`; failures are other variants of the same enum.
+- `verify_ed25519` returns the outcome directly (not wrapped in `Result`). The success case is `NoteVerifyOutcome::Valid` (unit variant); failures are other variants of the same enum.
 - `verify_ecdsa_p256` returns `Ok(ParsedNote<'a>)` so callers (specifically `verify_rekor_checkpoint_impl`) can reuse the parsed note rather than re-invoking `parse` — see [F-015](fitness-functions.md#f-015).
 - Trust roots are passed as concrete materials (`key_str` for Ed25519 public-key text; `pem_pubkey` for ECDSA P-256 PEM). The verifier does not hold global state.
 

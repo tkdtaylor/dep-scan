@@ -136,8 +136,8 @@ Each policy implements the trait in [`src/policy/mod.rs`](../../src/policy/mod.r
 
 ### B-013: Policy P-08 (`popularity`) — warn on low downloads
 
-- **Warn** if `metadata.downloads.unwrap_or(0) < popularity.min_downloads` (default 1000).
-- `None` downloads MUST be treated as 0 for this comparison.
+- **Warn** if `metadata.downloads` is `Some(n)` and `n < popularity.min_downloads` (default 1000).
+- `None` downloads (registries that do not publish download counts, e.g. crates.io, Go proxy) are exempt from this check and return **Pass** — absence of telemetry is not a low-popularity signal. See [ADR 004](../architecture/decisions/004-popularity-none-downloads.md).
 
 ### B-014: Policy P-09 (`npm_provenance`) — verify sigstore SLSA attestation
 

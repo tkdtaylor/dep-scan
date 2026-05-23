@@ -63,7 +63,7 @@ dep-scan is a **single statically-linked Rust binary**. No service decomposition
 |-----------|--------|----------------|
 | **CLI layer** | [`src/cli.rs`](../../src/cli.rs), [`src/main.rs`](../../src/main.rs) | clap-based subcommand parsing; dispatches to handlers; emits table / JSON output; assembles the verbose audit log line |
 | **Config layer** | [`src/config.rs`](../../src/config.rs) | Layered config (defaults < `.dep-scan.toml` < env < flags); see [configuration.md](configuration.md) |
-| **Validation layer** | [`src/validation.rs`](../../src/validation.rs) | Rejects `-`-prefixed package-name tokens before any subprocess (F-001) |
+| **Validation layer** | [`src/validation.rs`](../../src/validation.rs) | Rejects `-`-prefixed package-name tokens before any subprocess (F-001); Go module-path and version-string validation lives in [`src/registry/go.rs`](../../src/registry/go.rs) |
 | **Registry layer** | [`src/registry/`](../../src/registry/) | Async HTTP clients for npm, PyPI, crates.io, Go proxy; companion clients for provenance + sumdb endpoints. Each implements the `Registry` trait. |
 | **Lockfile parser** | [`src/lockfile.rs`](../../src/lockfile.rs) | Parses `package-lock.json`, `requirements.txt`, `Cargo.lock`, `go.sum` |
 | **OSV client** | [`src/osv.rs`](../../src/osv.rs) | Vulnerability lookups against OSV.dev |
