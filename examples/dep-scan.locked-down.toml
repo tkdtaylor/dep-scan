@@ -1,0 +1,28 @@
+# dep-scan locked-down config — suitable for production CI
+#
+# All checks enabled, all require_* flags set to true (missing provenance blocks),
+# minimum package age 7 days, high download threshold.
+# Copy to .dep-scan.toml in your project root to use it.
+
+min_package_age_hours = 168   # 7 days
+
+[policies]
+check_typosquatting           = true
+check_install_scripts         = true
+check_min_age                 = true
+check_maintainer_changes      = true
+check_vulnerabilities         = true
+check_obfuscation             = true
+check_npm_provenance          = true
+require_npm_provenance        = true   # missing attestation → block
+check_pypi_provenance         = true
+require_pypi_provenance       = true   # missing attestation → block
+check_go_sumdb                = true
+require_go_sumdb              = true   # package absent from sumdb → block
+maintainer_first_seen_warning = true   # warn on first-ever observation
+
+[popularity]
+min_downloads = 10000   # require at least 10k downloads
+
+[dependency_confusion]
+internal_prefixes = ["acme-", "acme.", "@acme/"]   # adjust to your org name

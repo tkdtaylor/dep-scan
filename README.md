@@ -217,6 +217,11 @@ internal-utils       0.1.0        1749h      WARN: Package 'internal-utils' matc
   dependency_confusion: WARN — Package 'internal-utils' matches internal namespace pattern 'internal-' — possible dependency confusion
 ```
 
+## Examples
+
+Ready-to-use configs, a GitHub Actions snippet, and sample JSON output live in
+[`examples/`](examples/). Each file has an inline comment explaining what it's for.
+
 ## Setting up with a new project
 
 The easiest way to use dep-scan is to add it at the start of a project, before any dependencies are installed.

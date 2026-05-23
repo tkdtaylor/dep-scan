@@ -1,0 +1,92 @@
+[
+  {
+    "package": "expresss",
+    "version": "4.18.2",
+    "registry": "npm",
+    "age_hours": 12,
+    "result": "block",
+    "reason": "Package name 'expresss' is suspiciously similar to popular package 'express' (edit distance: 1)",
+    "policies": [
+      {
+        "policy_name": "typosquatting",
+        "result": "block",
+        "reason": "Package name 'expresss' is suspiciously similar to popular package 'express' (edit distance: 1)"
+      },
+      {
+        "policy_name": "min_age",
+        "result": "warn",
+        "reason": "Package is only 12 hours old (minimum: 48 hours)"
+      },
+      {
+        "policy_name": "install_script",
+        "result": "pass",
+        "reason": null
+      },
+      {
+        "policy_name": "obfuscation",
+        "result": "pass",
+        "reason": null
+      },
+      {
+        "policy_name": "maintainer_change",
+        "result": "pass",
+        "reason": null
+      },
+      {
+        "policy_name": "vulnerability",
+        "result": "pass",
+        "reason": null
+      },
+      {
+        "policy_name": "npm_provenance",
+        "result": "warn",
+        "reason": "No provenance attestation found for expresss@4.18.2"
+      }
+    ]
+  },
+  {
+    "package": "lodash",
+    "version": "4.17.21",
+    "registry": "npm",
+    "age_hours": 35040,
+    "result": "pass",
+    "reason": null,
+    "policies": [
+      {
+        "policy_name": "typosquatting",
+        "result": "pass",
+        "reason": null
+      },
+      {
+        "policy_name": "min_age",
+        "result": "pass",
+        "reason": null
+      },
+      {
+        "policy_name": "install_script",
+        "result": "pass",
+        "reason": null
+      },
+      {
+        "policy_name": "obfuscation",
+        "result": "pass",
+        "reason": null
+      },
+      {
+        "policy_name": "maintainer_change",
+        "result": "pass",
+        "reason": null
+      },
+      {
+        "policy_name": "vulnerability",
+        "result": "pass",
+        "reason": null
+      },
+      {
+        "policy_name": "npm_provenance",
+        "result": "pass",
+        "reason": null
+      }
+    ]
+  }
+]

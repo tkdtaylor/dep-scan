@@ -1,0 +1,33 @@
+# dep-scan CI workflow — scan dependencies on every pull request
+#
+# Drop this file into .github/workflows/ in your project.
+# Adjust the lockfile path and --lockfile-type to match your package manager.
+
+name: dep-scan
+
+on:
+  pull_request:
+    paths:
+      - "package-lock.json"
+      - "requirements.txt"
+      - "Cargo.lock"
+      - "go.sum"
+      - ".dep-scan.toml"
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dep-scan
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/tkdtaylor/dep-scan/main/install.sh | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Scan lockfile
+        # Adjust --lockfile-type to: npm | pypi | cargo | go
+        run: |
+          dep-scan check \
+            --lockfile package-lock.json \
+            --lockfile-type npm

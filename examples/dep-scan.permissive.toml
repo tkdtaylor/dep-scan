@@ -1,0 +1,29 @@
+# dep-scan permissive config — suitable for local development
+#
+# All checks enabled (signals are still surfaced as warnings),
+# but no require_* flags — nothing is blocked solely for missing provenance.
+# Default package age (48 h) and low download threshold.
+# Copy to .dep-scan.toml in your project root to use it.
+
+min_package_age_hours = 48   # 48 hours (default)
+
+[policies]
+check_typosquatting           = true
+check_install_scripts         = true
+check_min_age                 = true
+check_maintainer_changes      = true
+check_vulnerabilities         = true
+check_obfuscation             = true
+check_npm_provenance          = true
+require_npm_provenance        = false   # missing attestation → warn only
+check_pypi_provenance         = true
+require_pypi_provenance       = false   # missing attestation → warn only
+check_go_sumdb                = true
+require_go_sumdb              = false   # absent from sumdb → warn only
+maintainer_first_seen_warning = false
+
+[popularity]
+min_downloads = 100   # warn only below 100 downloads
+
+[dependency_confusion]
+internal_prefixes = ["internal-", "private-", "corp-"]   # defaults
