@@ -37,6 +37,8 @@ cargo audit             # audit dependencies for known RustSec advisories
 # Repo-state guards (idempotent, exit 0 on clean state)
 scripts/check-task-state.sh           # fail if a task file is tracked in two of {backlog, active, completed}
 scripts/verify-worktree-isolation.sh  # check parallel sub-agents aren't sharing a worktree (run before/after parallel agent dispatches that write code)
+scripts/start-task.sh <NNN> <slug>    # create task/NNN-slug branch (or worktree) and switch to it; run as task-executor Step 0
+scripts/dogfood-gate.py               # pre-release gate: scan dep-scan's own dependencies with dep-scan before tagging
 
 # Docker (run from host, outside the container)
 # Note: this workflow is aspirational. The .env file it references is not
