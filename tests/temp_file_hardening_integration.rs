@@ -1,3 +1,4 @@
+#![cfg(unix)]
 /// Integration tests for task 042 — TempReqFile symlink / predictable-name hardening.
 ///
 /// Tests T-042-11 and T-042-13: verify that the temp requirements file is
