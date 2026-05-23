@@ -40,8 +40,8 @@
       },
       ".claude/agents/task-executor.md": {
         "template": "assets/templates/tech/.claude/agents/task-executor.md",
-        "installed_hash": "dff2e4b4b567a8b9b32e49824cba2732d12248070cbabf9c9974eb3c17a7d5bf",
-        "template_hash": "e29eb5f9151f73af69515c39b18e0a31c70cd0b0ab1193ffff8e6176086d898a"
+        "installed_hash": "6d0bce60995f3c0ec0469033a29a5dd948381d100badd5981402f1413b6d5b87",
+        "template_hash": "9e3384b07515586198818563c9bb19d29f0f5e3cface7a8230100762e7b2d52f"
       },
       ".claude/agents/task-planner.md": {
         "template": "assets/templates/tech/.claude/agents/task-planner.md",
@@ -52,6 +52,11 @@
         "template": "assets/templates/common/.claude/scripts/_hook_utils.py",
         "installed_hash": "b4b6db0e23fb01a4662938ad9d19b9956cfa9b8817059d0b0e7b076fbc037b2b",
         "template_hash": "b4b6db0e23fb01a4662938ad9d19b9956cfa9b8817059d0b0e7b076fbc037b2b"
+      },
+      ".claude/scripts/auto-cleanup-merge.py": {
+        "template": "assets/templates/tech/.claude/scripts/auto-cleanup-merge.py",
+        "installed_hash": "8fddecfa7960ea4c41e9dfa278ae144babeda0f5b235c226d60b343209d0a1f2",
+        "template_hash": "8fddecfa7960ea4c41e9dfa278ae144babeda0f5b235c226d60b343209d0a1f2"
       },
       ".claude/scripts/batch-format-typecheck.py": {
         "template": "assets/templates/tech/.claude/scripts/batch-format-typecheck.py",
@@ -93,6 +98,11 @@
         "installed_hash": "37cd5dc637ca6bf16ce245f7a93963fc6d87963a271c669163330c2955fee3b0",
         "template_hash": "37cd5dc637ca6bf16ce245f7a93963fc6d87963a271c669163330c2955fee3b0"
       },
+      ".claude/scripts/no-commit-on-main.py": {
+        "template": "assets/templates/common/.claude/scripts/no-commit-on-main.py",
+        "installed_hash": "1af2b37e498f4465636133fbaa240dd8aeae1bcdb06dd2895974f9e3b703660c",
+        "template_hash": "1af2b37e498f4465636133fbaa240dd8aeae1bcdb06dd2895974f9e3b703660c"
+      },
       ".claude/scripts/periodic-checkpoint.py": {
         "template": "assets/templates/common/.claude/scripts/periodic-checkpoint.py",
         "installed_hash": "d5f7cb57ebb4b6f966c73459faf3dde1fb5cc65bf7840a01415e2ad29b2051a9",
@@ -128,6 +138,16 @@
         "installed_hash": "ffe9087e84da31b5579bda1bb1e38e4b779f7c03420378ed4f0a18f00d7ab679",
         "template_hash": "ffe9087e84da31b5579bda1bb1e38e4b779f7c03420378ed4f0a18f00d7ab679"
       },
+      ".claude/scripts/session-lock-touch.py": {
+        "template": "assets/templates/common/.claude/scripts/session-lock-touch.py",
+        "installed_hash": "0944331e153286761f71e6c0fefa4fc76992250d66a452369c0b1a6c8d433138",
+        "template_hash": "0944331e153286761f71e6c0fefa4fc76992250d66a452369c0b1a6c8d433138"
+      },
+      ".claude/scripts/session-lock.py": {
+        "template": "assets/templates/common/.claude/scripts/session-lock.py",
+        "installed_hash": "397d7cbe8801420b9fd1788fc0a7290d3e0c4b0f977680c1747304c1038abfb1",
+        "template_hash": "397d7cbe8801420b9fd1788fc0a7290d3e0c4b0f977680c1747304c1038abfb1"
+      },
       ".claude/scripts/spec-coverage-check.py": {
         "template": "assets/templates/tech/.claude/scripts/spec-coverage-check.py",
         "installed_hash": "da8fc8c12960413fbd2fadeddac19e017240c0c34b26da1c2dc46b2203cd1cbd",
@@ -140,19 +160,25 @@
       },
       ".claude/settings.json": {
         "template": "assets/templates/tech/.claude/settings.json",
-        "installed_hash": "5d83acc6518440f11ca8c296a8b5c42440350958add2f8d5282da85e37f4bb51",
-        "template_hash": "5d83acc6518440f11ca8c296a8b5c42440350958add2f8d5282da85e37f4bb51"
+        "installed_hash": "a464b41499a27bc48616d54a91968b3ee86c4421cbadee4e9b8ad2fcae73171a",
+        "template_hash": "a464b41499a27bc48616d54a91968b3ee86c4421cbadee4e9b8ad2fcae73171a"
       },
       "scripts/check-task-state.sh": {
         "template": "assets/templates/common/scripts/check-task-state.sh",
         "installed_hash": "36d24202c37e13357a663ec8dcaa8ae050ce188c45d983da3e85302351f9dec7",
         "template_hash": "36d24202c37e13357a663ec8dcaa8ae050ce188c45d983da3e85302351f9dec7"
       },
+      "scripts/start-task.sh": {
+        "template": "assets/templates/common/scripts/start-task.sh",
+        "installed_hash": "b0394f1c62cbd45dc4d4f8655c703dd4272dd25ec05ff7fffa746054b97165a5",
+        "template_hash": "b0394f1c62cbd45dc4d4f8655c703dd4272dd25ec05ff7fffa746054b97165a5"
+      },
       "scripts/verify-worktree-isolation.sh": {
         "template": "assets/templates/common/scripts/verify-worktree-isolation.sh",
         "installed_hash": "8a74a5769ad27660b943c98af4f04d52588c3f58e80f56b6834ab5979ff9019b",
         "template_hash": "8a74a5769ad27660b943c98af4f04d52588c3f58e80f56b6834ab5979ff9019b"
       }
-    }
+    },
+    "last_sync_date": "2026-05-22"
   }
 }
