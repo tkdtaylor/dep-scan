@@ -88,7 +88,7 @@
 | 070 | Add `SECURITY.md` | 070-security-md-test-spec.md | 0/10 | ❌ |
 | 071 | Add `RELEASE_CHECKLIST.md` | 071-release-checklist-test-spec.md | 0/10 | ❌ |
 | 072 | Refresh `roadmap.md` through v1.2.0 | 072-roadmap-refresh-through-v1-2-test-spec.md | 0/7 | ❌ |
-| 073 | Remove (or relocate) scaffold leftovers | 073-remove-scaffold-leftovers-test-spec.md | 0/8 | ❌ |
+| 073 | Remove (or relocate) scaffold leftovers | 073-remove-scaffold-leftovers-test-spec.md | 8/8 | ✅ |
 | 074 | Ship `shims/` directory with installable wrapper scripts | 074-shims-directory-test-spec.md | 0/12 | ❌ |
 | 075 | Add `examples/` directory | 075-examples-directory-test-spec.md | 0/13 | ❌ |
 | 076 | Add `CONTRIBUTING.md` | 076-contributing-md-test-spec.md | 0/10 | ❌ |

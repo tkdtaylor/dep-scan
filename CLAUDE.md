@@ -39,6 +39,9 @@ scripts/check-task-state.sh           # fail if a task file is tracked in two of
 scripts/verify-worktree-isolation.sh  # check parallel sub-agents aren't sharing a worktree (run before/after parallel agent dispatches that write code)
 
 # Docker (run from host, outside the container)
+# Note: this workflow is aspirational. The .env file it references is not
+# maintained in-tree; create your own .env from the variables listed below
+# if you want to use the dev container.
 docker run --rm -it \
   -v dep-scan-workspace:/app \
   -v "$(pwd)":/host:ro \
