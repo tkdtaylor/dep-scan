@@ -324,6 +324,16 @@ For ongoing use across an existing workflow, the wrappers below are better — t
 
 dep-scan provides drop-in wrapper commands that scan every package before installing. Same arguments, same behavior as the real commands, but every install goes through dep-scan first.
 
+### Quick install (Linux / macOS)
+
+The wrapper scripts live in [`shims/`](shims/). Copy them to a directory on your `PATH`:
+
+```sh
+cp shims/* ~/.local/bin/
+```
+
+That's it — `npmds`, `pipds`, `cargods`, and `gods` are now available. See [`shims/README.md`](shims/README.md) for customisation notes.
+
 | Wrapper | Wraps | Distributed as |
 |---------|-------|----------------|
 | **`npmds`** | `npm` | Shell snippet below |

@@ -1,0 +1,24 @@
+#!/bin/sh
+# gods — dep-scan wrapper for go
+# Scans packages with dep-scan before passing through to go.
+# Install: cp shims/gods ~/.local/bin/gods
+
+set -e
+
+flags=''
+pkgs=''
+
+for arg in "$@"; do
+    case "$arg" in
+        -*) flags="$flags $arg" ;;
+        *)  pkgs="$pkgs $arg"   ;;
+    esac
+done
+
+if [ -n "$pkgs" ]; then
+    # shellcheck disable=SC2086
+    dep-scan check --registry go $pkgs
+fi
+
+# shellcheck disable=SC2086
+exec go "$@"

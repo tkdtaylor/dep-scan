@@ -89,7 +89,7 @@
 | 071 | Add `RELEASE_CHECKLIST.md` | 071-release-checklist-test-spec.md | 10/10 | ✅ |
 | 072 | Refresh `roadmap.md` through v1.2.0 | 072-roadmap-refresh-through-v1-2-test-spec.md | 7/7 | ✅ |
 | 073 | Remove (or relocate) scaffold leftovers | 073-remove-scaffold-leftovers-test-spec.md | 8/8 | ✅ |
-| 074 | Ship `shims/` directory with installable wrapper scripts | 074-shims-directory-test-spec.md | 0/12 | ❌ |
+| 074 | Ship `shims/` directory with installable wrapper scripts | 074-shims-directory-test-spec.md | 12/12 | ✅ |
 | 075 | Add `examples/` directory | 075-examples-directory-test-spec.md | 13/13 | ✅ |
 | 076 | Add `CONTRIBUTING.md` | 076-contributing-md-test-spec.md | 10/10 | ✅ |
 | 077 | Add `CODE_OF_CONDUCT.md` (Contributor Covenant 2.1) | 077-code-of-conduct-test-spec.md | 8/8 | ✅ |

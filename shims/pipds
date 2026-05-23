@@ -1,0 +1,24 @@
+#!/bin/sh
+# pipds — dep-scan wrapper for pip
+# Scans packages with dep-scan before passing through to pip.
+# Install: cp shims/pipds ~/.local/bin/pipds
+
+set -e
+
+flags=''
+pkgs=''
+
+for arg in "$@"; do
+    case "$arg" in
+        -*) flags="$flags $arg" ;;
+        *)  pkgs="$pkgs $arg"   ;;
+    esac
+done
+
+if [ -n "$pkgs" ]; then
+    # shellcheck disable=SC2086
+    dep-scan check --registry pypi $pkgs
+fi
+
+# shellcheck disable=SC2086
+exec pip "$@"

@@ -1,0 +1,24 @@
+#!/bin/sh
+# npmds — dep-scan wrapper for npm
+# Scans packages with dep-scan before passing through to npm.
+# Install: cp shims/npmds ~/.local/bin/npmds
+
+set -e
+
+flags=''
+pkgs=''
+
+for arg in "$@"; do
+    case "$arg" in
+        -*) flags="$flags $arg" ;;
+        *)  pkgs="$pkgs $arg"   ;;
+    esac
+done
+
+if [ -n "$pkgs" ]; then
+    # shellcheck disable=SC2086
+    dep-scan check --registry npm $pkgs
+fi
+
+# shellcheck disable=SC2086
+exec npm "$@"
