@@ -102,7 +102,7 @@ jobs:
       - name: Generate CycloneDX SBOM
         run: |
           cargo install cargo-cyclonedx --locked
-          cargo cyclonedx --format json --output-pattern bom
+          cargo cyclonedx --format json
           mv bom.json artifacts/dep-scan.cdx.json
 
       - name: Generate checksums
