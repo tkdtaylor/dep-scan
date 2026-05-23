@@ -43,6 +43,11 @@
           },
           {
             "type": "command",
+            "command": "python3 \"${CLAUDE_PROJECT_DIR:-.}\"/.claude/scripts/no-commit-on-main.py",
+            "timeout": 5
+          },
+          {
+            "type": "command",
             "command": "python3 \"${CLAUDE_PROJECT_DIR:-.}\"/.claude/scripts/spec-coverage-check.py",
             "timeout": 10
           }
@@ -52,6 +57,11 @@
     "SessionStart": [
       {
         "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PROJECT_DIR:-.}\"/.claude/scripts/session-lock.py",
+            "timeout": 5
+          },
           {
             "type": "command",
             "command": "python3 \"${CLAUDE_PROJECT_DIR:-.}\"/.claude/scripts/inject-retros.py",
@@ -78,6 +88,16 @@
             "type": "command",
             "command": "python3 \"${CLAUDE_PROJECT_DIR:-.}\"/.claude/scripts/edit-tracker.py",
             "timeout": 5
+          }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PROJECT_DIR:-.}\"/.claude/scripts/auto-cleanup-merge.py",
+            "timeout": 15
           }
         ]
       }
@@ -107,6 +127,11 @@
     "Stop": [
       {
         "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PROJECT_DIR:-.}\"/.claude/scripts/session-lock-touch.py",
+            "timeout": 5
+          },
           {
             "type": "command",
             "command": "python3 \"${CLAUDE_PROJECT_DIR:-.}\"/.claude/scripts/periodic-checkpoint.py",
