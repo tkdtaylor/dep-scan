@@ -645,6 +645,11 @@ See [docs/architecture/overview.md](docs/architecture/overview.md) for system de
 See [SECURITY.md](SECURITY.md) for the vulnerability disclosure policy and
 how to report security issues in dep-scan itself.
 
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the build/test workflow, commit
+conventions, and how to propose new features.
+
 ## Code of conduct
 
 See [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md).
