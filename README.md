@@ -640,6 +640,11 @@ See [docs/architecture/overview.md](docs/architecture/overview.md) for system de
 - [ADR 002](docs/architecture/decisions/002-detection-strategy.md) — v0.2 detection strategy and external data sources
 - [ADR 003](docs/architecture/decisions/003-content-hash-cache-integrity.md) — content-hash cache integrity, sigstore + sumdb provenance verification
 
+## Security
+
+See [SECURITY.md](SECURITY.md) for the vulnerability disclosure policy and
+how to report security issues in dep-scan itself.
+
 ## License
 
 MIT
