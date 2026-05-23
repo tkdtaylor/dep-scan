@@ -96,10 +96,19 @@ jobs:
           path: artifacts
           merge-multiple: true
 
+      - name: Install Rust toolchain (for cargo-cyclonedx)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Generate CycloneDX SBOM
+        run: |
+          cargo install cargo-cyclonedx --locked
+          cargo cyclonedx --format json --output-pattern bom
+          mv bom.json artifacts/dep-scan.cdx.json
+
       - name: Generate checksums
         run: |
           cd artifacts
-          sha256sum dep-scan-* > sha256sums.txt
+          sha256sum dep-scan-* dep-scan.cdx.json > sha256sums.txt
           cat sha256sums.txt
 
       - name: Install cosign
@@ -108,7 +117,7 @@ jobs:
       - name: Sign artifacts with cosign (keyless OIDC)
         run: |
           cd artifacts
-          for f in dep-scan-* sha256sums.txt; do
+          for f in dep-scan-* dep-scan.cdx.json sha256sums.txt; do
             cosign sign-blob --yes \
               --output-signature "${f}.sig" \
               --output-certificate "${f}.crt" \
@@ -121,6 +130,7 @@ jobs:
           generate_release_notes: true
           files: |
             artifacts/dep-scan-*
+            artifacts/dep-scan.cdx.json
             artifacts/sha256sums.txt
             artifacts/*.sig
             artifacts/*.crt

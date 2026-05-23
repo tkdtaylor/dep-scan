@@ -84,7 +84,7 @@
 | 066 | Pin MSRV (1.88) in CI test job | 066-msrv-pin-in-ci-test-spec.md | 8/8 | ✅ |
 | 067 | Dog-food — dep-scan scans its own `Cargo.lock` in CI | 067-dogfood-own-cargo-lock-test-spec.md | 10/10 | ✅ |
 | 068 | Sign release artifacts with cosign / sigstore | 068-sign-releases-with-cosign-test-spec.md | 9/10 | ✅ |
-| 069 | Generate CycloneDX SBOM per release | 069-cyclonedx-sbom-per-release-test-spec.md | 0/8 | ❌ |
+| 069 | Generate CycloneDX SBOM per release | 069-cyclonedx-sbom-per-release-test-spec.md | 7/8 | ✅ |
 | 070 | Add `SECURITY.md` | 070-security-md-test-spec.md | 10/10 | ✅ |
 | 071 | Add `RELEASE_CHECKLIST.md` | 071-release-checklist-test-spec.md | 10/10 | ✅ |
 | 072 | Refresh `roadmap.md` through v1.2.0 | 072-roadmap-refresh-through-v1-2-test-spec.md | 7/7 | ✅ |

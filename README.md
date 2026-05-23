@@ -37,6 +37,13 @@ The `.sig` and `.crt` companion files are published alongside each binary in the
 [GitHub Release](https://github.com/tkdtaylor/dep-scan/releases). Verification is optional —
 the existing `sha256sums.txt` check is unaffected.
 
+### SBOM
+
+Each release also ships a [CycloneDX](https://cyclonedx.org/) SBOM
+(`dep-scan.cdx.json`) listing every direct and transitive Rust dependency.
+Download it from the release assets to audit dep-scan's own supply chain with
+Trivy, Grype, or Dependency-Track.
+
 ## Quick start
 
 ```bash
