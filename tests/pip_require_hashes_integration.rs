@@ -1,3 +1,4 @@
+#![cfg(unix)]
 /// Integration tests for task 031 — pip --require-hashes passthrough.
 ///
 /// These tests use assert_cmd + wiremock to run the full binary against a
