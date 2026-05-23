@@ -73,6 +73,12 @@ docker run --rm -v dep-scan-workspace:/dst -v "$(pwd)":/src debian:bookworm-slim
 4. Move tasks to `completed/` and update `coverage-tracker.md` when done
 5. **Commit and push immediately after each milestone** — never start the next task without committing the current one first
 
+## Release process
+
+Before cutting a release, follow [RELEASE_CHECKLIST.md](RELEASE_CHECKLIST.md).
+The checklist includes the explicit-authorization gate — do not tag or push
+without it.
+
 ## Commit rules
 
 **You must commit and push after every milestone.** Do not batch multiple tasks into one commit. Do not continue to the next task until the current one is committed and pushed.
