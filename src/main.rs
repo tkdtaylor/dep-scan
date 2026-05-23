@@ -240,27 +240,32 @@ async fn run(cli: Cli) -> Result<i32> {
             )
             .await
         }
-        Command::Config { action } => {
-            run_config(cli.config.as_deref(), action)?;
-            Ok(0)
-        }
+        Command::Config { action } => run_config(cli.config.as_deref(), action),
     }
 }
 
-fn run_config(config_path: Option<&Path>, action: ConfigAction) -> Result<()> {
+fn run_config(config_path: Option<&Path>, action: ConfigAction) -> Result<i32> {
     match action {
         ConfigAction::Show => {
             let config = Config::load(config_path)?;
             let toml_str = config.to_toml_string()?;
             println!("{toml_str}");
+            Ok(0)
         }
         ConfigAction::Init => {
             let target = Path::new(".dep-scan.toml");
+            if target.exists() {
+                eprintln!(
+                    "dep-scan: {} already exists; remove it first to regenerate defaults",
+                    target.display()
+                );
+                return Ok(1);
+            }
             Config::write_default(target)?;
             println!("Created {}", target.display());
+            Ok(0)
         }
     }
-    Ok(())
 }
 
 async fn run_check(
@@ -999,6 +1004,7 @@ async fn run_install(
     // the version and hash that was locked during the scan.
     if verbose {
         let config = Config::load(config_path)?;
+        let verdict = if scan_exit == 0 { "pass" } else { "block" };
         for pkg_name in &packages {
             let meta_result = match reg_type {
                 RegistryType::Npm => {
@@ -1025,16 +1031,14 @@ async fn run_install(
                         .as_deref()
                         .unwrap_or("(no hash available)");
                     eprintln!(
-                        "dep-scan: installing {pkg_name}@{version} ({hash}) \
-                         — sigstore provenance not re-verified at install time (L-9)",
+                        "[audit] {pkg_name}@{version} hash={hash} verdict={verdict} sigstore_reverified=false (L-9)",
                         version = meta.version,
                         hash = hash_display,
                     );
                 }
                 Err(_) => {
                     eprintln!(
-                        "dep-scan: installing {pkg_name} \
-                         — resolved version unavailable; sigstore provenance not re-verified at install time (L-9)"
+                        "[audit] {pkg_name}@(unknown) hash=(no hash available) verdict={verdict} sigstore_reverified=false (L-9)"
                     );
                 }
             }
