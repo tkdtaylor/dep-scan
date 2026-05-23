@@ -645,6 +645,10 @@ See [docs/architecture/overview.md](docs/architecture/overview.md) for system de
 See [SECURITY.md](SECURITY.md) for the vulnerability disclosure policy and
 how to report security issues in dep-scan itself.
 
+## Code of conduct
+
+See [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md).
+
 ## License
 
 MIT
