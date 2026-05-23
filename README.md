@@ -16,6 +16,27 @@ curl -fsSL https://raw.githubusercontent.com/tkdtaylor/dep-scan/main/install.sh 
 cargo install --locked --git https://github.com/tkdtaylor/dep-scan.git
 ```
 
+### Optional: verify the download with cosign
+
+Every release artifact is signed with [sigstore](https://sigstore.dev) keyless OIDC signing.
+If you have [cosign](https://github.com/sigstore/cosign) installed you can verify before running:
+
+```bash
+VERSION=v1.2.0
+ARTIFACT=dep-scan-${VERSION}-x86_64-unknown-linux-gnu.tar.gz
+
+cosign verify-blob \
+  --certificate "${ARTIFACT}.crt" \
+  --signature "${ARTIFACT}.sig" \
+  --certificate-identity-regexp 'https://github.com/tkdtaylor/dep-scan/.github/workflows/release.yml@.*' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  "${ARTIFACT}"
+```
+
+The `.sig` and `.crt` companion files are published alongside each binary in the
+[GitHub Release](https://github.com/tkdtaylor/dep-scan/releases). Verification is optional —
+the existing `sha256sums.txt` check is unaffected.
+
 ## Quick start
 
 ```bash
