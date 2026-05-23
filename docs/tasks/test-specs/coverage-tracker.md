@@ -82,7 +82,7 @@
 | 064 | Add `cargo audit` step to CI | 064-cargo-audit-in-ci-test-spec.md | 8/8 | ✅ |
 | 065 | Multi-OS test matrix in CI | 065-multi-os-ci-matrix-test-spec.md | 8/8 | ✅ |
 | 066 | Pin MSRV (1.88) in CI test job | 066-msrv-pin-in-ci-test-spec.md | 8/8 | ✅ |
-| 067 | Dog-food — dep-scan scans its own `Cargo.lock` in CI | 067-dogfood-own-cargo-lock-test-spec.md | 9/10 | ⏳ T-067-08 blocked by 079/080/081 (5 real blocks need allowlist + typosquat fix + getrandom investigation) |
+| 067 | Dog-food — dep-scan scans its own `Cargo.lock` in CI | 067-dogfood-own-cargo-lock-test-spec.md | 10/10 | ✅ |
 | 068 | Sign release artifacts with cosign / sigstore | 068-sign-releases-with-cosign-test-spec.md | 0/10 | ❌ |
 | 069 | Generate CycloneDX SBOM per release | 069-cyclonedx-sbom-per-release-test-spec.md | 0/8 | ❌ |
 | 070 | Add `SECURITY.md` | 070-security-md-test-spec.md | 0/10 | ❌ |
@@ -96,7 +96,8 @@
 | 078 | Lockfile scanner uses pinned versions, not registry "latest" | 078-lockfile-pinned-version-propagation-test-spec.md | 18/18 | ✅ |
 | 079 | Dogfood allowlist mechanism for justified block verdicts | 079-dogfood-allowlist-mechanism-test-spec.md | 19/19 | ✅ |
 | 080 | Fix typosquat false-positive on `version_check` | 080-fix-version-check-typosquat-false-positive-test-spec.md | 9/9 | ✅ |
-| 081 | Investigate `getrandom` maintainer changes | 081-getrandom-maintainer-investigation-test-spec.md | 0/15 | ❌ |
+| 081 | Investigate `getrandom` maintainer changes | 081-getrandom-maintainer-investigation-test-spec.md | 12/15 | ✅ (BENIGN — T-081-11..13 N/A on BENIGN path; T-081-14 satisfied by follow-up task 082) |
+| 082 | Recognise crates.io `trustpub_data` (false-positive fix surfaced by 081) | 082-recognise-trustpub-data-in-crates-registry-test-spec.md | 0/10 | ❌ |
 
 ## Status key
 

@@ -1,6 +1,9 @@
 # Task 081 — Investigate `getrandom` maintainer changes
 
-**Status:** backlog
+**Status:** completed (2026-05-22)
+**Verdict:** BENIGN — see `docs/security/getrandom-maintainer-investigation.md`
+**Follow-up:** task 082 — recognise crates.io `trustpub_data` so the empty
+`added []` diff stops mis-firing on Trusted-Publishing transitions.
 **Depends on:** 079 (allowlist mechanism); investigation findings populate
 the allowlist entries that 079 seeds with placeholders
 **Source:** Surfaced by task 067 dogfood run; two of five remaining real
