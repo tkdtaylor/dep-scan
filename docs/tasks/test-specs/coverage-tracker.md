@@ -97,7 +97,7 @@
 | 079 | Dogfood allowlist mechanism for justified block verdicts | 079-dogfood-allowlist-mechanism-test-spec.md | 19/19 | ✅ |
 | 080 | Fix typosquat false-positive on `version_check` | 080-fix-version-check-typosquat-false-positive-test-spec.md | 9/9 | ✅ |
 | 081 | Investigate `getrandom` maintainer changes | 081-getrandom-maintainer-investigation-test-spec.md | 12/15 | ✅ (BENIGN — T-081-11..13 N/A on BENIGN path; T-081-14 satisfied by follow-up task 082) |
-| 082 | Recognise crates.io `trustpub_data` (false-positive fix surfaced by 081) | 082-recognise-trustpub-data-in-crates-registry-test-spec.md | 0/10 | ❌ |
+| 082 | Recognise crates.io `trustpub_data` (false-positive fix surfaced by 081) | 082-recognise-trustpub-data-in-crates-registry-test-spec.md | 8/8 (T-082-09 validated by allowlist removal; T-082-10 by tooling gate) | 🟡 Verified by: L3: cargo test 7 new T-082 tests pass + clippy/fmt clean |
 
 ## Status key
 

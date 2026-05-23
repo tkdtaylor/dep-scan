@@ -83,12 +83,14 @@ impl Registry for CratesRegistry {
             .parse::<DateTime<Utc>>()
             .ok();
 
-        // Extract maintainer from published_by if present
-        let maintainers = resolved_version_entry
-            .published_by
-            .as_ref()
-            .map(|pb| vec![pb.login.clone()])
-            .unwrap_or_default();
+        // Extract maintainer identity.
+        //
+        // Priority:
+        //   1. `published_by` (traditional token-based publish) — use the login directly.
+        //   2. `trustpub_data` (OIDC Trusted Publishing, `published_by` is intentionally null)
+        //      — synthesise a stable label `trustpub:<provider>:<repository>`.
+        //   3. Neither present (very old versions) — return empty Vec.
+        let maintainers = resolved_version_entry.maintainer_identities();
 
         // Extract downloads count
         let downloads = Some(api_response.krate.downloads);
@@ -150,9 +152,33 @@ struct CrateVersion {
     num: String,
     created_at: String,
     published_by: Option<PublishedBy>,
+    /// Trusted Publishing (OIDC) metadata, present when `published_by` is null.
+    /// crates.io populates this when a crate is published via GitHub Actions OIDC
+    /// tokens instead of personal API tokens.
+    #[serde(default)]
+    trustpub_data: Option<TrustPubData>,
     /// SHA-256 checksum of the crate tarball, as a hex string.
     #[serde(default)]
     cksum: Option<String>,
+}
+
+impl CrateVersion {
+    /// Return the maintainer identity strings for this version.
+    ///
+    /// Priority:
+    ///   1. `published_by.login` when present (traditional token-based publish).
+    ///   2. Synthesised `trustpub:<provider>:<repository>` when `trustpub_data`
+    ///      is present and `published_by` is null (OIDC Trusted Publishing).
+    ///   3. Empty Vec when neither is present (very old versions).
+    fn maintainer_identities(&self) -> Vec<String> {
+        if let Some(pb) = &self.published_by {
+            return vec![pb.login.clone()];
+        }
+        if let Some(tp) = &self.trustpub_data {
+            return vec![format!("trustpub:{}:{}", tp.provider, tp.repository)];
+        }
+        Vec::new()
+    }
 }
 
 /// The publisher of a version.
@@ -161,6 +187,17 @@ struct PublishedBy {
     login: String,
     #[allow(dead_code)]
     name: Option<String>,
+}
+
+/// Trusted Publishing (OIDC) data attached to a version when `published_by` is null.
+///
+/// crates.io uses this for packages published via GitHub Actions OIDC tokens.
+/// The struct intentionally ignores unknown extra fields (e.g. `run_id`, `sha`)
+/// to remain forward-compatible as crates.io adds new fields.
+#[derive(Debug, Deserialize)]
+struct TrustPubData {
+    provider: String,
+    repository: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -507,6 +544,166 @@ mod tests {
                 "sha256:abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890"
                     .to_string()
             )
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // T-082 — trustpub_data recognition
+    // -------------------------------------------------------------------------
+
+    // T-082-01 + T-082-02: CrateVersion deserialises trustpub_data (with extra fields)
+    #[test]
+    fn t082_01_02_trustpub_data_deserialises_with_extra_fields() {
+        // Includes extra forward-compatible fields (run_id, sha) — must not break.
+        let json = r#"{
+            "num": "0.4.2",
+            "created_at": "2026-01-01T00:00:00.000000+00:00",
+            "published_by": null,
+            "trustpub_data": {
+                "provider": "github",
+                "repository": "rust-random/getrandom",
+                "run_id": "22617675559",
+                "sha": "4d826731b20a09e69cca91c66aea57ab3cf00072"
+            }
+        }"#;
+
+        let ver: CrateVersion = serde_json::from_str(json).expect("should deserialise");
+        assert!(ver.published_by.is_none());
+        let tp = ver.trustpub_data.expect("trustpub_data should be Some");
+        assert_eq!(tp.provider, "github");
+        assert_eq!(tp.repository, "rust-random/getrandom");
+    }
+
+    // T-082-03: Traditional published_by-only publish still extracts the login
+    #[test]
+    fn t082_03_traditional_published_by_extracts_login() {
+        let json = r#"{
+            "num": "1.0.0",
+            "created_at": "2024-01-01T00:00:00.000000+00:00",
+            "published_by": { "login": "dtolnay", "name": "David Tolnay" }
+        }"#;
+
+        let ver: CrateVersion = serde_json::from_str(json).expect("should deserialise");
+        let ids = ver.maintainer_identities();
+        assert_eq!(ids, vec!["dtolnay"]);
+    }
+
+    // T-082-04: trustpub-only publish synthesises stable label
+    #[test]
+    fn t082_04_trustpub_only_synthesises_stable_label() {
+        let json = r#"{
+            "num": "0.4.2",
+            "created_at": "2026-01-01T00:00:00.000000+00:00",
+            "published_by": null,
+            "trustpub_data": {
+                "provider": "github",
+                "repository": "rust-random/getrandom",
+                "run_id": "22617675559",
+                "sha": "4d826731b20a09e69cca91c66aea57ab3cf00072"
+            }
+        }"#;
+
+        let ver: CrateVersion = serde_json::from_str(json).expect("should deserialise");
+        let ids = ver.maintainer_identities();
+        assert_eq!(ids, vec!["trustpub:github:rust-random/getrandom"]);
+    }
+
+    // T-082-05: Both present → prefer published_by
+    #[test]
+    fn t082_05_both_present_prefers_published_by() {
+        let json = r#"{
+            "num": "0.4.2",
+            "created_at": "2026-01-01T00:00:00.000000+00:00",
+            "published_by": { "login": "josephlr" },
+            "trustpub_data": {
+                "provider": "github",
+                "repository": "rust-random/getrandom"
+            }
+        }"#;
+
+        let ver: CrateVersion = serde_json::from_str(json).expect("should deserialise");
+        let ids = ver.maintainer_identities();
+        assert_eq!(ids, vec!["josephlr"]);
+    }
+
+    // T-082-06: Neither present → empty Vec
+    #[test]
+    fn t082_06_neither_present_returns_empty() {
+        let json = r#"{
+            "num": "0.0.1",
+            "created_at": "2015-01-01T00:00:00.000000+00:00",
+            "published_by": null
+        }"#;
+
+        let ver: CrateVersion = serde_json::from_str(json).expect("should deserialise");
+        let ids = ver.maintainer_identities();
+        assert!(ids.is_empty());
+    }
+
+    // T-082-07: Same trustpub repo across versions → same identity
+    #[test]
+    fn t082_07_same_trustpub_repo_produces_same_identity() {
+        let v1_json = r#"{
+            "num": "0.4.0",
+            "created_at": "2025-06-01T00:00:00.000000+00:00",
+            "published_by": null,
+            "trustpub_data": {
+                "provider": "github",
+                "repository": "rust-random/getrandom",
+                "run_id": "11111111111",
+                "sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            }
+        }"#;
+        let v2_json = r#"{
+            "num": "0.4.2",
+            "created_at": "2026-01-01T00:00:00.000000+00:00",
+            "published_by": null,
+            "trustpub_data": {
+                "provider": "github",
+                "repository": "rust-random/getrandom",
+                "run_id": "22617675559",
+                "sha": "4d826731b20a09e69cca91c66aea57ab3cf00072"
+            }
+        }"#;
+
+        let v1: CrateVersion = serde_json::from_str(v1_json).expect("should deserialise");
+        let v2: CrateVersion = serde_json::from_str(v2_json).expect("should deserialise");
+        assert_eq!(v1.maintainer_identities(), v2.maintainer_identities());
+    }
+
+    // T-082-08: Different trustpub repo between versions → different identity
+    #[test]
+    fn t082_08_different_trustpub_repo_produces_different_identity() {
+        let v1_json = r#"{
+            "num": "0.4.0",
+            "created_at": "2025-06-01T00:00:00.000000+00:00",
+            "published_by": null,
+            "trustpub_data": {
+                "provider": "github",
+                "repository": "rust-random/getrandom"
+            }
+        }"#;
+        let v2_json = r#"{
+            "num": "0.4.2",
+            "created_at": "2026-01-01T00:00:00.000000+00:00",
+            "published_by": null,
+            "trustpub_data": {
+                "provider": "github",
+                "repository": "malicious-actor/getrandom-fork"
+            }
+        }"#;
+
+        let v1: CrateVersion = serde_json::from_str(v1_json).expect("should deserialise");
+        let v2: CrateVersion = serde_json::from_str(v2_json).expect("should deserialise");
+        // Different identities → MaintainerChangePolicy would detect a changeover
+        assert_ne!(v1.maintainer_identities(), v2.maintainer_identities());
+        assert_eq!(
+            v1.maintainer_identities(),
+            vec!["trustpub:github:rust-random/getrandom"]
+        );
+        assert_eq!(
+            v2.maintainer_identities(),
+            vec!["trustpub:github:malicious-actor/getrandom-fork"]
         );
     }
 }

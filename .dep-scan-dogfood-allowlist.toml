@@ -83,10 +83,3 @@ version = "0.3.4"
 policy = "maintainer_change"
 justification = "Benign co-maintainer alternation inside the rust-random GitHub org: josephlr (Joe Richey) and newpavlov (Artyom Pavlov) have been alternating release-cutters on getrandom since 2020. 0.3.4 was tagged and published by josephlr, a longstanding public member of the rust-random org. See docs/security/getrandom-maintainer-investigation.md."
 opened_at = "2026-05-22"
-
-[[allow]]
-package = "getrandom"
-version = "0.4.2"
-policy = "maintainer_change"
-justification = "Benign: getrandom 0.4.x switched to crates.io Trusted Publishing (OIDC from rust-random/getrandom GitHub Actions), so published_by is intentionally null. The 0.4.2 commit (sha 4d82673) was authored by newpavlov, a rust-random org member. Empty 'added []' diff is a known dep-scan limitation around trustpub_data; tracked in follow-up task 082. See docs/security/getrandom-maintainer-investigation.md."
-opened_at = "2026-05-22"
