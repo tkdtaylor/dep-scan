@@ -5,6 +5,53 @@ All notable changes to dep-scan are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.1] — 2026-05-22
+
+A patch release that fixes two behavioural bugs uncovered by a post-v1.2.0
+project audit, corrects four spec-to-code drift items, and refreshes
+documentation. No breaking changes; no new dependencies.
+
+### Fixed
+
+- **`dep-scan install --verbose` now emits the spec-mandated audit log
+  format** — the line previously read
+  `dep-scan: installing <name>@<ver> (<hash>) — sigstore provenance not
+  re-verified at install time (L-9)`. It now reads
+  `[audit] <name>@<ver> hash=<hash> verdict=<pass|block>
+  sigstore_reverified=false (L-9)` as documented in `interfaces.md` and
+  relied on by CI log parsers.
+- **`dep-scan config init` now refuses to overwrite an existing
+  `.dep-scan.toml`** — previously the command silently clobbered the file;
+  it now exits with code 1 and a descriptive message if the target already
+  exists, matching the contract in `interfaces.md`.
+
+### Documentation
+
+- **Spec — behaviors.md B-013:** Corrected the popularity-policy `None`
+  downloads contract: `None` (registries that don't publish download counts)
+  returns **Pass**, not `0`. ADR 004 added explaining why absence of
+  telemetry is not a low-popularity signal.
+- **Spec — interfaces.md:** `NoteVerifyOutcome::Valid` corrected to a unit
+  variant (no `{ … }` fields).
+- **Spec — architecture.md:** Validation layer row now notes that Go
+  module-path and version-string validation lives in `src/registry/go.rs`,
+  not `src/validation.rs`.
+- **CLAUDE.md:** `scripts/start-task.sh` and `scripts/dogfood-gate.py`
+  documented in the scripts reference section.
+- **README:** Example output updated to include the `npm_provenance` policy
+  row; `config init` usage note reflects the new overwrite guard; added
+  clarification that `popularity` and `dependency_confusion` are always-on
+  policies (not controlled by `[policies]` booleans); `--verbose` audit
+  line example updated to the new format.
+
+### Stats
+
+- 813 tests passing (up from 788 at v1.2.0 — +25 new tests).
+- `cargo clippy --all-targets --all-features -- -D warnings` clean.
+- `cargo audit` clean.
+
+---
+
 ## [1.2.0] — 2026-05-22
 
 A maintenance release that lands the MEDIUM and LOW findings from the
