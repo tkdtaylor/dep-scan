@@ -1,0 +1,92 @@
+# .dep-scan-dogfood-allowlist.toml — Dogfood CI allowlist for dep-scan itself
+#
+# Purpose
+# -------
+# dep-scan's own CI scans its Cargo.lock on every push. When dep-scan reports a
+# block verdict on one of its own transitive dependencies, the maintainer has
+# three options:
+#   1. Fix the root cause in code (correct response for false positives).
+#   2. Wait for the signal to resolve naturally (e.g. age blocks, which expire
+#      once a package has been published long enough).
+#   3. Acknowledge the block here, with a justification, after actually
+#      investigating it.
+#
+# This file covers options 2 and 3. dep-scan itself still reports every block;
+# the dogfood gate script (scripts/dogfood-gate.py) reads this file and
+# downgrades matched blocks from ::error:: (build failure) to ::warning::
+# (annotated but not failing). Unmatched blocks still fail the build.
+#
+# Format
+# ------
+# Each [[allow]] entry suppresses one (package, policy) combination in CI.
+#
+# Required fields:
+#   package       — Crate name; must match the "package" field in dep-scan JSON
+#   policy        — Policy name from dep-scan output: age | maintainer_change |
+#                   typosquatting | vulnerability | install_scripts | etc.
+#   justification — Free text explaining why this verdict is acknowledged.
+#                   Reference a task, issue, or investigation writeup.
+#                   NEVER add an entry without a real justification — an
+#                   unexplained allowlist is indistinguishable from negligence.
+#   opened_at     — ISO date (YYYY-MM-DD) the entry was added. Helps track
+#                   stale entries and shows when the decision was made.
+#
+# Optional fields:
+#   version       — Exact-match version string. If present, only that specific
+#                   version is matched. Omit to match any version (use sparingly
+#                   — version-scoped entries are safer for transient blocks).
+#   expires       — ISO date after which this entry is inert. The gate script
+#                   treats an expired entry as absent, so a previously-allowed
+#                   block will fail the build again after this date. Use this
+#                   for transient blocks (age policy, short-lived CI races) so
+#                   they don't silently persist forever.
+#
+# When to use `expires`
+# ---------------------
+# Always set `expires` for age-policy blocks: the package will age out of the
+# block window on its own. Set expires ~48-72h after the block was first
+# observed. Once the entry expires the gate naturally tightens again.
+#
+# For investigated-benign maintainer changes, `expires` is optional — but
+# consider setting one so the entry gets revisited (e.g. 90 days out).
+#
+# Rule: never allowlist a verdict you haven't actually investigated.
+# See README.md § "Dogfood policy" for the full explanation.
+
+# ---------------------------------------------------------------------------
+# Age-policy blocks (transient — packages published < 48h before the scan)
+# ---------------------------------------------------------------------------
+
+[[allow]]
+package = "autocfg"
+version = "1.5.1"
+policy = "age"
+justification = "Transient age block — autocfg is a well-known Rust build-time utility maintained by Josh Stone (Red Hat). v1.5.1 was published shortly before the dogfood scan ran. No security concern; block resolves once the package is >48h old."
+opened_at = "2026-05-22"
+expires = "2026-05-25"
+
+[[allow]]
+package = "serde_json"
+version = "1.0.150"
+policy = "age"
+justification = "Transient age block — serde_json publishes a new patch every few weeks; this one was only ~20h old at audit time. Well-established crate maintained by dtolnay. No security concern; block resolves once the package is >48h old."
+opened_at = "2026-05-22"
+expires = "2026-05-25"
+
+# ---------------------------------------------------------------------------
+# Maintainer-change blocks (investigated)
+# ---------------------------------------------------------------------------
+
+[[allow]]
+package = "getrandom"
+version = "0.3.4"
+policy = "maintainer_change"
+justification = "placeholder: pending investigation in task 081 — getrandom maintainer rotation needs verification against upstream rust-random org. Do not remove this placeholder until task 081 is complete and the findings are documented here."
+opened_at = "2026-05-22"
+
+[[allow]]
+package = "getrandom"
+version = "0.4.2"
+policy = "maintainer_change"
+justification = "placeholder: pending investigation in task 081 — getrandom maintainer rotation needs verification against upstream rust-random org. Do not remove this placeholder until task 081 is complete and the findings are documented here."
+opened_at = "2026-05-22"

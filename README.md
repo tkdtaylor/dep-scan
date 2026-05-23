@@ -58,6 +58,45 @@ dep-scan runs **11 security policies** against every package:
 | **PyPI provenance** | PEP 740 sigstore attestation, same verification as npm with sha256 subject digests. Defends against a lying PyPI registry. | Warn (missing) / Block (invalid) |
 | **Go sumdb** | Ed25519 signature verification of `sum.golang.org` signed-tree-head responses. Defends against a lying Go module proxy. | Warn (missing) / Block (invalid) |
 
+### Dogfood policy
+
+dep-scan's CI scans its own `Cargo.lock` on every push. When dep-scan reports a
+block verdict on one of its own transitive dependencies, the maintainer has
+three options:
+
+1. **Fix the root cause in code** — correct response for false positives (e.g. the
+   `version_check` typosquat false-positive, fixed by adjusting heuristics).
+2. **Wait for the signal to resolve naturally** — age blocks expire once the
+   package has been published for 48 hours.
+3. **Acknowledge the block** — for investigated-and-benign findings (e.g. an
+   audited maintainer rotation), record the justification in
+   `.dep-scan-dogfood-allowlist.toml`.
+
+The file `.dep-scan-dogfood-allowlist.toml` at the repo root is CI metadata,
+not a dep-scan feature. dep-scan itself still reports every block; the
+`scripts/dogfood-gate.py` gate reads the allowlist and downgrades matched
+blocks from `::error::` (build failure) to `::warning::` (logged but not
+failing). Unmatched blocks still fail the build.
+
+**Allowlist entry fields:**
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `package` | yes | Crate name; must match the `package` field in dep-scan JSON |
+| `policy` | yes | Policy name: `age`, `maintainer_change`, `typosquatting`, etc. |
+| `justification` | yes | Free text; reference a task, issue, or investigation writeup |
+| `opened_at` | yes | ISO date (`YYYY-MM-DD`) the entry was added |
+| `version` | no | Exact-match version string; omit to match any version |
+| `expires` | no | ISO date after which the entry is inert; use for transient blocks |
+
+**When to use `expires`:** Always set it for age-policy blocks — those resolve
+naturally once the package is >48h old. Set it ~48-72h after the block was
+first observed. For investigated maintainer changes, `expires` is optional but
+recommended to ensure entries get periodically reviewed.
+
+**Rule: never allowlist a verdict you haven't actually investigated.** An
+unexplained allowlist entry is indistinguishable from negligence.
+
 ### Cache integrity (always on)
 
 Every cached verdict is content-addressed. On a cache hit, dep-scan re-fetches the registry's published digest (`dist.integrity` / `digests.sha256` / `cksum` / `h1:`) and compares it to the stored hash. Mismatch ⇒ invalidate the cache row and re-scan from scratch. There is no flag to skip this check. The both-`None` case (registry stopped publishing a digest, and the cache row was a pre-029 row) is fail-closed — re-scan, never honor.

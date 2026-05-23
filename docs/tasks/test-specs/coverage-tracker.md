@@ -94,7 +94,7 @@
 | 076 | Add `CONTRIBUTING.md` | 076-contributing-md-test-spec.md | 0/10 | ❌ |
 | 077 | Add `CODE_OF_CONDUCT.md` (Contributor Covenant 2.1) | 077-code-of-conduct-test-spec.md | 0/8 | ❌ |
 | 078 | Lockfile scanner uses pinned versions, not registry "latest" | 078-lockfile-pinned-version-propagation-test-spec.md | 18/18 | ✅ |
-| 079 | Dogfood allowlist mechanism for justified block verdicts | 079-dogfood-allowlist-mechanism-test-spec.md | 0/19 | ❌ |
+| 079 | Dogfood allowlist mechanism for justified block verdicts | 079-dogfood-allowlist-mechanism-test-spec.md | 19/19 | ✅ |
 | 080 | Fix typosquat false-positive on `version_check` | 080-fix-version-check-typosquat-false-positive-test-spec.md | 9/9 | ✅ |
 | 081 | Investigate `getrandom` maintainer changes | 081-getrandom-maintainer-investigation-test-spec.md | 0/15 | ❌ |
 
