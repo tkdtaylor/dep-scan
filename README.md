@@ -197,6 +197,8 @@ min_downloads = 1000
 
 The `require_*` knobs escalate a missing-attestation `Warn` into a `Block`. Most packages don't publish provenance yet, so the defaults are `Warn` to avoid a false-positive flood. Invalid attestations always `Block` regardless of these flags.
 
+> **Note:** The `popularity` and `dependency_confusion` policies are always enabled and are configured via their own `[popularity]` and `[dependency_confusion]` sections, not by `check_*` booleans in `[policies]`.
+
 All settings can be overridden via environment variables:
 
 | Variable | Overrides |
@@ -234,6 +236,7 @@ expresss             0.0.0        85259h     WARN: Package 'expresss' is similar
   vulnerability: pass
   popularity: pass
   dependency_confusion: pass
+  npm_provenance: pass
 internal-utils       0.1.0        1749h      WARN: Package 'internal-utils' matches internal namespace pattern 'internal-' — possible dependency confusion
   age: pass
   install_scripts: pass
@@ -243,6 +246,7 @@ internal-utils       0.1.0        1749h      WARN: Package 'internal-utils' matc
   vulnerability: pass
   popularity: pass
   dependency_confusion: WARN — Package 'internal-utils' matches internal namespace pattern 'internal-' — possible dependency confusion
+  npm_provenance: pass
 ```
 
 ## Examples
@@ -272,7 +276,7 @@ cp target/release/dep-scan ~/.local/bin/
 
 ```bash
 cd your-project
-dep-scan config init    # creates .dep-scan.toml with sensible defaults
+dep-scan config init    # creates .dep-scan.toml with sensible defaults (aborts if file already exists)
 ```
 
 This gives you a `.dep-scan.toml` you can check into your repo so the whole team shares the same security policies.
@@ -330,8 +334,7 @@ dep-scan install internal-utils --registry npm --force
 
 # Print an audit line naming the locked version + hash before exec
 dep-scan install express --registry npm --verbose
-# → dep-scan: installing express@5.0.1 (sha512:…) — sigstore provenance
-#   not re-verified at install time (L-9)
+# → [audit] express@5.0.1 hash=sha512:… verdict=pass sigstore_reverified=false (L-9)  # npm example
 ```
 
 The `--verbose` audit line (v1.2.0) records exactly what version + content
