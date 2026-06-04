@@ -101,8 +101,8 @@
 | 083 | `--format` enum + OSV-compatible emit (ADR 005 Q1) | 083-format-enum-osv-emit-test-spec.md | 0/27 | ❌ |
 | 084 | Scan-result SBOM: CycloneDX + SPDX of analyzed tree (ADR 005 Q2) | 084-scan-result-sbom-test-spec.md | 0/20 | ❌ |
 | 085 | Presence-only VEX emission (ADR 005 Q3) | 085-vex-emission-test-spec.md | 0/16 | ❌ |
-| 086 | DSSE envelope signing for interchange output (ADR 006 Q4+Q8) | 086-dsse-signing-interchange-test-spec.md | 0/18 | ❌ |
-| 087 | Signing identity: keyless-online + pinned-key-offline (ADR 006 Q5) | 087-signing-identity-keyless-offline-test-spec.md | 0/17 | ❌ |
+| 086 | DSSE envelope signing for interchange output (ADR 006 Q4+Q8) | 086-dsse-signing-interchange-test-spec.md | 0/19 | ❌ |
+| 087 | Signing identity: keyless-online + operator-key-offline (ADR 006 Q5, ADR 007) | 087-signing-identity-keyless-offline-test-spec.md | 0/17 | ❌ |
 | 088 | Statement freshness: OSV-snapshot marker + `valid_until` (ADR 006 Q7) | 088-statement-freshness-test-spec.md | 0/19 | ❌ |
 
 ## Status key

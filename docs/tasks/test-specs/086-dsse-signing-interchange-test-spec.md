@@ -116,12 +116,18 @@ test-only Ed25519 key so it can be exercised without network access.
 - `run_check` returns `Err`, process exits non-zero.
 - Nothing is written to stdout (no partial/unsigned output).
 
+### T-086-18: `--allow-unsigned` emits the raw payload with an unsigned marker
+- Run `--format osv --allow-unsigned`.
+- Output is the raw OSV payload (no DSSE `payload`/`signatures` envelope) and
+  carries an explicit unsigned marker a consumer can detect.
+- The signer is never invoked; `native`/`json` output is unaffected by the flag.
+
 ---
 
 ## Out of scope (explicit)
 
-- Signing identity (keyless sigstore vs. pinned Ed25519 in production) —
-  that is task 087. This task uses a test-only key.
+- Signing identity (keyless sigstore vs. operator-provisioned key in
+  production) — that is task 087. This task uses a test-only key.
 - Freshness / `valid_until` fields embedded in the payload — task 088.
 - The `--format json` path remains unsigned by design (ADR 006 Q8).
 
@@ -129,7 +135,7 @@ test-only Ed25519 key so it can be exercised without network access.
 
 ## Tooling gate
 
-### T-086-18: No regressions
+### T-086-19: No regressions
 - `cargo test` (full suite) exits 0.
 - `cargo clippy --all-targets --all-features -- -D warnings` exits 0.
 - `cargo fmt --check` exits 0.

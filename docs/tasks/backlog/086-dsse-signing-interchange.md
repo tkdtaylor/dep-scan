@@ -67,6 +67,14 @@ The `Native` and `Json` branches remain completely unchanged.
 If signing fails, `run_check` returns `Err` without writing any output to
 stdout. The process exits non-zero.
 
+### REQ-086-06: `--allow-unsigned` opt-in for unsigned interchange output
+Define a `--allow-unsigned` flag on `check`/`install`. By default a signed
+interchange format with no available signing identity fails closed (the
+identity resolution and fail-closed behavior live in task 087). When
+`--allow-unsigned` is set, the interchange payload is emitted **unsigned**
+(raw, no DSSE envelope) with an explicit unsigned marker so a consumer can
+apply policy. This flag never affects the `native`/`json` paths.
+
 ## Acceptance criteria
 
 - [ ] `--format osv/cyclonedx/spdx/vex` output is a DSSE envelope JSON object
@@ -75,7 +83,8 @@ stdout. The process exits non-zero.
 - [ ] Tampered payload and tampered payloadType both fail verification
 - [ ] `--format native` and `--format json` produce no envelope, no signing cost
 - [ ] Signing is one operation per run regardless of result-set size
-- [ ] All T-086-01 through T-086-18 pass
+- [ ] `--allow-unsigned` emits the raw payload with an unsigned marker, no envelope
+- [ ] All T-086-01 through T-086-19 pass
 - [ ] `cargo test` exits 0, clippy clean, fmt clean
 
 ## Test spec
