@@ -1,7 +1,7 @@
 # Architecture Overview
 
 **Project:** dep-scan
-**Last updated:** 2026-05-22
+**Last updated:** 2026-06-04
 
 > **For authoritative contracts**, see [docs/spec/](../spec/) — the
 > external behaviors and security invariants the code MUST satisfy.
@@ -50,6 +50,36 @@ The cache DB file is created with mode `0600` and uses `PRAGMA journal_mode = WA
 | Implementation language | Rust | [001](decisions/001-language-choice.md) |
 | v0.2 detection strategy | OSV.dev + bloom filters + built-in patterns | [002](decisions/002-detection-strategy.md) |
 | Cache integrity + out-of-band provenance | Content-hash verification, sigstore (Fulcio + Rekor), sumdb signed-tree-head | [003](decisions/003-content-hash-cache-integrity.md) |
+| External interchange formats | OSV / CycloneDX / SPDX / VEX / sigstore — reuse standards, don't invent | [005](decisions/005-interchange-standards-osv-sbom-vex.md) |
+| Runtime statement integrity | Signed, attributable statements between blocks (proposed) | [006](decisions/006-runtime-statement-integrity.md) |
+
+## dep-scan in the wider ecosystem
+
+dep-scan is designed to stand alone **and** to compose. Beyond the standalone CLI, it is one block in
+a larger, security-first agent ecosystem: a set of independent, swappable tools (dep-scan for
+dependency supply-chain checks, a code-scanner for source-level findings, an audit trail, etc.) that
+an agent wires together. The goal is an agent that is **secure from the start** — where security is a
+property of the *composition*, not something bolted on after the blocks are assembled.
+
+Two design rules follow from that goal, and they are why output standardization is a hard
+requirement rather than a nice-to-have — not gold-plating to be "simplified" away later:
+
+1. **Standardize at the boundary, stay independent in the core.** The contract between blocks is the
+   *output format*, not a shared implementation. dep-scan commits to emitting standard interchange
+   formats (OSV findings, CycloneDX/SPDX SBOM, VEX exploitability statements — see
+   [ADR 005](decisions/005-interchange-standards-osv-sbom-vex.md)) so its output drops into the
+   agent's trust pipeline, a SIEM, or other scanners' consumers without bespoke glue. Internally
+   dep-scan owes nothing to the ecosystem and remains a useful standalone tool. Reusing hardened
+   standard schemas also shrinks attack surface: fewer bespoke parsers across the ecosystem.
+2. **A trustworthy composition needs trustworthy interconnects.** A standard *format* says nothing
+   about whether a statement is authentic. For the agent to safely act on a "not exploitable" VEX
+   statement, it must know *which block produced it and that it wasn't tampered with*. Signing the
+   statements that flow between blocks at runtime — distinct from signing release artifacts — is
+   tracked in [ADR 006](decisions/006-runtime-statement-integrity.md) (proposed).
+
+The cross-block contracts are coordinated in an **external** secure-agent planning hub,
+which is not part of this repository; ADR 005 references it for the ecosystem-wide standards table.
+dep-scan's own commitments are captured in ADRs 005 and 006 and are authoritative for this repo.
 
 ## Data flow
 

@@ -25,14 +25,24 @@ Adopt the following as dep-scan's external interchange formats:
 
 | Concern | Standard | Status |
 |---------|----------|--------|
-| Vulnerability data | **OSV** schema (consume OSV.dev; emit findings in OSV-compatible shape) | Shipped |
+| Vulnerability data (consume) | **OSV** schema — query OSV.dev, map results into the policy engine | Shipped (task 011) |
+| Vulnerability data (emit) | **OSV**-compatible findings in dep-scan's machine output | Planned |
 | SBOM (primary) | **CycloneDX** | Shipped (task 069) |
 | SBOM (alternate export) | **SPDX** | Planned |
 | Exploitability / affected-status | **VEX** (CSAF-VEX or OpenVEX) — express reachability so downstream consumers can suppress non-exploitable findings | Planned |
 | Artifact provenance | **sigstore** (Fulcio + Rekor transparency log) | Shipped |
 
+The **consume** and **emit** halves of OSV are tracked separately on purpose. Today dep-scan
+*consumes* OSV (`src/osv.rs` queries OSV.dev and maps responses into the policy engine), but its
+own machine output is a bespoke `CheckResult` JSON (`src/main.rs`), not an OSV-shaped finding. The
+interoperability promise of this ADR — piping dep-scan into OSV-Scanner/Trivy/Grype consumers, a
+SIEM, or the agent's audit trail — is only honored once the **emit** side ships. Until then, treat
+the downstream pipe as designed, not built.
+
 Where an upstream tool already emits one of these formats, prefer aggregating its native output
-over re-deriving it.
+over re-deriving it. Aggregated output carries the provenance of *which* tool produced each claim,
+so a consumer can weigh the source — this matters for a security tool whose own trust then depends
+on the upstream tool's correctness, and it ties directly into the runtime-integrity question below.
 
 ## Consequences
 
@@ -44,8 +54,21 @@ over re-deriving it.
   generated from the same internal model.
 - **−** VEX adds scope (a statement model + signing question); treat as a separate task.
 
+### Out of scope (deferred to ADR 006)
+
+This ADR standardizes the **format** of statements that cross block boundaries. It does **not**
+address the **integrity and authenticity of those statements as they flow between blocks at
+runtime**. sigstore here covers *release-artifact* provenance (who built the dep-scan binary), not
+the OSV/VEX/SBOM statements dep-scan hands a sibling block during a scan. A standard format with no
+authentication is forgeable: a compromised or impersonating block could emit a well-formed-but-false
+"not exploitable" VEX statement and suppress a real finding. Runtime statement integrity is the
+subject of [ADR 006](006-runtime-statement-integrity.md).
+
 ## References
 
 - ADR 002 — detection strategy (OSV)
+- [ADR 006](006-runtime-statement-integrity.md) — runtime statement integrity (signing the flowing statements)
+- Task 011 — OSV.dev integration (consume side)
 - Task 069 — CycloneDX SBOM per release
-- Ecosystem standards table: the shared interface-contracts reference §1a
+- Ecosystem standards table: `interface-contracts.md` §1a — maintained in the **external** secure-agent
+  **external** secure-agent planning hub, not in this repository
