@@ -39,10 +39,12 @@ identity is active.
 
 ### REQ-087-01: `OperatorKeySigner`
 Ed25519 signing using a key loaded from `signing.key_path` (an operator-
-provisioned private key on disk). No network access during construction or
-signing. The key reference is structured so a future KMS/PKCS#11 backend can
-be added without a breaking config change (ADR 007 point 2). Construction
-fails with `Err` if the configured key cannot be read or parsed.
+provisioned private key on disk). The on-disk format is **PEM-encoded PKCS#8
+Ed25519** (the standard interchange format; task 089 exports the matching
+public half as PEM SPKI). No network access during construction or signing.
+The key reference is structured so a future KMS/PKCS#11 backend can be added
+without a breaking config change (ADR 007 point 2). Construction fails with
+`Err` if the configured key cannot be read or parsed.
 
 ### REQ-087-02: `KeylessSigner`
 Sigstore keyless signing: obtain a Fulcio-issued short-lived cert, produce a

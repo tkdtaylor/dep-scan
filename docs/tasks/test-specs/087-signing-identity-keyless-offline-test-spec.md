@@ -123,7 +123,8 @@ uses. It depends on 086 for the `InterchangeSigner` trait definition.
 
 ### T-087-16: External `signing.key_path` is loaded and used when set
 - Set `signing.key_path = "/tmp/test-signing-key"` in config; write a test
-  Ed25519 private key to that path.
+  Ed25519 private key in **PEM PKCS#8** format to that path (the format task
+  089 exports the public half of).
 - `OperatorKeySigner` loads the key from that path and produces a verifiable
   signature.
 
