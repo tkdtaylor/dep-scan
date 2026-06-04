@@ -46,11 +46,16 @@ resolved as follows:
   and re-read later, when no channel exists — only signing-at-rest makes a finding tamper-evident
   then. An authenticated channel (mTLS / authenticated IPC) is a complementary later addition for
   live transport, **not** the foundation.
-- **Identity — keyless online, pinned-key offline, both first-class (Q5).** Default to **sigstore
-  keyless** (Fulcio-issued, workload-identity-bound certs) when network is available, consistent
-  with ADR 003's keyless posture. When offline/air-gapped, fall back to a **pinned Ed25519 key**,
-  reusing the proven sumdb key-handling pattern (`src/policy/go_sumdb.rs`). Offline is a **supported
-  mode, not a degraded one** — dep-scan's offline non-goal (overview §*Constraints*) requires it.
+- **Identity — keyless online, operator-provisioned key offline, both first-class (Q5).** Default
+  to **sigstore keyless** (Fulcio-issued, workload-identity-bound certs) when network is available,
+  consistent with ADR 003's keyless posture. When offline/air-gapped, sign with an **operator-
+  provisioned key** loaded from configuration — **never** a key embedded in the binary. The signer
+  is always the operator/deployment (online: Fulcio-bound OIDC identity; offline: the operator's own
+  key), not the software. Offline is a **supported mode, not a degraded one** — dep-scan's offline
+  non-goal (overview §*Constraints*) requires it. Custody, rotation, fail-closed behavior, and the
+  reason an embedded private key is unacceptable are specified in [ADR 007](007-offline-signing-key-custody.md).
+  Note: the existing pinned keys (Fulcio/Rekor/sumdb) are public *verification* keys — they are
+  **not** a template for a private *signing* key.
 - **Aggregated output — wrap, don't replace (Q6).** When dep-scan forwards an upstream tool's
   finding (Trivy/Grype, per ADR 005's aggregation preference), it signs an **envelope that contains
   the upstream signed statement** — "dep-scan attests it relayed this exact statement from Trivy,
@@ -94,5 +99,6 @@ resolved as follows:
 
 - [ADR 003](003-content-hash-cache-integrity.md) — cache integrity + out-of-band sigstore/sumdb provenance (the verify machinery this would reuse)
 - [ADR 005](005-interchange-standards-osv-sbom-vex.md) — interchange standards (the *format* layer this builds authenticity on top of)
+- [ADR 007](007-offline-signing-key-custody.md) — offline signing key custody (refines the Q5 identity decision)
 - `src/sigstore_verify.rs`, `src/signed_note.rs` — existing DSSE / signed-note verification
 - Architecture overview — *dep-scan in the wider ecosystem*

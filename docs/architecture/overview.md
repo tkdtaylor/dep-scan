@@ -51,7 +51,8 @@ The cache DB file is created with mode `0600` and uses `PRAGMA journal_mode = WA
 | v0.2 detection strategy | OSV.dev + bloom filters + built-in patterns | [002](decisions/002-detection-strategy.md) |
 | Cache integrity + out-of-band provenance | Content-hash verification, sigstore (Fulcio + Rekor), sumdb signed-tree-head | [003](decisions/003-content-hash-cache-integrity.md) |
 | External interchange formats | OSV / CycloneDX / SPDX / VEX / sigstore — reuse standards, don't invent | [005](decisions/005-interchange-standards-osv-sbom-vex.md) |
-| Runtime statement integrity | Signed, attributable statements between blocks (proposed) | [006](decisions/006-runtime-statement-integrity.md) |
+| Runtime statement integrity | Signed, attributable statements between blocks | [006](decisions/006-runtime-statement-integrity.md) |
+| Offline signing key custody | Operator-provisioned key, never embedded; fail-closed | [007](decisions/007-offline-signing-key-custody.md) |
 
 ## dep-scan in the wider ecosystem
 
