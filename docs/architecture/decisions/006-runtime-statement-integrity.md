@@ -1,6 +1,6 @@
 # ADR 006 — Runtime integrity of statements exchanged between ecosystem blocks
 
-**Status:** Proposed (direction recorded; approach not yet finalized)
+**Status:** Accepted (design settled 2026-06-04; implementation pending — depends on ADR 005 emit side)
 **Date:** 2026-06-04
 
 ## Context
@@ -32,41 +32,47 @@ The gap is concrete:
 This is the runtime analogue of supply-chain provenance: not "who built the scanner" but "who
 produced this finding, and has it been tampered with in transit?"
 
-## Decision (proposed)
+## Decision
 
-Adopt **signed, attributable statements** for everything that crosses a block boundary at runtime.
-The leading candidate reuses machinery dep-scan already has rather than inventing a scheme:
+Adopt **signed, attributable statements** for everything that crosses a block boundary at runtime,
+reusing machinery dep-scan already has rather than inventing a scheme. The five design questions are
+resolved as follows:
 
-- **Envelope:** wrap each emitted statement (OSV findings, VEX, SBOM) in a **DSSE** envelope.
-  dep-scan already parses and verifies DSSE for sigstore (`src/sigstore_verify.rs`) and signed-note
-  envelopes for sumdb (`src/signed_note.rs`), so the verify path is largely in place.
-- **Identity:** prefer **sigstore keyless** (Fulcio-issued, workload-identity-bound certs) so blocks
-  don't manage long-lived keys, consistent with the keyless posture in ADR 003. A pinned-key /
-  Ed25519 fallback covers offline and air-gapped composition, mirroring the sumdb key handling.
-- **Binding:** each statement carries the producing block's identity and a content digest, so a
-  consumer can answer "which block produced this, and is it intact?" before acting on it.
-
-This is recorded as a **direction**, not a finalized design. Open questions are listed below and
-must be resolved before this ADR moves to Accepted and spawns implementation tasks.
-
-## Open questions
-
-- **Transport vs. statement signing.** Is per-statement signing necessary, or does a mutually
-  authenticated channel between blocks (mTLS / authenticated IPC) cover the threat at lower cost?
-  Per-statement signing survives storage in the audit trail and re-forwarding; a channel does not.
-  Likely answer: both, for different reasons — but confirm.
-- **Offline / air-gapped composition.** Keyless sigstore wants network reachability at signing time;
-  dep-scan's non-goals (overview §*Constraints*) require fully-offline operation after initial scan.
-  The pinned-key fallback must be a first-class path, not an afterthought.
-- **Aggregated-output provenance.** ADR 005 prefers aggregating an upstream tool's native output
-  over re-deriving it. When dep-scan re-emits a Trivy/Grype finding, does it sign it as "dep-scan
-  vouches for this," or does it preserve and forward the upstream signature? This decides whether
-  trust is transitive or re-anchored at each hop.
-- **Revocation / freshness.** A signed "not exploitable" statement can go stale when new advisory
-  data lands. Statements need a validity window or freshness marker so a consumer doesn't honor a
-  correct-when-signed suppression indefinitely.
-- **Performance budget.** Signing every statement on a hot scan path has cost; measure against
-  dep-scan's local-first/fast positioning before committing.
+- **Mechanism — per-statement signing, primary (Q4).** Wrap each emitted interchange statement
+  (OSV findings, VEX, scan-result SBOM) in a **DSSE** envelope. dep-scan already parses and verifies
+  DSSE for sigstore (`src/sigstore_verify.rs`) and signed-note envelopes for sumdb
+  (`src/signed_note.rs`), so the verify path is largely in place. Per-statement signing is chosen
+  over channel auth because the ecosystem's whole point is an **audit trail**: statements are stored
+  and re-read later, when no channel exists — only signing-at-rest makes a finding tamper-evident
+  then. An authenticated channel (mTLS / authenticated IPC) is a complementary later addition for
+  live transport, **not** the foundation.
+- **Identity — keyless online, pinned-key offline, both first-class (Q5).** Default to **sigstore
+  keyless** (Fulcio-issued, workload-identity-bound certs) when network is available, consistent
+  with ADR 003's keyless posture. When offline/air-gapped, fall back to a **pinned Ed25519 key**,
+  reusing the proven sumdb key-handling pattern (`src/policy/go_sumdb.rs`). Offline is a **supported
+  mode, not a degraded one** — dep-scan's offline non-goal (overview §*Constraints*) requires it.
+- **Aggregated output — wrap, don't replace (Q6).** When dep-scan forwards an upstream tool's
+  finding (Trivy/Grype, per ADR 005's aggregation preference), it signs an **envelope that contains
+  the upstream signed statement** — "dep-scan attests it relayed this exact statement from Trivy,
+  intact." This preserves origin provenance *and* adds a tamper-evident relay record. A consumer
+  verifies dep-scan's outer signature (it has dep-scan's trust root) and may additionally verify the
+  inner upstream signature if it trusts that producer. Trust is neither blindly re-anchored nor
+  silently transitive.
+- **Freshness — snapshot marker + validity-window backstop (Q7).** Each statement records the
+  **advisory-data snapshot** it was computed against (OSV snapshot timestamp/version) as the precise
+  freshness signal — a strict consumer can reject anything computed against data older than its
+  policy. As a coarse backstop for consumers that don't implement freshness policy, statements also
+  carry `valid_until` defaulting to **24 hours** (OSV advisory data refreshes continuously and a
+  daily re-scan is the standard CI cadence). The window is **configurable** in `.dep-scan.toml` for
+  stricter or air-gapped environments. Online revocation lists are rejected — they break the offline
+  guarantee.
+- **Performance — sign only downstream-bound output, per-run not per-finding (Q8).** Signing is
+  applied **only** when emitting a machine interchange format (`--format osv` / `cyclonedx` / `spdx`
+  / `vex`). The default `native` table and `--format json` paths are **never signed** and incur zero
+  signing cost — preserving the local-first/fast experience that is dep-scan's primary daily use.
+  When signing does apply, it is **one signing operation per scan run** (a single envelope over the
+  result set), never per package. Budget: signing adds at most one keyless round-trip (online) or
+  one local signature (offline) per run — never per-package latency.
 
 ## Consequences
 
@@ -75,11 +81,14 @@ must be resolved before this ADR moves to Accepted and spawns implementation tas
 - **+** Closes the forged-suppression hole that VEX adoption (ADR 005) otherwise opens.
 - **+** Heavy reuse of existing DSSE/sigstore/signed-note verification code; little net-new crypto.
 - **+** Statements stay verifiable at rest in the audit trail, not just in transit.
-- **−** New scope: a statement signing path on emit, key/identity management, and a freshness model.
-- **−** Tension with offline operation and the fast-scan path; both need explicit handling, not
-  default-on keyless signing.
-- **−** Until resolved, the ecosystem's runtime trust chain rests on the channel and on each block
-  being uncompromised — document this assumption wherever blocks are composed.
+- **+** The fast path is untouched: only downstream-bound interchange output is signed, so daily
+  `native`/`json` use pays nothing (Q8).
+- **−** New scope: a statement signing path on emit, dual keyless/pinned-key identity handling, and a
+  freshness model. Two identity code paths to maintain (online keyless + offline pinned).
+- **−** The wrap-don't-replace model (Q6) adds envelope nesting; consumers must understand outer
+  (relay) vs. inner (origin) signatures.
+- **−** Until implemented, the ecosystem's runtime trust chain rests on the transport and on each
+  block being uncompromised — document this assumption wherever blocks are composed.
 
 ## References
 

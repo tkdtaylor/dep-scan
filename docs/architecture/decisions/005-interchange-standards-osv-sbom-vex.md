@@ -27,9 +27,9 @@ Adopt the following as dep-scan's external interchange formats:
 |---------|----------|--------|
 | Vulnerability data (consume) | **OSV** schema — query OSV.dev, map results into the policy engine | Shipped (task 011) |
 | Vulnerability data (emit) | **OSV**-compatible findings in dep-scan's machine output | Planned |
-| SBOM (primary) | **CycloneDX** | Shipped (task 069) |
-| SBOM (alternate export) | **SPDX** | Planned |
-| Exploitability / affected-status | **VEX** (CSAF-VEX or OpenVEX) — express reachability so downstream consumers can suppress non-exploitable findings | Planned |
+| SBOM — release artifact | **CycloneDX** (dep-scan's own dependency tree, at release) | Shipped (task 069) |
+| SBOM — scan result | **CycloneDX + SPDX** of the *analyzed* dependency tree, with verdicts attached | Planned |
+| Exploitability / affected-status | **VEX** (OpenVEX) — per-vuln status (`affected` / `fixed` / `under_investigation`); presence-only at first | Planned |
 | Artifact provenance | **sigstore** (Fulcio + Rekor transparency log) | Shipped |
 
 The **consume** and **emit** halves of OSV are tracked separately on purpose. Today dep-scan
@@ -44,12 +44,33 @@ over re-deriving it. Aggregated output carries the provenance of *which* tool pr
 so a consumer can weigh the source — this matters for a security tool whose own trust then depends
 on the upstream tool's correctness, and it ties directly into the runtime-integrity question below.
 
+### Resolved decisions (2026-06-04)
+
+These settle the open scoping questions before the emit-side tasks are written:
+
+- **Output-format surface (Q1).** A single `--format <value>` enum on `check`/`install`
+  (`native` | `json` | `osv` | `cyclonedx` | `spdx` | `vex`), defaulting to `native` (the human
+  table). `--json` is kept as a deprecated alias for `--format json`. One enum makes the formats
+  mutually exclusive for free and gives one place to document the interop output; matches the CLI
+  shape of Trivy/grype/syft.
+- **SBOM target (Q2).** The valuable SBOM is of the **analyzed dependency tree** (what dep-scan
+  scanned), not dep-scan's own binary. Task 069's release SBOM stays as-is; the planned work is a
+  **scan-result SBOM emitted in both CycloneDX and SPDX**, with verdicts attached. A standalone
+  SPDX of the release artifact is explicitly **dropped** — low ecosystem value.
+- **VEX depth (Q3).** Ship **presence-only VEX** first: `affected` / `fixed` /
+  `under_investigation` derived from existing OSV data. dep-scan has **no reachability analysis
+  today** (the eleven policies do not include one), so it cannot honestly emit `not_affected` with a
+  reachability justification. Reachability-based suppression is a substantial, language-specific
+  feature and is **removed from this ADR's scope** — it will get its own ADR and roadmap slot. This
+  ADR no longer claims reachability exists.
+
 ## Consequences
 
 - **+** Output is consumable by the wider supply-chain tooling ecosystem and by sibling blocks
   (code-scanner's SARIF report, the agent's audit-trail) without custom adapters.
-- **+** VEX lets dep-scan communicate "present but not reachable/exploitable," reducing downstream
-  false-positive noise — a natural fit for dep-scan's reachability analysis.
+- **+** VEX gives downstream consumers a standard exploitability channel. Presence-only statements
+  ship first; once reachability analysis exists (separate ADR), `not_affected` justifications can
+  reduce false-positive noise without changing the emitted format.
 - **−** Maintaining two SBOM formats (CycloneDX + SPDX) is ongoing cost; SPDX is export-only and
   generated from the same internal model.
 - **−** VEX adds scope (a statement model + signing question); treat as a separate task.
