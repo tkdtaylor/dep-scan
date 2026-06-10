@@ -1,0 +1,215 @@
+# ADR 008 — Git/VCS dependency handling and transitive scanning
+
+**Status:** Proposed
+**Date:** 2026-06-10
+
+## Context
+
+dep-scan today has a structural blind spot: it scans only **published registry
+packages** (npm, PyPI, crates.io, the Go proxy) and only the **flat list of direct
+entries** in a lockfile. Two whole classes of dependency escape every policy in the
+pipeline.
+
+**1. Git/VCS-sourced dependencies are silently dropped or mis-routed.** The npm
+lockfile parser (`src/lockfile.rs:88-95`) keys off the `version` field and ignores the
+`resolved` field. A git dependency's `resolved` value is a git URL of the form
+`git+ssh://…#<ref>` (or `git+https://…#<ref>`), with no usable `version` — so the entry
+is either dropped (empty `version` is skipped) or, when a placeholder version is present,
+mis-routed to the npm registry as a plain `name@version` lookup that does not correspond
+to the code actually installed. The main scan loop (`src/main.rs:311-331`) converts every
+lockfile entry to a `PackageRef { name, version }` and routes it exclusively to a registry
+client; there is no VCS/git client. The same gap exists for Cargo's `git+` sources.
+
+**2. There is no transitive resolution anywhere.** The scan calls
+`get_metadata(name, version)` per direct entry and never reads a package's *own*
+dependency manifest. A payload that is one hop away — a clean direct dependency that pulls
+in a malicious indirect one — is never seen unless that indirect package happens to also be
+a direct entry in the same lockfile.
+
+**The motivating threat (the "o3forms" npm incident).** A published npm package is
+spotless: ~350 bytes, no install scripts, nothing the install-script scanner
+(`src/policy/install_script.rs`) or the obfuscation detector
+(`src/policy/obfuscation.rs`) would flag — because both operate only on registry
+metadata. But the package declares a dependency on a GitHub repo via a git URL, and the
+malware lives in *that repo*: it steals AWS/Azure/GCP credentials, maps the internal
+network, and exfiltrates to a Cloudflare Workers endpoint. npm never sees the payload, and
+neither does any SCA tool that scans only the registry. dep-scan currently inherits exactly
+that blind spot on both axes at once — the git dep is dropped (axis 1) and, even if it were
+a transitive registry dep, never walked (axis 2).
+
+**The branch-flip variant makes this worse and cheaper for the attacker.** If the git
+dependency points at a **mutable ref** — a branch or tag — rather than a pinned commit SHA,
+the repository can look completely legitimate for weeks and then flip to malicious with a
+single push. No new npm release is cut, no version changes, nothing in the registry moves.
+dep-scan has no policy that distinguishes a mutable ref from a pinned commit SHA, so even
+the *shape* of this risk is invisible today.
+
+This ADR records the decision to close both axes, in dependency order, and is explicit
+about which pieces are cheap and high-value versus which constitute a heavy, separable epic.
+
+## Constraints
+
+These carry over from the project's standing invariants (CLAUDE.md, ADR 002, ADR 003,
+overview *Constraints and non-goals*) and bind every piece below:
+
+- **Local-first / network only on explicit scan.** dep-scan makes network calls *only*
+  when the user explicitly invokes a scan. Fetching a git repo is a network call and must
+  obey this rule — no cloning during config load, lockfile parse, or any implicit path.
+- **Single static binary, no runtime dependencies.** Whatever fetches a git repo must not
+  require a system `git` binary, a language runtime, or any other out-of-band tool to be
+  present for dep-scan to function. (Optional acceleration via a system `git` if present is
+  acceptable as graceful degradation, mirroring the optional-Semgrep pattern in ADR 002 — but
+  the default path must work from the single binary.)
+- **No hardcoded hosts/URLs.** Per CLAUDE.md, registry URLs are configurable; VCS hosts and
+  any allow/deny host policy must likewise be configurable, never hardcoded. There is no
+  built-in trust in `github.com` over any other host.
+- **No code execution, ever.** dep-scan does not modify or run packages (overview non-goal).
+  Fetching source to *scan* it must never trigger build scripts, install hooks, submodule
+  hooks, or git hooks. The fetch is read-only data acquisition for static analysis.
+- **Fail-closed on unscannable input.** Consistent with ADR 003's cache posture: a
+  dependency dep-scan cannot resolve, fetch, or scan must not be silently treated as a pass.
+
+## Decision
+
+Close the blind spot in four pieces, ordered by dependency. Pieces 1 and 3 are cheap,
+self-contained, and high-value on their own; piece 2 unlocks deep scanning of git sources;
+piece 4 is the heavy, separable epic.
+
+### 1. Detect git/VCS URLs in lockfiles
+
+Read the source fields the parsers currently discard and surface git-sourced dependencies
+as a **distinct dependency kind** rather than dropping them or mis-routing them to a
+registry client.
+
+- npm: read the `resolved` field; recognize `git+ssh://…#<ref>`, `git+https://…#<ref>`,
+  and shorthand GitHub/GitLab forms; extract `(host, repo, ref)`.
+- Cargo: recognize `git+` sources and their `#<rev>` fragment.
+- Model the result as a new dependency-source variant (e.g. extend `LockfileDependency`
+  /`PackageRef` with a `source: Registry | Git { url, ref }` distinction) so downstream
+  code can branch on kind instead of assuming "registry" everywhere.
+
+The deliverable of piece 1 by itself is **visibility**: dep-scan stops silently dropping
+git deps and instead reports "this dependency is git-sourced, resolved from `<url>` at
+`<ref>`." That visibility is the precondition for both piece 2 (fetch it) and piece 3
+(judge its ref), and is independently shippable.
+
+### 2. A VCS source client
+
+Add a VCS source client that fetches/clones the repository at the specified ref so its
+contents become scannable. **This is the first time dep-scan fetches raw source code rather
+than registry metadata**, which is the consequential design shift in this ADR and carries
+the heaviest security implications:
+
+- **Sandboxed, read-only fetch with no code execution.** The fetch must not run build
+  scripts, install hooks, git hooks, or submodule callbacks. Prefer a shallow fetch of the
+  single ref into an isolated, ephemeral working area; treat the result as untrusted data.
+- **Honor "network only on explicit scan."** The client runs only inside the scan path,
+  never implicitly.
+- **Configurable hosts.** A configurable allow/deny host policy gates which VCS hosts may
+  be fetched; nothing is hardcoded. Offline/air-gapped operation must degrade clearly
+  (fail-closed with a legible message), not hang.
+- **Caching.** Fetched-and-scanned git sources should cache by a *pinned-commit* key so a
+  re-scan of an immutable SHA is a cache hit. Mutable refs cannot be safely cached by ref
+  name — see piece 3 and the cache open question below.
+- Once fetched, the existing policy pipeline (install-script scanner, obfuscation detector,
+  etc.) runs against the source tree, finally giving those policies something to inspect for
+  git-sourced code.
+
+### 3. Mutable-ref policy
+
+Add a policy that distinguishes a **mutable git ref** (branch or tag) from a **pinned
+commit SHA**, and warns or blocks when a dependency points at a mutable ref.
+
+- **Default severity: Warn.** Block is opt-in via configuration (mirroring how the
+  `maintainer_first_seen` and similar policies stay non-regressive by default in ADR 002).
+- **High value, low cost — and it works without piece 2.** Pieces 1 + 3 together catch the
+  branch-flip variant *at the policy layer with no code fetch at all*: piece 1 surfaces the
+  ref, piece 3 judges whether it is pinned. A dependency on a moving branch is flagged
+  regardless of whether the repo currently looks clean. This is the cheapest meaningful
+  mitigation of the motivating threat and should land early.
+
+### 4. Transitive resolution
+
+Walk fetched and registry packages' **own dependency manifests** so payloads one hop (or
+more) away are scanned, instead of only the flat lockfile entries.
+
+This is by far the **largest scope** and is framed here as a **possibly-separate epic** with
+genuine unresolved design questions (see *Open questions*): depth limits, cycle detection,
+whether the lockfile or each package's manifest is the source of truth for the edge set, and
+the impact on the `(name, version, registry)` cache model — which has no representation for
+a git source or for "this verdict depended on these transitive children." This ADR commits
+to the *direction* (transitive scanning is in scope for the product) but deliberately does
+**not** commit to a single resolution algorithm here; that is left to the epic's own design
+work so we do not over-commit to a model that the cache and source-kind changes from pieces
+1–3 may reshape.
+
+## Implementation order
+
+| Priority | Piece | Scope | Network fetch of code? | Mitigates |
+|----------|-------|-------|------------------------|-----------|
+| 1 | Detect git/VCS URLs in lockfiles | Low–Medium | No | Silent-drop / mis-route blind spot; precondition for 2 & 3 |
+| 2 | Mutable-ref policy (Warn default) | Low | No | Branch-flip variant, at the policy layer |
+| 3 | VCS source client (sandboxed fetch) | High | Yes (first time) | Malicious code in git-sourced repos |
+| 4 | Transitive resolution | Highest (separable epic) | Inherits 3 | One-hop-away payloads |
+
+Note the ordering swap relative to the *Decision* numbering: piece 3 (mutable-ref policy)
+is sequenced **before** piece 2 (VCS client) in delivery because it depends only on piece 1,
+is cheap, and mitigates the branch-flip threat without any code fetch. The heavier VCS
+client follows. The transitive epic is last and gated on its own open questions.
+
+## Open questions
+
+- **VCS fetch mechanism.** Pure-Rust git (e.g. a `gix`-family crate) vs. optional shell-out
+  to a system `git` when present. The single-binary constraint argues for pure-Rust as the
+  default; an optional accelerated path is acceptable only as graceful degradation.
+- **Sandbox boundary for the fetch.** What isolation is sufficient to guarantee "no code
+  execution" across platforms (git hooks, submodule recursion, symlink escapes, path
+  traversal in archive/tree extraction)? This is the security crux of piece 3.
+- **Host trust policy shape.** Allow-list, deny-list, or both; default posture; how it
+  composes with enterprise mirrors. Must stay configuration-driven (no hardcoded hosts).
+- **Cache key for git sources.** The current cache is keyed `(name, version, registry)`.
+  Immutable commit SHAs key cleanly; mutable refs and "no registry" git sources do not. Does
+  the key become `(name, commit_sha, source)`? Are mutable-ref results cacheable at all?
+- **Transitive: source of truth.** Lockfile (already-resolved, complete, but may omit git
+  sub-trees) vs. each package's own manifest (authoritative for edges but requires
+  resolution and re-introduces version-range ambiguity).
+- **Transitive: depth limit and cycle detection.** Default max depth; cycle handling;
+  performance budget when one scan fans out into hundreds of transitive nodes; how partial
+  failures (one unfetchable node) roll up into the top-level verdict under fail-closed.
+
+## Consequences
+
+- **+** Closes a real, exploited blind spot (the o3forms class): git-sourced and one-hop-away
+  payloads become visible to the existing policy pipeline instead of bypassing it entirely.
+- **+** Pieces 1 + 3 deliver meaningful protection against the branch-flip variant **early
+  and cheaply**, with no network fetch of code and no change to the security posture beyond a
+  new policy verdict.
+- **+** Surfacing a distinct git dependency *kind* removes the current silent-drop /
+  mis-route behavior, which is itself a correctness and trust improvement regardless of the
+  later pieces.
+- **−** Piece 2 introduces dep-scan's **first fetch of raw third-party source code**, a
+  materially larger trust boundary and attack surface (untrusted trees, hooks, submodules,
+  path/symlink traversal) than fetching registry metadata. This must be designed
+  sandbox-first and is the highest-risk piece.
+- **−** The `(name, version, registry)` cache model does not represent git sources or
+  transitive provenance; piece 4 (and to a lesser extent piece 2) will force a cache-schema
+  evolution, with the usual migration care (additive, idempotent — per the cache-schema
+  conventions in the overview).
+- **−** Transitive scanning can turn a single top-level scan into a large fan-out; without
+  depth limits, cycle detection, and good caching it risks slow scans — directly in tension
+  with the "fast, local-first" product promise. This is why piece 4 is scoped as a separable
+  epic rather than committed to here.
+- **−** Offline/air-gapped operation gains a new fail-closed path: a git dependency that
+  cannot be fetched cannot be scanned and must not pass silently, so some previously
+  "passing" (because dropped) dependency sets will now correctly fail or warn.
+
+## References
+
+- [ADR 002](002-detection-strategy.md) — detection strategy; optional-tool / graceful-degradation
+  pattern and the default-non-regressive policy posture reused by piece 3
+- [ADR 003](003-content-hash-cache-integrity.md) — fail-closed cache posture and the
+  `(name, version, registry)` cache model that pieces 2 & 4 must evolve
+- `src/lockfile.rs` — npm parser that currently discards the `resolved` git URL (piece 1)
+- `src/main.rs` (scan loop) — registry-only routing with no VCS client (pieces 1 & 2)
+- `src/policy/install_script.rs`, `src/policy/obfuscation.rs` — policies that today see only
+  registry metadata and would gain git-sourced trees to inspect (piece 2)
