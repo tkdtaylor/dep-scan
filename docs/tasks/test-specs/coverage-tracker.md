@@ -105,6 +105,16 @@
 | 087 | Signing identity: keyless-online + operator-key-offline (ADR 006 Q5, ADR 007) | 087-signing-identity-keyless-offline-test-spec.md | 0/17 | ❌ |
 | 088 | Statement freshness: OSV-snapshot marker + `valid_until` (ADR 006 Q7) | 088-statement-freshness-test-spec.md | 0/19 | ❌ |
 | 089 | Public-key export for consumers (ADR 007 point 3) | 089-pubkey-export-test-spec.md | 0/19 | ❌ |
+| 090 | Dependency source model (`DependencySource` enum) (ADR 008 piece 1 — data model) | 090-dependency-source-model-test-spec.md | 0/15 | ❌ |
+| 091 | npm lockfile git URL parser (ADR 008 piece 1 — npm) | 091-npm-git-url-parser-test-spec.md | 0/19 | ❌ |
+| 092 | Cargo lockfile git source parser (ADR 008 piece 1 — Cargo) | 092-cargo-git-source-parser-test-spec.md | 0/16 | ❌ |
+| 093 | Surface git deps in scan output (ADR 008 piece 1 — visibility deliverable) | 093-surface-git-deps-in-scan-output-test-spec.md | 0/13 | ❌ |
+| 094 | Mutable-ref policy (ADR 008 piece 3) | 094-mutable-ref-policy-test-spec.md | 0/23 | ❌ |
+| 095 | VCS host policy configuration (ADR 008 piece 2 — config) | 095-vcs-host-policy-config-test-spec.md | 0/22 | ❌ |
+| 096 | VCS fetch client — sandboxed, read-only fetch (ADR 008 piece 2 — fetch) | 096-vcs-fetch-sandbox-test-spec.md | 0/21 | ❌ |
+| 097 | VCS fetch cache integration (ADR 008 piece 2 — cache) | 097-vcs-fetch-cache-integration-test-spec.md | 0/12 | ❌ |
+| 098 | Policy pipeline on fetched git trees (ADR 008 piece 2 — policy wiring) | 098-policy-pipeline-on-fetched-trees-test-spec.md | 0/16 | ❌ |
+| 099 | Transitive resolution design spike (ADR 008 piece 4 — epic entry point) | 099-transitive-resolution-design-spike-test-spec.md | 0/14 | ❌ |
 
 ## Status key
 
