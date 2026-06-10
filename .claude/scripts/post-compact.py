@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-"""PostCompact hook — re-inject current task context after context compaction.
+"""Post-compaction context injection — re-inject the active task after compaction.
+
+Wired as a SessionStart hook with matcher="compact" because that is the
+documented event that fires after compaction AND honours additionalContext.
+The PostCompact event fires too, but its decision-control table is "None":
+hookSpecificOutput is silently discarded, so anything it returned would
+never reach Claude.
 
 When Claude's context window is compacted, it loses track of what task it was
 working on. This hook finds the active task and spec, and re-injects them so
@@ -22,7 +28,7 @@ check_gate(__file__, "standard")
 
 
 def main():
-    # Read stdin (may be empty for PostCompact)
+    # Read stdin (may be empty when the SessionStart payload is minimal)
     try:
         json.loads(sys.stdin.read())
     except Exception:
@@ -130,7 +136,7 @@ def main():
         json.dumps(
             {
                 "hookSpecificOutput": {
-                    "hookEventName": "PostCompact",
+                    "hookEventName": "SessionStart",
                     "additionalContext": context,
                 }
             }

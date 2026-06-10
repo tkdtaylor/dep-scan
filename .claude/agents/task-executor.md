@@ -213,7 +213,9 @@ Out-of-scope noted but not touched:
   <bullet list, or "none">
 
 Recommended next step:
-  use spec-verifier on task NNN before flipping the coverage-tracker row to ✅
+  use spec-verifier on task NNN before flipping the coverage-tracker row to ✅,
+  then the main session closes the task with `scripts/finish-task.sh NNN <slug>`
+  (merges, deletes the branch, removes the worktree, and verifies all three)
 ```
 
 Hard rules:

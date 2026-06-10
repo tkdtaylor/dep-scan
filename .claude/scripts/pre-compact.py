@@ -39,8 +39,10 @@ def main():
     cwd = os.environ.get("CLAUDE_PROJECT_DIR") or os.getcwd()
     project = Path(cwd)
 
+    # For PreCompact, the only documented `decision` value is "block".
+    # To allow compaction, emit no output and exit 0.
+
     if not project.is_dir():
-        print(json.dumps({"decision": "allow"}))
         return
 
     # If the agent recently checkpointed, allow compaction immediately.
@@ -48,7 +50,6 @@ def main():
     if checkpoint_marker.exists():
         age = time.time() - checkpoint_marker.stat().st_mtime
         if age < RECENT_THRESHOLD:
-            print(json.dumps({"decision": "allow"}))
             return
 
     # Check for uncommitted changes as a proxy for unsaved work.
@@ -63,12 +64,10 @@ def main():
         has_changes = bool(result.stdout.strip())
     except Exception:
         # Can't determine git state — allow compaction rather than block.
-        print(json.dumps({"decision": "allow"}))
         return
 
     if not has_changes:
         # Working tree is clean — safe to compact.
-        print(json.dumps({"decision": "allow"}))
         return
 
     # Block compaction — instruct the agent to checkpoint first.

@@ -40,6 +40,27 @@ STALE_SECONDS=$(( 4 * 60 * 60 ))
 
 cd "$(git rev-parse --show-toplevel)"
 
+# If we are already inside a harness-provided linked worktree (e.g. a parallel
+# backlog runner dispatched this agent with `isolation: worktree`), skip the
+# session-lock branch/worktree decision entirely — the worktree is the isolation.
+# Just make sure the task branch is checked out *here* and report WORKTREE.
+# Detection: in a linked worktree, the per-worktree git dir differs from the
+# shared common dir; in the main worktree they resolve to the same path.
+git_dir=$(cd "$(git rev-parse --git-dir)" && pwd)
+common_dir=$(cd "$(git rev-parse --git-common-dir)" && pwd)
+if [[ "${git_dir}" != "${common_dir}" ]]; then
+    current_branch=$(git symbolic-ref --short HEAD 2>/dev/null || echo "")
+    if [[ "${current_branch}" != "${TASK_REF}" ]]; then
+        if git show-ref --verify --quiet "refs/heads/${TASK_REF}"; then
+            git checkout "${TASK_REF}"
+        else
+            git checkout -b "${TASK_REF}"
+        fi
+    fi
+    echo "WORKTREE $(pwd)"
+    exit 0
+fi
+
 # Sweep stale locks (mtime older than staleness window). POSIX-portable.
 sessions_dir=".claude/sessions"
 mkdir -p "${sessions_dir}"
