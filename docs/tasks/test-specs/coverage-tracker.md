@@ -105,7 +105,7 @@
 | 087 | Signing identity: keyless-online + operator-key-offline (ADR 006 Q5, ADR 007) | 087-signing-identity-keyless-offline-test-spec.md | 17/17 | ✅ (spec-verifier APPROVE after test-strengthening — T-087-04 zero-network + T-087-12 DEP_SCAN_OFFLINE end-to-end; ephemeral signer replaced by resolve_signer, fail-closed verified; cargo test/clippy/fmt/audit clean; signing ADR renumbered to 010) |
 | 088 | Statement freshness: OSV-snapshot marker + `valid_until` (ADR 006 Q7) | 088-statement-freshness-test-spec.md | 19/19 | ✅ (spec-verifier APPROVE after T-088-15 made a real native-no-freshness assertion; T-088-14 no-OCSP/CRL accepted as structural guarantee; cargo test/clippy/fmt clean) |
 | 089 | Public-key export for consumers (ADR 007 point 3) | 089-pubkey-export-test-spec.md | 19/19 | ✅ (spec-verifier APPROVE after T-089-11/13 error-message assertions added + PEM-type detection; ed25519_keyid reused; runtime export-pubkey verified; cargo test/clippy/fmt clean) |
-| 090 | Dependency source model (`DependencySource` enum) (ADR 008 piece 1 — data model) | 090-dependency-source-model-test-spec.md | 0/15 | ❌ |
+| 090 | Dependency source model (`DependencySource` enum) (ADR 008 piece 1 — data model) | 090-dependency-source-model-test-spec.md | 15/15 | 🟡 Verified by: L4: cargo test 841 passed + clippy/fmt clean; L3: all T-090 markers present |
 | 091 | npm lockfile git URL parser (ADR 008 piece 1 — npm) | 091-npm-git-url-parser-test-spec.md | 0/19 | ❌ |
 | 092 | Cargo lockfile git source parser (ADR 008 piece 1 — Cargo) | 092-cargo-git-source-parser-test-spec.md | 0/16 | ❌ |
 | 093 | Surface git deps in scan output (ADR 008 piece 1 — visibility deliverable) | 093-surface-git-deps-in-scan-output-test-spec.md | 0/13 | ❌ |

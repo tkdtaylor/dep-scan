@@ -5,12 +5,56 @@ use serde_json::Value;
 
 use crate::registry::RegistryType;
 
+/// The source of a lockfile dependency — either a package registry or a VCS repository.
+///
+/// Introduced in task 090 (ADR 008 piece 1) to support git/VCS dependency detection.
+/// Replaces the flat `registry: RegistryType` field on `LockfileDependency`.
+#[derive(Debug, Clone, PartialEq)]
+pub enum DependencySource {
+    /// Dependency sourced from a package registry (npm, PyPI, crates.io, Go proxy).
+    Registry { registry: RegistryType },
+    /// Dependency sourced from a VCS (git) repository.
+    /// Parsed by tasks 091/092; routed by task 093.
+    #[allow(dead_code)]
+    Git { url: String, ref_: String },
+}
+
+impl DependencySource {
+    /// Return the `RegistryType` if this is a registry-sourced dependency, else `None`.
+    pub fn registry_type(&self) -> Option<RegistryType> {
+        match self {
+            DependencySource::Registry { registry } => Some(*registry),
+            DependencySource::Git { .. } => None,
+        }
+    }
+
+    /// Return the git ref (branch/tag/commit) if this is a git-sourced dependency, else `None`.
+    pub fn git_ref(&self) -> Option<&str> {
+        match self {
+            DependencySource::Git { ref_, .. } => Some(ref_),
+            DependencySource::Registry { .. } => None,
+        }
+    }
+
+    /// Return the git URL if this is a git-sourced dependency, else `None`.
+    pub fn git_url(&self) -> Option<&str> {
+        match self {
+            DependencySource::Git { url, .. } => Some(url),
+            DependencySource::Registry { .. } => None,
+        }
+    }
+}
+
 /// A dependency entry parsed from a lockfile.
+///
+/// T-090-08: The old `registry: RegistryType` flat field has been replaced by
+/// `source: DependencySource`.  Any remaining `dep.registry` access will not
+/// compile — verified by `cargo build` in the pre-commit gate.
 #[derive(Debug, Clone, PartialEq)]
 pub struct LockfileDependency {
     pub name: String,
     pub version: String,
-    pub registry: RegistryType,
+    pub source: DependencySource,
 }
 
 /// Supported lockfile formats.
@@ -96,7 +140,9 @@ pub fn parse_package_lock_json(content: &str) -> Result<Vec<LockfileDependency>>
             deps.push(LockfileDependency {
                 name,
                 version,
-                registry: RegistryType::Npm,
+                source: DependencySource::Registry {
+                    registry: RegistryType::Npm,
+                },
             });
         }
         return Ok(deps);
@@ -117,7 +163,9 @@ pub fn parse_package_lock_json(content: &str) -> Result<Vec<LockfileDependency>>
             deps.push(LockfileDependency {
                 name: name.clone(),
                 version,
-                registry: RegistryType::Npm,
+                source: DependencySource::Registry {
+                    registry: RegistryType::Npm,
+                },
             });
         }
         return Ok(deps);
@@ -145,7 +193,9 @@ pub fn parse_requirements_txt(content: &str) -> Result<Vec<LockfileDependency>> 
                 deps.push(LockfileDependency {
                     name,
                     version,
-                    registry: RegistryType::PyPI,
+                    source: DependencySource::Registry {
+                        registry: RegistryType::PyPI,
+                    },
                 });
             }
         } else if let Some(idx) = find_version_operator(trimmed) {
@@ -155,7 +205,9 @@ pub fn parse_requirements_txt(content: &str) -> Result<Vec<LockfileDependency>> 
                 deps.push(LockfileDependency {
                     name,
                     version: String::new(),
-                    registry: RegistryType::PyPI,
+                    source: DependencySource::Registry {
+                        registry: RegistryType::PyPI,
+                    },
                 });
             }
         } else {
@@ -165,7 +217,9 @@ pub fn parse_requirements_txt(content: &str) -> Result<Vec<LockfileDependency>> 
                 deps.push(LockfileDependency {
                     name,
                     version: String::new(),
-                    registry: RegistryType::PyPI,
+                    source: DependencySource::Registry {
+                        registry: RegistryType::PyPI,
+                    },
                 });
             }
         }
@@ -217,7 +271,9 @@ pub fn parse_cargo_lock(content: &str) -> Result<Vec<LockfileDependency>> {
                 deps.push(LockfileDependency {
                     name,
                     version,
-                    registry: RegistryType::Crates,
+                    source: DependencySource::Registry {
+                        registry: RegistryType::Crates,
+                    },
                 });
             }
         }
@@ -260,7 +316,9 @@ pub fn parse_go_sum(content: &str) -> Result<Vec<LockfileDependency>> {
         deps.push(LockfileDependency {
             name: module,
             version,
-            registry: RegistryType::Go,
+            source: DependencySource::Registry {
+                registry: RegistryType::Go,
+            },
         });
     }
 
@@ -305,7 +363,12 @@ mod tests {
 
         let express = deps.iter().find(|d| d.name == "express").unwrap();
         assert_eq!(express.version, "4.18.2");
-        assert_eq!(express.registry, RegistryType::Npm);
+        assert_eq!(
+            express.source,
+            DependencySource::Registry {
+                registry: RegistryType::Npm
+            }
+        );
 
         let lodash = deps.iter().find(|d| d.name == "lodash").unwrap();
         assert_eq!(lodash.version, "4.17.21");
@@ -333,7 +396,12 @@ mod tests {
 
         let express = deps.iter().find(|d| d.name == "express").unwrap();
         assert_eq!(express.version, "4.18.2");
-        assert_eq!(express.registry, RegistryType::Npm);
+        assert_eq!(
+            express.source,
+            DependencySource::Registry {
+                registry: RegistryType::Npm
+            }
+        );
     }
 
     // T-023-01c: Scoped packages in package-lock.json
@@ -363,7 +431,12 @@ mod tests {
 
         assert_eq!(deps[0].name, "requests");
         assert_eq!(deps[0].version, "2.31.0");
-        assert_eq!(deps[0].registry, RegistryType::PyPI);
+        assert_eq!(
+            deps[0].source,
+            DependencySource::Registry {
+                registry: RegistryType::PyPI
+            }
+        );
 
         assert_eq!(deps[1].name, "flask");
         assert_eq!(deps[1].version, "3.0.0");
@@ -421,7 +494,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 
         let serde = deps.iter().find(|d| d.name == "serde").unwrap();
         assert_eq!(serde.version, "1.0.228");
-        assert_eq!(serde.registry, RegistryType::Crates);
+        assert_eq!(
+            serde.source,
+            DependencySource::Registry {
+                registry: RegistryType::Crates
+            }
+        );
 
         let serde_json = deps.iter().find(|d| d.name == "serde_json").unwrap();
         assert_eq!(serde_json.version, "1.0.100");
@@ -436,7 +514,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
         assert_eq!(deps.len(), 1);
         assert_eq!(deps[0].name, "github.com/gin-gonic/gin");
         assert_eq!(deps[0].version, "v1.9.1");
-        assert_eq!(deps[0].registry, RegistryType::Go);
+        assert_eq!(
+            deps[0].source,
+            DependencySource::Registry {
+                registry: RegistryType::Go
+            }
+        );
     }
 
     // T-023-04b: go.sum with multiple modules
@@ -686,5 +769,189 @@ source = "git+https://github.com/user/repo#abcdef"
         // git source packages should still be included
         assert_eq!(deps.len(), 1);
         assert_eq!(deps[0].name, "some-crate");
+    }
+
+    // --- T-090 tests: DependencySource enum ---
+
+    // T-090-01: DependencySource::Registry carries RegistryType
+    #[test]
+    fn t090_01_registry_source_carries_registry_type() {
+        let source = DependencySource::Registry {
+            registry: RegistryType::Npm,
+        };
+        assert_eq!(source.registry_type(), Some(RegistryType::Npm));
+    }
+
+    // T-090-02: DependencySource::Git carries url and ref_ strings
+    #[test]
+    fn t090_02_git_source_carries_url_and_ref() {
+        let source = DependencySource::Git {
+            url: "https://github.com/user/repo".into(),
+            ref_: "abc123".into(),
+        };
+        assert_eq!(source.git_url(), Some("https://github.com/user/repo"));
+        assert_eq!(source.git_ref(), Some("abc123"));
+    }
+
+    // T-090-03: DependencySource::Registry returns None for git_ref()
+    #[test]
+    fn t090_03_registry_source_git_ref_is_none() {
+        let source = DependencySource::Registry {
+            registry: RegistryType::Crates,
+        };
+        assert_eq!(source.git_ref(), None);
+    }
+
+    // T-090-04: DependencySource::Git returns None for registry_type()
+    #[test]
+    fn t090_04_git_source_registry_type_is_none() {
+        let source = DependencySource::Git {
+            url: "https://github.com/user/repo".into(),
+            ref_: "main".into(),
+        };
+        assert_eq!(source.registry_type(), None);
+    }
+
+    // T-090-05: DependencySource implements Debug, Clone, PartialEq
+    #[test]
+    fn t090_05_dependency_source_derives() {
+        // Two identical Git values compare equal
+        let a = DependencySource::Git {
+            url: "https://github.com/a/b".into(),
+            ref_: "main".into(),
+        };
+        let b = a.clone();
+        assert_eq!(a, b);
+
+        // Two identical Registry values compare equal
+        let c = DependencySource::Registry {
+            registry: RegistryType::Npm,
+        };
+        let d = c.clone();
+        assert_eq!(c, d);
+
+        // Registry(Npm) != Registry(PyPI)
+        let e = DependencySource::Registry {
+            registry: RegistryType::PyPI,
+        };
+        assert_ne!(c, e);
+
+        // Git { url: "a", ref_: "b" } != Git { url: "a", ref_: "c" }
+        let f = DependencySource::Git {
+            url: "https://github.com/a/b".into(),
+            ref_: "other".into(),
+        };
+        assert_ne!(a, f);
+
+        // Debug is implemented (just check it doesn't panic)
+        let _ = format!("{:?}", a);
+    }
+
+    // T-090-06: LockfileDependency has a source: DependencySource field
+    #[test]
+    fn t090_06_lockfile_dep_has_source_field() {
+        let dep = LockfileDependency {
+            name: "foo".into(),
+            version: "1.0.0".into(),
+            source: DependencySource::Registry {
+                registry: RegistryType::Npm,
+            },
+        };
+        assert_eq!(dep.name, "foo");
+        assert_eq!(dep.version, "1.0.0");
+        assert_eq!(
+            dep.source,
+            DependencySource::Registry {
+                registry: RegistryType::Npm
+            }
+        );
+    }
+
+    // T-090-07: A git-sourced LockfileDependency can be constructed and round-trips through Clone
+    #[test]
+    fn t090_07_git_sourced_lockfile_dep_roundtrips() {
+        let dep = LockfileDependency {
+            name: "evil-pkg".into(),
+            version: "".into(),
+            source: DependencySource::Git {
+                url: "https://github.com/evil/repo".into(),
+                ref_: "main".into(),
+            },
+        };
+        let cloned = dep.clone();
+        assert_eq!(dep, cloned);
+        assert_eq!(
+            cloned.source.git_url(),
+            Some("https://github.com/evil/repo")
+        );
+        assert_eq!(cloned.source.git_ref(), Some("main"));
+    }
+
+    // T-090-09: parse_package_lock_json produces DependencySource::Registry { registry: Npm }
+    #[test]
+    fn t090_09_npm_parser_produces_registry_source() {
+        let content = r#"{
+            "lockfileVersion": 3,
+            "packages": {
+                "": { "name": "root", "version": "1.0.0" },
+                "node_modules/lodash": { "version": "4.17.21" }
+            }
+        }"#;
+        let deps = parse_package_lock_json(content).unwrap();
+        assert_eq!(deps.len(), 1);
+        assert_eq!(
+            deps[0].source,
+            DependencySource::Registry {
+                registry: RegistryType::Npm
+            }
+        );
+    }
+
+    // T-090-10: parse_cargo_lock produces DependencySource::Registry { registry: Crates }
+    #[test]
+    fn t090_10_cargo_parser_produces_registry_source() {
+        let content = r#"
+[[package]]
+name = "serde"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+"#;
+        let deps = parse_cargo_lock(content).unwrap();
+        assert_eq!(deps.len(), 1);
+        assert_eq!(
+            deps[0].source,
+            DependencySource::Registry {
+                registry: RegistryType::Crates
+            }
+        );
+    }
+
+    // T-090-11: parse_requirements_txt produces DependencySource::Registry { registry: PyPI }
+    #[test]
+    fn t090_11_pypi_parser_produces_registry_source() {
+        let content = "requests==2.31.0\n";
+        let deps = parse_requirements_txt(content).unwrap();
+        assert_eq!(deps.len(), 1);
+        assert_eq!(
+            deps[0].source,
+            DependencySource::Registry {
+                registry: RegistryType::PyPI
+            }
+        );
+    }
+
+    // T-090-12: parse_go_sum produces DependencySource::Registry { registry: Go }
+    #[test]
+    fn t090_12_go_parser_produces_registry_source() {
+        let content =
+            "github.com/pkg/errors v0.9.1 h1:FEBLx1zS214owpjy7qsBeixbURkuhQAwrK5UwLGTwt38=\n";
+        let deps = parse_go_sum(content).unwrap();
+        assert_eq!(deps.len(), 1);
+        assert_eq!(
+            deps[0].source,
+            DependencySource::Registry {
+                registry: RegistryType::Go
+            }
+        );
     }
 }

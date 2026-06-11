@@ -152,6 +152,10 @@ impl PackageRef {
     /// and `version` is set to `None`.  This covers bare names and range
     /// constraints in `requirements.txt` (e.g. `flask>=2.0`), which the
     /// lockfile parser stores as an empty string.
+    ///
+    /// T-090-14: This function signature is unchanged after the `registry` → `source`
+    /// field rename on `LockfileDependency`.  It still accepts `(name, version)` and
+    /// all existing callers continue to compile.
     fn from_lockfile_dep(name: String, version: String) -> Self {
         let ver = if version.is_empty() {
             None
@@ -577,8 +581,13 @@ async fn run_check(
     // or PackageRef { version: None } for bare names / range constraints.
     // This is the fix for the security bug described in task 078: previously the version
     // was silently discarded and all packages queried "latest".
-    let mut all_packages: Vec<PackageRef> =
-        packages.into_iter().map(PackageRef::from_cli).collect();
+    // Packages to scan, each paired with an optional lockfile source (None for CLI-arg
+    // packages, which are always registry-bound).  The source is used in the scan loop
+    // to safely skip git-sourced deps (REQ-090-04) until task 093 adds real routing.
+    let mut all_packages: Vec<(PackageRef, Option<lockfile::DependencySource>)> = packages
+        .into_iter()
+        .map(|name| (PackageRef::from_cli(name), None))
+        .collect();
     let mut lockfile_registry = None;
     if let Some(ref lf_path) = lockfile_path {
         let format = lockfile_type_str
@@ -587,10 +596,11 @@ async fn run_check(
             .transpose()?;
         let deps = lockfile::parse(lf_path, format)?;
         if !deps.is_empty() {
-            lockfile_registry = Some(deps[0].registry);
+            lockfile_registry = deps[0].source.registry_type();
         }
         for dep in deps {
-            all_packages.push(PackageRef::from_lockfile_dep(dep.name, dep.version));
+            let pkg_ref = PackageRef::from_lockfile_dep(dep.name, dep.version);
+            all_packages.push((pkg_ref, Some(dep.source)));
         }
     }
 
@@ -693,7 +703,20 @@ async fn run_check(
     // the OSV policy is disabled (T-088-06 — no false freshness claim).
     let mut osv_query_context: Option<OsvQueryContext> = None;
 
-    for pkg_ref in &all_packages {
+    for (pkg_ref, dep_source) in &all_packages {
+        // REQ-090-04: Git-sourced deps must not panic or be silently dropped.
+        // Until task 093 adds real git-dep routing, emit a warning and skip.
+        if let Some(src) = dep_source
+            && let Some(url) = src.git_url()
+        {
+            let ref_ = src.git_ref().unwrap_or("(unknown)");
+            eprintln!(
+                "dep-scan: skipping git-sourced dependency '{}' (url={url}, ref={ref_}) — git dep scanning not yet implemented",
+                pkg_ref.name
+            );
+            continue;
+        }
+
         let pkg_name = &pkg_ref.name;
         let pkg_version = pkg_ref.version.as_deref();
 
@@ -713,6 +736,11 @@ async fn run_check(
         // that version to get_metadata so the registry returns metadata for the
         // exact pinned bytes — not whatever the registry currently serves as
         // "latest".  CLI-arg packages pass None to get latest (task 078).
+        //
+        // T-090-13: Registry-sourced deps still route to registry clients here;
+        // the routing logic is functionally identical to pre-090 — only the
+        // variable names changed (dep.registry → dep.source.registry_type()).
+        // T-090-15: See pre-commit gate (cargo test / clippy / fmt / build).
         let fetch_result = match reg_type {
             RegistryType::Npm => {
                 let client = NpmRegistry::new(config.registries.npm_url.clone());
