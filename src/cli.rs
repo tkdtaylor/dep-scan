@@ -81,6 +81,12 @@ pub enum Command {
         /// Override lockfile format detection (npm, pypi, crates, go)
         #[arg(long)]
         lockfile_type: Option<String>,
+
+        /// Emit interchange output (osv/cyclonedx/spdx/vex) UNSIGNED, with an
+        /// explicit unsigned marker, instead of a signed DSSE envelope.
+        /// Never affects the `native` or `json` paths.
+        #[arg(long)]
+        allow_unsigned: bool,
     },
 
     /// Install packages (wrapping the underlying package manager)
@@ -104,6 +110,12 @@ pub enum Command {
         /// Proceed with installation despite policy violations
         #[arg(long)]
         force: bool,
+
+        /// Emit interchange output (osv/cyclonedx/spdx/vex) UNSIGNED, with an
+        /// explicit unsigned marker, instead of a signed DSSE envelope.
+        /// Never affects the `native` or `json` paths.
+        #[arg(long)]
+        allow_unsigned: bool,
     },
 
     /// Manage dep-scan configuration
@@ -422,6 +434,54 @@ mod tests {
                     format,
                     OutputFormat::Osv,
                     "T-083-10: --format osv on install must equal Osv"
+                );
+            }
+            _ => panic!("expected Install command"),
+        }
+    }
+
+    // T-086-18: `--allow-unsigned` is accepted on `check` and defaults to false.
+    #[test]
+    fn t086_18_allow_unsigned_flag_on_check() {
+        let cli = Cli::parse_from(["dep-scan", "check", "lodash", "--format", "osv"]);
+        match &cli.command {
+            Command::Check { allow_unsigned, .. } => {
+                assert!(!allow_unsigned, "default must be false");
+            }
+            _ => panic!("expected Check command"),
+        }
+        let cli = Cli::parse_from([
+            "dep-scan",
+            "check",
+            "lodash",
+            "--format",
+            "osv",
+            "--allow-unsigned",
+        ]);
+        match &cli.command {
+            Command::Check { allow_unsigned, .. } => {
+                assert!(allow_unsigned, "--allow-unsigned must set the flag");
+            }
+            _ => panic!("expected Check command"),
+        }
+    }
+
+    // T-086-18: `--allow-unsigned` is also accepted on `install`.
+    #[test]
+    fn t086_18_allow_unsigned_flag_on_install() {
+        let cli = Cli::parse_from([
+            "dep-scan",
+            "install",
+            "express",
+            "--registry",
+            "npm",
+            "--allow-unsigned",
+        ]);
+        match &cli.command {
+            Command::Install { allow_unsigned, .. } => {
+                assert!(
+                    allow_unsigned,
+                    "--allow-unsigned must set the flag on install"
                 );
             }
             _ => panic!("expected Install command"),

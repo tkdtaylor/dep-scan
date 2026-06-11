@@ -1,7 +1,7 @@
 # Behaviors
 
 **Project:** dep-scan
-**Last updated:** 2026-05-22 (v1.2.0)
+**Last updated:** 2026-06-11 (v1.2.1 — B-029: DSSE signing for interchange output)
 
 What the system does, observably. Each behavior describes a triggering condition, the system's response, and any externally-visible side effects. This is the "you can verify this from outside the process" view.
 
@@ -269,6 +269,36 @@ For each DSSE-signed attestation bundle, the following steps run in order in [`s
 
 - **Trigger:** `dep-scan check --format cyclonedx|spdx|vex`.
 - **Response:** Process exits non-zero with a message containing `"not yet implemented"` and the format name. CycloneDX/SPDX will be implemented in task 084; VEX in task 085.
+
+### B-029: DSSE signing for interchange output
+
+- **Trigger:** `dep-scan check`/`install` with `--format osv|cyclonedx|spdx|vex`.
+- **Response (default):** The rendered interchange payload is wrapped in a DSSE
+  envelope JSON object signed **once per run** over the entire result set
+  (never per-package):
+  ```json
+  { "payload": "<base64(payload)>", "payloadType": "<media-type>",
+    "signatures": [ { "keyid": "<id>", "sig": "<base64(sig)>" } ] }
+  ```
+  The signature is computed over the DSSE PAE
+  (`DSSEv1 <len(payloadType)> <payloadType> <len(payload)> <payload>`, the same
+  encoder used for verification in [B-018](#b-018-sigstore-verification-pipeline-npm--pypi) /
+  `src/registry/npm_attestation.rs::dsse_pae`). `payloadType` per format:
+  `osv` → `application/vnd.osv+json`, `cyclonedx` → `application/vnd.cyclonedx+json`,
+  `spdx` → `application/spdx+json`, `vex` → `application/vnd.openvex+json`.
+- **`--allow-unsigned`:** The raw interchange payload is emitted with an explicit
+  `"_dep_scan_unsigned": true` marker and **no** DSSE envelope; the signer is
+  never invoked, so a downstream consumer can detect the unsigned report and
+  apply its own policy.
+- **`native`/`json` are never signed** and incur zero signing cost — the signer
+  is not constructed/invoked on those paths (preserves the local-first/fast
+  default scan loop, ADR 006 Q8). `--allow-unsigned` never affects them.
+- **Failure mode:** A signing failure is **fatal** — `run_check` returns `Err`,
+  nothing is written to stdout, and the process exits non-zero. There is no
+  unsigned fallback unless `--allow-unsigned` was explicitly given.
+- The signing **identity** (sigstore keyless / operator-provisioned offline key)
+  is task 087; task 086 uses a static Ed25519 key as the default signer.
+- Source: [`src/interchange_sign.rs`](../../src/interchange_sign.rs).
 
 ### B-026: Verbose-gated diagnostics
 
