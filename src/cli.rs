@@ -1,6 +1,38 @@
+use std::fmt;
 use std::path::PathBuf;
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
+
+/// Output format for scan results.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum OutputFormat {
+    /// Human-readable table (default)
+    Native,
+    /// Bespoke JSON array (legacy; same as pre-083 `--json`)
+    Json,
+    /// OSV-schema-compatible JSON (consumable by OSV-Scanner, Trivy, Grype)
+    Osv,
+    /// CycloneDX SBOM (not yet implemented — task 084)
+    #[value(name = "cyclonedx")]
+    CycloneDx,
+    /// SPDX SBOM (not yet implemented — task 084)
+    Spdx,
+    /// VEX document (not yet implemented — task 085)
+    Vex,
+}
+
+impl fmt::Display for OutputFormat {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            OutputFormat::Native => write!(f, "native"),
+            OutputFormat::Json => write!(f, "json"),
+            OutputFormat::Osv => write!(f, "osv"),
+            OutputFormat::CycloneDx => write!(f, "cyclonedx"),
+            OutputFormat::Spdx => write!(f, "spdx"),
+            OutputFormat::Vex => write!(f, "vex"),
+        }
+    }
+}
 
 /// A cross-platform CLI tool that scans dependencies for supply chain attacks before installation
 #[derive(Parser, Debug)]
@@ -34,8 +66,12 @@ pub enum Command {
         #[arg(long)]
         registry: Option<String>,
 
-        /// Output results as JSON
-        #[arg(long)]
+        /// Output format (native, json, osv, cyclonedx, spdx, vex)
+        #[arg(long, default_value_t = OutputFormat::Native, conflicts_with = "json")]
+        format: OutputFormat,
+
+        /// Output results as JSON [deprecated: use --format json]
+        #[arg(long, hide = true, conflicts_with = "format")]
         json: bool,
 
         /// Path to a lockfile to scan (package-lock.json, requirements.txt, Cargo.lock, go.sum)
@@ -57,6 +93,14 @@ pub enum Command {
         #[arg(long, required = true)]
         registry: String,
 
+        /// Output format (native, json, osv, cyclonedx, spdx, vex)
+        #[arg(long, default_value_t = OutputFormat::Native, conflicts_with = "json")]
+        format: OutputFormat,
+
+        /// Output results as JSON [deprecated: use --format json]
+        #[arg(long, hide = true, conflicts_with = "format")]
+        json: bool,
+
         /// Proceed with installation despite policy violations
         #[arg(long)]
         force: bool,
@@ -75,6 +119,21 @@ pub enum ConfigAction {
     Show,
     /// Initialize a new configuration file
     Init,
+}
+
+/// Resolve the effective output format, accounting for the deprecated `--json` alias.
+///
+/// If `json_flag` is `true` (the user passed `--json`), the result is always
+/// `OutputFormat::Json` regardless of `format`.  Otherwise `format` is returned
+/// as-is.  Clap's `conflicts_with` ensures both cannot be supplied simultaneously,
+/// so the only case where `json_flag` is `true` and `format != Native` is
+/// theoretically impossible at runtime.
+pub fn resolve_format(format: OutputFormat, json_flag: bool) -> OutputFormat {
+    if json_flag {
+        OutputFormat::Json
+    } else {
+        format
+    }
 }
 
 #[cfg(test)]
@@ -106,13 +165,21 @@ mod tests {
         }
     }
 
-    // T-002-03: CLI parses check with --json flag
+    // T-002-03: CLI parses check with --json flag (deprecated alias for --format json)
+    // T-083-09: `--json` is still accepted (deprecated alias)
     #[test]
     fn parse_check_with_json() {
         let cli = Cli::parse_from(["dep-scan", "check", "lodash", "--json"]);
         match cli.command {
-            Command::Check { json, .. } => {
-                assert!(json);
+            Command::Check { json, format, .. } => {
+                assert!(json, "deprecated --json flag should be true");
+                // Resolve the effective format: --json is a deprecated alias for --format json
+                let effective = resolve_format(format, json);
+                assert_eq!(
+                    effective,
+                    OutputFormat::Json,
+                    "--json must resolve to OutputFormat::Json"
+                );
             }
             _ => panic!("expected Check command"),
         }
@@ -171,6 +238,7 @@ mod tests {
                 packages,
                 registry,
                 force,
+                ..
             } => {
                 assert_eq!(packages, vec!["express"]);
                 assert_eq!(registry, "npm");
@@ -196,6 +264,7 @@ mod tests {
                 packages,
                 registry,
                 force,
+                ..
             } => {
                 assert_eq!(packages, vec!["evil-pkg"]);
                 assert_eq!(registry, "npm");
@@ -203,5 +272,170 @@ mod tests {
             }
             _ => panic!("expected Install command"),
         }
+    }
+
+    // T-083-01: Default format is `native`
+    #[test]
+    fn t083_01_default_format_is_native() {
+        let cli = Cli::parse_from(["dep-scan", "check", "lodash"]);
+        match cli.command {
+            Command::Check { format, .. } => {
+                assert_eq!(
+                    format,
+                    OutputFormat::Native,
+                    "T-083-01: default format must be Native"
+                );
+            }
+            _ => panic!("expected Check command"),
+        }
+    }
+
+    // T-083-02: `--format native` is accepted and equals the default
+    #[test]
+    fn t083_02_format_native_accepted() {
+        let cli = Cli::parse_from(["dep-scan", "check", "lodash", "--format", "native"]);
+        match cli.command {
+            Command::Check { format, .. } => {
+                assert_eq!(
+                    format,
+                    OutputFormat::Native,
+                    "T-083-02: --format native must equal Native"
+                );
+            }
+            _ => panic!("expected Check command"),
+        }
+    }
+
+    // T-083-03: `--format json` is accepted
+    #[test]
+    fn t083_03_format_json_accepted() {
+        let cli = Cli::parse_from(["dep-scan", "check", "lodash", "--format", "json"]);
+        match cli.command {
+            Command::Check { format, .. } => {
+                assert_eq!(
+                    format,
+                    OutputFormat::Json,
+                    "T-083-03: --format json must equal Json"
+                );
+            }
+            _ => panic!("expected Check command"),
+        }
+    }
+
+    // T-083-04: `--format osv` is accepted
+    #[test]
+    fn t083_04_format_osv_accepted() {
+        let cli = Cli::parse_from(["dep-scan", "check", "lodash", "--format", "osv"]);
+        match cli.command {
+            Command::Check { format, .. } => {
+                assert_eq!(
+                    format,
+                    OutputFormat::Osv,
+                    "T-083-04: --format osv must equal Osv"
+                );
+            }
+            _ => panic!("expected Check command"),
+        }
+    }
+
+    // T-083-05: `--format cyclonedx` is accepted by the parser
+    #[test]
+    fn t083_05_format_cyclonedx_accepted() {
+        let cli = Cli::parse_from(["dep-scan", "check", "lodash", "--format", "cyclonedx"]);
+        match cli.command {
+            Command::Check { format, .. } => {
+                assert_eq!(
+                    format,
+                    OutputFormat::CycloneDx,
+                    "T-083-05: --format cyclonedx must equal CycloneDx"
+                );
+            }
+            _ => panic!("expected Check command"),
+        }
+    }
+
+    // T-083-06: `--format spdx` is accepted by the parser
+    #[test]
+    fn t083_06_format_spdx_accepted() {
+        let cli = Cli::parse_from(["dep-scan", "check", "lodash", "--format", "spdx"]);
+        match cli.command {
+            Command::Check { format, .. } => {
+                assert_eq!(
+                    format,
+                    OutputFormat::Spdx,
+                    "T-083-06: --format spdx must equal Spdx"
+                );
+            }
+            _ => panic!("expected Check command"),
+        }
+    }
+
+    // T-083-07: `--format vex` is accepted by the parser
+    #[test]
+    fn t083_07_format_vex_accepted() {
+        let cli = Cli::parse_from(["dep-scan", "check", "lodash", "--format", "vex"]);
+        match cli.command {
+            Command::Check { format, .. } => {
+                assert_eq!(
+                    format,
+                    OutputFormat::Vex,
+                    "T-083-07: --format vex must equal Vex"
+                );
+            }
+            _ => panic!("expected Check command"),
+        }
+    }
+
+    // T-083-08: Unknown format value is rejected by clap
+    #[test]
+    fn t083_08_unknown_format_rejected() {
+        let result = Cli::try_parse_from(["dep-scan", "check", "lodash", "--format", "sarif"]);
+        assert!(
+            result.is_err(),
+            "T-083-08: unknown format 'sarif' must cause a parse error"
+        );
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("sarif"),
+            "T-083-08: error message must name 'sarif' as the invalid value, got: {err_msg}"
+        );
+    }
+
+    // T-083-09: `--json` flag is still accepted (deprecated alias)
+    // — see parse_check_with_json above, which is the renamed version of T-002-03.
+
+    // T-083-10: `--format` is present on `install` subcommand too
+    #[test]
+    fn t083_10_format_on_install_subcommand() {
+        let cli = Cli::parse_from([
+            "dep-scan",
+            "install",
+            "express",
+            "--registry",
+            "npm",
+            "--format",
+            "osv",
+        ]);
+        match cli.command {
+            Command::Install { format, .. } => {
+                assert_eq!(
+                    format,
+                    OutputFormat::Osv,
+                    "T-083-10: --format osv on install must equal Osv"
+                );
+            }
+            _ => panic!("expected Install command"),
+        }
+    }
+
+    // T-083-11: `--format` and `--json` are mutually exclusive
+    #[test]
+    fn t083_11_format_and_json_mutually_exclusive() {
+        let result =
+            Cli::try_parse_from(["dep-scan", "check", "lodash", "--format", "osv", "--json"]);
+        assert!(
+            result.is_err(),
+            "T-083-11: --format and --json together must cause a parse error (conflict)"
+        );
     }
 }

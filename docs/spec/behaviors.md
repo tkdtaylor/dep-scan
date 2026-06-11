@@ -61,7 +61,7 @@ Numbers are stable. Removed behaviors stay numbered as `B-NNN: REMOVED — see A
   4. Build `ScanContext` and run policies P-01…P-11 (see [§ B-006 through B-016](#b-006-policy-p-01-age-block-on-young-packages)).
   5. Aggregate per-policy verdicts using the worst-case rule (any block ⇒ `block`; else any warn ⇒ `warn`; else `pass`).
   6. Write the resulting row to the cache (including the registry-published `content_hash` and any verified `provenance_identity`).
-  7. Emit output: table (default) or JSON (`--json`).
+  7. Emit output according to `--format` (default `native` table; `json` for legacy JSON array; `osv` for OSV-shaped JSON; `cyclonedx`/`spdx`/`vex` not yet implemented — see B-027, B-028).
 - **Side effects:** Network I/O (registry, OSV.dev, attestation endpoints, sumdb). Local SQLite write. No subprocess invocation.
 - **Failure modes:** Exit `2` on registry network failure, invalid config, validation reject. Exit `1` on `warn` or `block` aggregate verdict. Exit `0` on `pass`.
 - **References:** [ADR 003](../architecture/decisions/003-content-hash-cache-integrity.md), [`src/policy/mod.rs:74-89`](../../src/policy/mod.rs#L74-L89) (`aggregate_results`).
@@ -247,14 +247,28 @@ For each DSSE-signed attestation bundle, the following steps run in order in [`s
 
 ### B-024: Human-readable table output
 
-- **Trigger:** `dep-scan check` without `--json`.
+- **Trigger:** `dep-scan check` with `--format native` (the default, also triggered when no `--format` is given).
 - **Response:** One header row (`Package`, `Version`, `Age`, `Result`) + one indented line per policy: `  <policy_name>: <pass|WARN|BLOCK>[ — <reason>]`.
 - See [interfaces.md § Example output](interfaces.md#example-output).
 
-### B-025: JSON output
+### B-025: JSON array output
 
-- **Trigger:** `dep-scan check --json`.
-- **Response:** Single JSON document with the schema in [interfaces.md § JSON output schema](interfaces.md#json-output-schema). `result` is exactly one of `"pass"`, `"warn"`, `"block"`.
+- **Trigger:** `dep-scan check --format json` or the deprecated alias `--format json` / `--json`.
+- **Response:** Single JSON document with the schema in [interfaces.md § JSON output schema](interfaces.md#json-output-schema). `result` is exactly one of `"pass"`, `"warn"`, `"block"`. The deprecated `--json` flag is a backward-compatible alias; `--format` and `--json` are mutually exclusive.
+
+### B-027: OSV-compatible output
+
+- **Trigger:** `dep-scan check --format osv`.
+- **Response:** A JSON object `{ "results": [...] }` where each element has:
+  - `package.name`, `package.version`, `package.ecosystem` (OSV schema fields)
+  - `vulns` — array of `{ "id": "..." }` objects; empty for packages with no findings
+  - `dep_scan_result` — extension field: `"pass"` | `"warn"` | `"block"`
+- The ecosystem string follows the OSV registry mapping: `npm` → `"npm"`, `pypi` → `"PyPI"`, `crates` → `"crates.io"`, `go` → `"Go"`.
+
+### B-028: Unimplemented format stubs
+
+- **Trigger:** `dep-scan check --format cyclonedx|spdx|vex`.
+- **Response:** Process exits non-zero with a message containing `"not yet implemented"` and the format name. CycloneDX/SPDX will be implemented in task 084; VEX in task 085.
 
 ### B-026: Verbose-gated diagnostics
 
