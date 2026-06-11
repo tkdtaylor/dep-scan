@@ -34,8 +34,12 @@ p256 = { version = "0.13", features = ["ecdsa", "pem"] }
 x509-parser = { version = "0.18", features = ["verify"] }
 # sha2 for computing digests (already transitively pulled in by many deps)
 sha2 = "0.10"
-# Task 034 — Go sumdb Ed25519 signature verification
-ed25519-dalek = { version = "2.2.0", features = ["rand_core"] }
+# Task 034 — Go sumdb Ed25519 signature verification.
+# Task 087 — operator-key offline signer loads/parses PEM PKCS#8 Ed25519 keys.
+# `pkcs8` + `pem` enable DecodePrivateKey/EncodePrivateKey for the on-disk key
+# format; both pull in `pkcs8`/`pem-rfc7468` which are already in the tree via
+# p256, so this adds no new top-level dependency.
+ed25519-dalek = { version = "2.2.0", features = ["rand_core", "pkcs8", "pem"] }
 # Task 042 — Harden TempReqFile against predictable filename / symlink attack.
 # NamedTempFile uses O_CREAT|O_EXCL + mode 0600 on Unix, so no pre-existing
 # symlink can redirect writes. Promoted from dev-dependency to runtime dependency.

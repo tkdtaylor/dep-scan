@@ -1,7 +1,7 @@
 # Interfaces
 
 **Project:** dep-scan
-**Last updated:** 2026-06-11 (v1.2.1 — task 086: DSSE signing for interchange output + --allow-unsigned)
+**Last updated:** 2026-06-11 (v1.2.1 — task 087: signing identity — keyless + operator-key offline, resolve_signer)
 
 The system's contact surface — everything that calls into the system, everything the system calls out to, and the public traits within the system. Each interface is a stable contract: changes here are breaking changes.
 
@@ -315,3 +315,57 @@ Notable contract details:
 - Trust roots are passed as concrete materials (`key_str` for Ed25519 public-key text; `pem_pubkey` for ECDSA P-256 PEM). The verifier does not hold global state.
 
 Contract details: [behaviors.md § B-019](behaviors.md#b-019-signed-note-parse--verify-rekor--sumdb).
+
+### Interchange signing identity (task 086 trait + task 087 identities)
+
+Source: [`src/interchange_sign.rs`](../../src/interchange_sign.rs).
+
+```rust
+// Task 086 — the signing abstraction (synchronous over the DSSE PAE bytes).
+pub trait InterchangeSigner {
+    fn sign(&self, pae: &[u8]) -> Result<(Vec<u8>, String)>; // -> (sig_bytes, keyid)
+}
+
+// Task 087 — concrete identities.
+pub struct OperatorKeySigner; // offline: PEM PKCS#8 Ed25519 from signing.key_path
+impl OperatorKeySigner {
+    pub fn from_key_path(path: &Path) -> Result<Self>;   // Err if unreadable/unparseable
+    pub fn from_pkcs8_pem(pem: &str) -> Result<Self>;
+    pub fn verifying_key(&self) -> ed25519_dalek::VerifyingKey; // public half (task 089 export)
+    pub fn keyid(&self) -> &str;
+}
+pub struct KeylessSigner; // online: sigstore Fulcio + Rekor
+impl KeylessSigner {
+    pub fn new(fulcio_url: &str, rekor_url: &str, oidc_token: &str) -> Self; // no network
+}
+
+// Shared key-id derivation (single source of truth — task 089 reuses it).
+pub fn ed25519_keyid(public_key_bytes: &[u8; 32]) -> String; // lowercase hex SHA-256
+
+// Per-run identity resolution.
+pub enum SignerDecision {
+    Signer(Box<dyn InterchangeSigner>),
+    NoOfflineKey, // fail-closed signal (NOT a silent unsigned signer)
+}
+impl SignerDecision { pub const NO_OFFLINE_KEY_MESSAGE: &'static str; }
+pub fn resolve_signer(
+    config: &Config,
+    network_probe: impl FnOnce() -> Result<()>,
+    keyless_factory: impl FnOnce() -> Box<dyn InterchangeSigner>,
+) -> Result<SignerDecision>;
+```
+
+Notable contract details:
+
+- `sign` is **synchronous**; `KeylessSigner` bridges to its async Fulcio/Rekor
+  HTTP work via `block_in_place` + `Handle::block_on` (requires a multi-thread
+  tokio runtime — see ADR 009). `OperatorKeySigner::sign` does no I/O.
+- `ed25519_keyid` is the **only** place the operator key-id is derived
+  (lowercase hex SHA-256 of the 32 raw public-key bytes); task 089's public-key
+  export and the verifier match on this exact value.
+- `resolve_signer` never returns a silently-unsigned signer: the absence of an
+  offline key is the explicit `NoOfflineKey` variant, which the caller turns
+  into a non-zero exit (fail closed). The `network_probe` / `keyless_factory`
+  closures are injected so the selection is testable without a real network.
+
+Contract details: [behaviors.md § B-029](behaviors.md#b-029-dsse-signing-for-interchange-output) and [§ B-030](behaviors.md#b-030-signing-identity-resolution-and-fail-closed).
