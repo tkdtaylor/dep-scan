@@ -123,6 +123,17 @@ pub enum Command {
         #[command(subcommand)]
         action: ConfigAction,
     },
+
+    /// Manage the operator signing key
+    ///
+    /// Reads the private key from `signing.key_path` (configured in
+    /// .dep-scan.toml) and performs signing-related operations such as
+    /// exporting the public half in PEM/SPKI format for distribution to
+    /// consumers.
+    Signing {
+        #[command(subcommand)]
+        action: SigningAction,
+    },
 }
 
 #[derive(Subcommand, Debug, PartialEq)]
@@ -131,6 +142,24 @@ pub enum ConfigAction {
     Show,
     /// Initialize a new configuration file
     Init,
+}
+
+#[derive(Subcommand, Debug, PartialEq)]
+pub enum SigningAction {
+    /// Export the operator's Ed25519 public key as PEM SPKI to stdout
+    ///
+    /// Reads the private signing key from `signing.key_path` (set in
+    /// .dep-scan.toml) and prints the corresponding public key in
+    /// PEM-encoded SubjectPublicKeyInfo (SPKI) format, preceded by a
+    /// `# key-id:` comment line. The key-id is the lowercase hex SHA-256
+    /// of the 32-byte raw public key and matches the `keyid` field embedded
+    /// in DSSE envelopes produced by `dep-scan check --format osv`.
+    ///
+    /// Output is pipe/redirect friendly:
+    ///   dep-scan signing export-pubkey > pubkey.pem
+    ///
+    /// No network calls are made. No private key material appears in output.
+    ExportPubkey,
 }
 
 /// Resolve the effective output format, accounting for the deprecated `--json` alias.
@@ -496,6 +525,41 @@ mod tests {
         assert!(
             result.is_err(),
             "T-083-11: --format and --json together must cause a parse error (conflict)"
+        );
+    }
+
+    // T-089-01: `dep-scan signing export-pubkey` parses without arguments.
+    #[test]
+    fn t089_01_parse_signing_export_pubkey() {
+        let cli = Cli::parse_from(["dep-scan", "signing", "export-pubkey"]);
+        match cli.command {
+            Command::Signing { action } => {
+                assert_eq!(
+                    action,
+                    SigningAction::ExportPubkey,
+                    "T-089-01: signing export-pubkey must parse to SigningAction::ExportPubkey"
+                );
+            }
+            _ => panic!("T-089-01: expected Signing command"),
+        }
+    }
+
+    // T-089-02: `dep-scan signing export-pubkey --help` exits 0 and mentions
+    // signing.key_path and PEM/SPKI.
+    #[test]
+    fn t089_02_signing_export_pubkey_help_text() {
+        let result = Cli::try_parse_from(["dep-scan", "signing", "export-pubkey", "--help"]);
+        // clap returns an Err for --help (it exits), but we can check the
+        // error message contains the expected strings.
+        let err = result.expect_err("--help should cause a parse exit");
+        let help_text = err.to_string();
+        assert!(
+            help_text.contains("signing.key_path"),
+            "T-089-02: help text must mention 'signing.key_path', got:\n{help_text}"
+        );
+        assert!(
+            help_text.to_lowercase().contains("pem") || help_text.to_lowercase().contains("spki"),
+            "T-089-02: help text must mention PEM or SPKI format, got:\n{help_text}"
         );
     }
 }

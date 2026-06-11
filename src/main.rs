@@ -8,6 +8,7 @@ mod policy;
 mod registry;
 mod sbom;
 mod signed_note;
+mod signing_export;
 mod sigstore_verify;
 mod types;
 mod typosquat;
@@ -23,7 +24,7 @@ use clap::Parser;
 use serde::Serialize;
 
 use cache::Cache;
-use cli::{Cli, Command, ConfigAction, OutputFormat, resolve_format};
+use cli::{Cli, Command, ConfigAction, OutputFormat, SigningAction, resolve_format};
 use config::Config;
 use osv::{OsvClient, OsvQueryContext, registry_to_ecosystem};
 use policy::age::AgePolicy;
@@ -351,6 +352,17 @@ async fn run(cli: Cli) -> Result<i32> {
             .await
         }
         Command::Config { action } => run_config(cli.config.as_deref(), action),
+        Command::Signing { action } => run_signing(cli.config.as_deref(), action),
+    }
+}
+
+fn run_signing(config_path: Option<&Path>, action: SigningAction) -> Result<i32> {
+    match action {
+        SigningAction::ExportPubkey => {
+            let config = Config::load(config_path)?;
+            signing_export::export_pubkey(&config, &mut std::io::stdout())?;
+            Ok(0)
+        }
     }
 }
 
