@@ -180,3 +180,48 @@ accepts untrusted data.
 - `cargo test` (full suite) exits 0.
 - `cargo clippy --all-targets --all-features -- -D warnings` exits 0.
 - `cargo fmt --check` exits 0.
+
+---
+
+## Security-hardening addendum (post-implementation audit)
+
+A security audit of the delivered fetch client found a Critical and a High
+finding rooted in a false premise in the original ADR: `gix-transport` compiles
+the `ssh` **and** `file` transports in *unconditionally* (they are not
+feature-gated out), and **both spawn a subprocess** (`git-upload-pack` for
+`file://`, the local `ssh` binary for `ssh://`). An attacker-controlled lockfile
+can emit such a URL, breaking the "pure-Rust gix ⇒ no subprocess" guarantee. The
+following test cases pin the fix and MUST pass.
+
+### SEC-001 / SEC-002: scheme allow-list, fail-closed
+- `check_scheme_allowed` permits ONLY `https://` and `git://` (case-insensitive);
+  these are the transports gix services without spawning a subprocess.
+- Every other input is rejected with an `Err` naming the disallowed scheme:
+  `file://`, `ssh://`, `git+ssh://`, `http://`, `ext::`, scp-style
+  `user@host:path`, bare local paths, and unrecognised input.
+- End-to-end: a `Cargo.lock` with `source = "git+file:///…#<sha>"` scanned through
+  the binary yields verdict `warn` (never `pass`), the reason names `file://` and
+  the scheme allow-list, and NO `git-upload-pack` subprocess is spawned (the gate
+  runs before any gix connection). Same for `git+ssh://` → `warn`, fail-closed.
+- No scheme bypass of the host policy: the removed `is_local_scheme` helper used
+  to exempt `file://` from the host check (the bypass); local/unknown schemes now
+  fail closed at the allow-list gate. Host policy still applies to https/git.
+
+### SEC-002 subprocess-orphan
+- Because only https (reqwest) and `git://` (TCP) are permitted, an allowed fetch
+  spawns NO child process — there is no orphan-on-timeout concern. The
+  subprocess-spawning transports never reach the fetch.
+
+### SEC-003 / SEC-004: DoS caps on tree materialisation
+- Aggregate total-byte budget (`vcs.max_total_bytes`, default 512 MiB): a tree of
+  individually-under-cap blobs whose sum exceeds the budget fails closed with a
+  diagnostic mentioning "total bytes".
+- Aggregate file-count budget (`vcs.max_total_files`, default 50 000): a tree with
+  more files than the budget fails closed with a diagnostic mentioning "file count".
+- Recursion-depth limit (`MAX_TREE_DEPTH` = 100): a tree nested past the limit
+  fails closed with a diagnostic mentioning "depth" — never a stack overflow.
+
+### SEC-005: policed host matches gix's connecting host
+- For a tricky userinfo URL (`https://a@b@host/x`), `extract_host` agrees with
+  `gix::url::parse(...).host()`, so policy cannot be parsed against one host while
+  gix connects to another.

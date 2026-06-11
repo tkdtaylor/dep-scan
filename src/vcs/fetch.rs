@@ -5,11 +5,39 @@
 //! choice here is driven by one goal: *fetch the bytes of a repository at a
 //! pinned ref without ever executing any code from that repository*.
 //!
+//! ## Scheme allow-list — the load-bearing "no subprocess" guarantee (SEC-001/002)
+//!
+//! The sandbox's central claim is *pure-Rust gix ⇒ no subprocess, no code
+//! execution*.  That claim is **only** true for the network transports gix
+//! services entirely in-process: HTTPS (via the bundled `reqwest`/`rustls`
+//! stack) and the `git://` TCP daemon protocol.  `gix-transport` compiles the
+//! `ssh` **and** `file` transports in *unconditionally* — they are NOT removed
+//! by our feature selection — and both spawn a child process:
+//!
+//! - `file://` (and bare local paths) → spawns `git-upload-pack`,
+//! - `ssh://` (and scp-style `user@host:path`) → spawns the local `ssh` binary,
+//!
+//! either of which can execute attacker-influenced code.  An attacker who
+//! controls a lockfile can emit such a URL.  Therefore [`fetch`] enforces a
+//! **fail-closed scheme allow-list as its very first action**, before any gix
+//! connection is prepared, any socket is opened, or any thread is spawned:
+//! only `https://` and `git://` are permitted; **every** other scheme
+//! (`http://`, `file://`, `ssh://`, `git+ssh://`, `ext::`, scp-style
+//! `user@host:path`, bare local paths, and anything unrecognised) is rejected
+//! with an `Err` naming the disallowed scheme.  The `Err` propagates to the
+//! scan loop, which fails closed (Warn/Block, never Pass).
+//!
+//! There is deliberately **no local-scheme bypass** of the host policy: the
+//! previous `is_local_scheme` helper exempted `file://` from the host check,
+//! which was itself the bypass (SEC-002).  Unknown/local schemes now fail
+//! closed at the allow-list gate instead of skipping policy.
+//!
 //! ## Sandbox model (REQ-096-04)
 //!
 //! We never invoke the `git` CLI and we never check out a git working tree.
 //! Instead we:
 //!
+//! 0. Enforce the scheme allow-list above (https/git only) — fail-closed.
 //! 1. Check the host allow/deny policy **before opening any socket**
 //!    (REQ-096-03) via [`crate::policy::vcs_host::check_host_policy_for_url`].
 //! 2. Fetch the pack into an **ephemeral bare repository** in a temp dir using
@@ -199,18 +227,20 @@ impl VcsFetcher {
     /// - a tree entry path attempts traversal (`..`) or is absolute
     ///   (REQ-096-04).
     pub fn fetch(&self, url: &str, ref_: &str) -> Result<FetchedTree> {
-        // REQ-096-03: host policy is the *first* thing we do.  If the host is
-        // not permitted we return immediately and open NO socket — this check
-        // runs on the caller's thread, before any worker is spawned.
-        //
-        // `file://` URLs (and bare local paths) open no network socket and have
-        // no remote host to police, so the host allow/deny lists — which govern
-        // *network egress* — do not apply.  They still pass through the full
-        // sandbox materialisation below.  All other schemes are policed.
-        if !is_local_scheme(url) {
-            check_host_policy_for_url(url, &self.config)
-                .with_context(|| format!("VCS host policy rejected fetch of {url}"))?;
-        }
+        // SEC-001/SEC-002: the scheme allow-list is the *very first* action,
+        // before any host policy check, gix connection, socket, or thread.  Only
+        // transports gix services WITHOUT spawning a subprocess (https/git) are
+        // permitted; everything else (file://, ssh://, git+ssh, ext::, scp-style,
+        // bare paths, unknown) fails closed here so no process is ever spawned.
+        check_scheme_allowed(url)
+            .with_context(|| format!("VCS fetch of {url} rejected by scheme allow-list"))?;
+
+        // REQ-096-03: host policy is checked next, still on the caller's thread,
+        // before any worker is spawned.  There is NO scheme exemption from this
+        // check — the removed `is_local_scheme` bypass was SEC-002.  Because only
+        // https/git reach here, both always carry a network host to police.
+        check_host_policy_for_url(url, &self.config)
+            .with_context(|| format!("VCS host policy rejected fetch of {url}"))?;
 
         if ref_.is_empty() {
             bail!("refusing to fetch git url {url} with an empty ref (fail-closed)");
@@ -218,6 +248,8 @@ impl VcsFetcher {
 
         let timeout = Duration::from_secs(self.config.vcs.fetch_timeout_secs);
         let max_blob_bytes = self.config.vcs.max_blob_bytes;
+        let max_total_bytes = self.config.vcs.max_total_bytes;
+        let max_total_files = self.config.vcs.max_total_files;
 
         // REQ-096-07: enforce a hard wall-clock bound on `fetch` returning.
         //
@@ -234,8 +266,13 @@ impl VcsFetcher {
         let ref_owned = ref_.to_string();
         let (tx, rx) = std::sync::mpsc::channel::<Result<FetchedTree>>();
         let worker_timeout = timeout;
+        let caps = MaterialiseCaps {
+            max_blob_bytes,
+            max_total_bytes,
+            max_total_files,
+        };
         std::thread::spawn(move || {
-            let result = fetch_blocking(&url_owned, &ref_owned, worker_timeout, max_blob_bytes);
+            let result = fetch_blocking(&url_owned, &ref_owned, worker_timeout, caps);
             // Ignore send errors: if the receiver already timed out and went
             // away, we simply drop the result (and its TempDir cleans up).
             let _ = tx.send(result);
@@ -258,12 +295,37 @@ impl VcsFetcher {
     }
 }
 
+/// Resource caps applied while materialising a fetched tree (SEC-003/004).
+///
+/// `max_blob_bytes` is the per-blob cap (REQ-096-08); `max_total_bytes` and
+/// `max_total_files` bound the *aggregate* materialised output so a tree of many
+/// individually-under-cap blobs cannot exhaust disk or inode budget.
+#[derive(Clone, Copy)]
+struct MaterialiseCaps {
+    max_blob_bytes: u64,
+    max_total_bytes: u64,
+    max_total_files: u64,
+}
+
+/// Maximum tree recursion depth (SEC-003).  A deeply-nested tree cannot exhaust
+/// the stack: at this depth `materialise_tree` fails closed with a diagnostic.
+/// 100 comfortably exceeds any legitimate repository layout while keeping the
+/// recursive walk's stack usage bounded.
+const MAX_TREE_DEPTH: usize = 100;
+
+/// Mutable accumulators threaded through the recursive tree walk so the
+/// aggregate byte/file budgets can be enforced across the whole tree.
+struct MaterialiseState {
+    total_bytes: u64,
+    total_files: u64,
+}
+
 /// Perform the blocking fetch + tree materialisation.  Runs on a worker thread.
 fn fetch_blocking(
     url: &str,
     ref_: &str,
     timeout: Duration,
-    max_blob_bytes: u64,
+    caps: MaterialiseCaps,
 ) -> Result<FetchedTree> {
     // The single temp dir owns everything: the ephemeral bare repo lives in
     // `repo/`, and we materialise the tree into `materialised/`.  Both are
@@ -289,12 +351,18 @@ fn fetch_blocking(
     // enforcement.  An unsafe path (traversal / absolute) aborts with Err.
     let mut files = Vec::new();
     let mut diagnostics = Vec::new();
+    let mut state = MaterialiseState {
+        total_bytes: 0,
+        total_files: 0,
+    };
     materialise_tree(
         &repo,
         &tree,
         Path::new(""),
         &materialised_dir,
-        max_blob_bytes,
+        caps,
+        0,
+        &mut state,
         &mut files,
         &mut diagnostics,
     )?;
@@ -420,16 +488,33 @@ fn resolve_ref_to_tree<'repo>(
 
 /// Recursively materialise a tree object, applying sandbox checks on every
 /// entry path.  `rel_prefix` is the path of `tree` relative to the fetch root.
+///
+/// `depth` is the current recursion depth (0 at the root tree); exceeding
+/// [`MAX_TREE_DEPTH`] fails closed (SEC-003).  `state` accumulates the running
+/// total materialised bytes / file count so the aggregate caps in `caps`
+/// (SEC-003/004) are enforced across the whole tree, not just per blob.
+#[allow(clippy::too_many_arguments)]
 fn materialise_tree(
     repo: &gix::Repository,
     tree: &gix::Tree<'_>,
     rel_prefix: &Path,
     materialised_root: &Path,
-    max_blob_bytes: u64,
+    caps: MaterialiseCaps,
+    depth: usize,
+    state: &mut MaterialiseState,
     files: &mut Vec<FetchedFileOwned>,
     diagnostics: &mut Vec<FetchDiagnostic>,
 ) -> Result<()> {
     use gix::object::tree::EntryKind;
+
+    // SEC-003: bound recursion depth so an adversarially deep tree cannot
+    // exhaust the stack.  Fail closed with a diagnostic at the limit.
+    if depth >= MAX_TREE_DEPTH {
+        bail!(
+            "fetched tree exceeds max recursion depth {MAX_TREE_DEPTH} at {} (fail-closed)",
+            rel_prefix.display()
+        );
+    }
 
     for entry in tree.iter() {
         let entry = entry.map_err(|e| anyhow!("failed to decode tree entry: {e}"))?;
@@ -455,7 +540,9 @@ fn materialise_tree(
                     &subtree,
                     &rel_path,
                     materialised_root,
-                    max_blob_bytes,
+                    caps,
+                    depth + 1,
+                    state,
                     files,
                     diagnostics,
                 )?;
@@ -467,19 +554,45 @@ fn materialise_tree(
                 let header = repo
                     .find_header(oid)
                     .map_err(|e| anyhow!("failed to read header for {filename:?}: {e}"))?;
-                if header.size() > max_blob_bytes {
+                if header.size() > caps.max_blob_bytes {
                     diagnostics.push(FetchDiagnostic::BlobTooLarge {
                         path: rel_path.to_string_lossy().into_owned(),
                         size: header.size(),
-                        cap: max_blob_bytes,
+                        cap: caps.max_blob_bytes,
                     });
                     continue;
+                }
+
+                // SEC-004: aggregate file-count budget.  Fail closed BEFORE
+                // reading/writing the blob so the limit truly bounds output.
+                if state.total_files >= caps.max_total_files {
+                    bail!(
+                        "fetched tree exceeds max file count {} at {} (fail-closed)",
+                        caps.max_total_files,
+                        rel_path.display()
+                    );
+                }
+                // SEC-003: aggregate byte budget.  The header size is the exact
+                // on-disk byte count for this (under-per-blob-cap) blob; check
+                // the running total against the budget before materialising.
+                let projected = state.total_bytes.saturating_add(header.size());
+                if projected > caps.max_total_bytes {
+                    bail!(
+                        "fetched tree exceeds max total bytes {} at {} (fail-closed)",
+                        caps.max_total_bytes,
+                        rel_path.display()
+                    );
                 }
 
                 let object = entry
                     .object()
                     .map_err(|e| anyhow!("failed to read blob {filename:?}: {e}"))?;
                 let content = object.detach().data;
+
+                // Charge the running totals against the actual decoded length
+                // (the header size and decoded length agree for blobs).
+                state.total_bytes = state.total_bytes.saturating_add(content.len() as u64);
+                state.total_files += 1;
 
                 write_materialised_file(materialised_root, &rel_path, &content)?;
                 files.push(FetchedFileOwned {
@@ -539,38 +652,86 @@ fn validate_component(name: &str) -> Result<()> {
     Ok(())
 }
 
-/// Whether `url` refers to a local repository (no network host to police).
+/// Enforce the fetch scheme allow-list (SEC-001/SEC-002), fail-closed.
 ///
-/// Returns `true` for `file://` URLs and for bare filesystem paths (absolute or
-/// relative) that contain no `://` scheme and no SCP-style `host:path` form.
-/// These open no network socket, so the host allow/deny policy — which governs
-/// network egress — does not apply.  Network schemes (`https://`, `ssh://`,
-/// `git://`, and SCP-style `git@host:path`) return `false` and are policed.
-fn is_local_scheme(url: &str) -> bool {
-    let lower = url.to_ascii_lowercase();
-    if lower.starts_with("file://") {
-        return true;
+/// Only transports gix services **entirely in-process** (no subprocess) are
+/// permitted:
+/// - `https://` — served by the bundled `reqwest`/`rustls` HTTP transport,
+/// - `git://`   — the pure-Rust TCP daemon protocol.
+///
+/// **Every** other input is rejected with an `Err` naming the disallowed
+/// scheme, because gix would otherwise spawn a child process that can execute
+/// attacker-influenced code:
+/// - `file://` and bare local paths → `git-upload-pack`,
+/// - `ssh://` / `git+ssh://` / scp-style `user@host:path` → local `ssh`,
+/// - `ext::` and any other transport directive → external command,
+/// - `http://` is rejected too: cleartext fetch of source to be scanned is not
+///   a transport we want to enable, and disallowing it keeps the allow-list to
+///   exactly the two audited in-process transports,
+/// - anything unrecognised → fail closed by default.
+///
+/// Returns `Ok(())` only for the two allowed schemes; the check is performed on
+/// a lowercased copy so `HTTPS://` etc. cannot slip through.
+fn check_scheme_allowed(url: &str) -> Result<()> {
+    let lower = url.trim().to_ascii_lowercase();
+
+    // Allowed: the two pure-Rust, in-process transports.
+    if lower.starts_with("https://") || lower.starts_with("git://") {
+        return Ok(());
     }
-    // Any explicit scheme other than file:// is treated as remote.
+
+    // Everything below is explicitly rejected.  We classify for a precise
+    // diagnostic, but the default arm is fail-closed regardless.
+    let scheme = scheme_label(&lower);
+    bail!(
+        "refusing to fetch git url {url}: scheme {scheme} is not permitted \
+         (only https:// and git:// are allowed — these are the transports gix \
+         services without spawning a subprocess; file://, ssh://, git+ssh, \
+         ext::, scp-style and bare local paths are rejected fail-closed)"
+    )
+}
+
+/// Produce a short human-readable label for the (already lowercased) URL's
+/// scheme, used only for the rejection diagnostic.
+fn scheme_label(lower: &str) -> &'static str {
+    if lower.starts_with("file://") {
+        "file://"
+    } else if lower.starts_with("ssh://") {
+        "ssh://"
+    } else if lower.starts_with("http://") {
+        "http://"
+    } else if lower.starts_with("git+ssh") {
+        "git+ssh"
+    } else if lower.starts_with("git+") {
+        "git+ (unsupported variant)"
+    } else if lower.starts_with("ext::") {
+        "ext::"
+    } else if let Some(pos) = lower.find("://") {
+        // Some other explicit scheme.
+        let _ = pos;
+        "unrecognised-scheme"
+    } else if looks_like_scp(lower) {
+        "scp-style user@host:path"
+    } else {
+        "bare local path / unknown"
+    }
+}
+
+/// Whether `lower` looks like an scp-style git URL `user@host:path` — a colon
+/// that is not part of an explicit `scheme://` and not a Windows drive prefix,
+/// appearing before any path separator.
+fn looks_like_scp(lower: &str) -> bool {
     if lower.contains("://") {
         return false;
     }
-    // No scheme: could be a bare path (local) or SCP-style `user@host:path`
-    // (remote).  SCP form has a colon that is NOT part of a Windows drive
-    // letter and appears before any path separator.
-    if let Some(colon) = url.find(':') {
-        let before = &url[..colon];
-        // Windows drive path like `C:\repo` — local.
-        if is_windows_drive_prefix(url) {
-            return true;
-        }
-        // `host:path` (no slash before the colon) — treat as remote SCP form.
-        if !before.contains('/') && !before.contains('\\') {
+    if let Some(colon) = lower.find(':') {
+        if is_windows_drive_prefix(lower) {
             return false;
         }
+        let before = &lower[..colon];
+        return !before.contains('/') && !before.contains('\\');
     }
-    // Bare path with no remote-looking colon — local.
-    true
+    false
 }
 
 /// Whether `s` begins with a Windows drive-letter prefix like `C:` or `C:\`.
@@ -673,6 +834,62 @@ mod tests {
         assert!(validate_component("a.b.c").is_ok());
     }
 
+    // ---- SEC-001/SEC-002: scheme allow-list (pure, no network) ----
+
+    // Only https:// and git:// are permitted — the two transports gix services
+    // without spawning a subprocess.
+    #[test]
+    fn sec001_scheme_allowlist_permits_only_https_and_git() {
+        assert!(
+            check_scheme_allowed("https://github.com/user/repo.git").is_ok(),
+            "https:// must be allowed"
+        );
+        assert!(
+            check_scheme_allowed("git://127.0.0.1:9418/repo").is_ok(),
+            "git:// must be allowed"
+        );
+        // Case-insensitive: an uppercased scheme must not slip past.
+        assert!(
+            check_scheme_allowed("HTTPS://github.com/x").is_ok(),
+            "HTTPS:// (uppercase) must be allowed"
+        );
+    }
+
+    // SEC-001/SEC-002: every subprocess-spawning or unknown scheme is rejected
+    // fail-closed, and the error names the disallowed scheme.
+    #[test]
+    fn sec002_scheme_allowlist_rejects_subprocess_schemes() {
+        let cases = [
+            ("file:///tmp/whatever", "file://"),
+            ("FILE:///tmp/x", "file://"),
+            ("ssh://git@github.com/user/repo.git", "ssh://"),
+            ("git+ssh://git@github.com/user/repo.git", "git+ssh"),
+            ("http://example.com/repo.git", "http://"),
+            ("ext::sh -c touch /tmp/pwned", "ext::"),
+            ("git@github.com:user/repo.git", "scp-style"),
+            ("/var/local/repo", "bare local"),
+            ("./relative/repo", "bare local"),
+            ("not-a-url", "bare local"),
+            ("", "bare local"),
+        ];
+        for (url, _kind) in cases {
+            let res = check_scheme_allowed(url);
+            assert!(
+                res.is_err(),
+                "SEC-002: scheme of {url:?} must be rejected fail-closed"
+            );
+            let msg = format!("{:#}", res.unwrap_err());
+            assert!(
+                msg.contains("not permitted") && msg.to_lowercase().contains("https"),
+                "SEC-002: rejection for {url:?} must be descriptive, got: {msg}"
+            );
+        }
+    }
+
+    // SEC-003 (recursion depth), SEC-003 (total bytes), and SEC-004 (file
+    // count) are exercised by the behavioural fetch tests further below, which
+    // craft trees that breach each budget and assert a fail-closed Err.
+
     // T-096-09 / T-096-10: write guard rejects traversal / absolute relative paths
     // even if a component validator were somehow bypassed (defence in depth).
     #[test]
@@ -733,6 +950,27 @@ mod tests {
     use std::path::Path as StdPath;
     use std::process::{Child, Command};
 
+    /// Process-global lock that serialises the `PATH`-mutating test (T-096-19)
+    /// against every fixture that spawns `git`.  T-096-19 holds the **write**
+    /// side while it strips `PATH` and runs its fetch; every git-spawning helper
+    /// holds a **read** guard across its spawn.  Reads run concurrently with one
+    /// another but exclude the write, so no `git` spawn can ever observe the
+    /// stripped `PATH`.  The guarded value is the resolved absolute `git` path,
+    /// cached on first use.
+    fn git_path_lock() -> &'static std::sync::RwLock<PathBuf> {
+        use std::sync::OnceLock;
+        static GIT: OnceLock<std::sync::RwLock<PathBuf>> = OnceLock::new();
+        GIT.get_or_init(|| {
+            std::sync::RwLock::new(which_git_on_path().unwrap_or_else(|| PathBuf::from("git")))
+        })
+    }
+
+    /// Acquire a read guard over the resolved `git` path for the duration of a
+    /// spawn (excludes the T-096-19 `PATH` strip).
+    fn git_read() -> std::sync::RwLockReadGuard<'static, PathBuf> {
+        git_path_lock().read().unwrap()
+    }
+
     /// Whether the `git` CLI is available for building / serving fixtures.
     fn git_available() -> bool {
         Command::new("git")
@@ -759,7 +997,8 @@ mod tests {
                 .local_addr()
                 .ok()?
                 .port();
-            let child = Command::new("git")
+            let git = git_read();
+            let child = Command::new(&*git)
                 .args([
                     "daemon",
                     "--reuseaddr",
@@ -800,7 +1039,8 @@ mod tests {
     }
 
     fn run_git(dir: &StdPath, args: &[&str]) {
-        let status = Command::new("git")
+        let git = git_read();
+        let status = Command::new(&*git)
             .args(args)
             .current_dir(dir)
             .env("GIT_CONFIG_NOSYSTEM", "1")
@@ -820,7 +1060,8 @@ mod tests {
     }
 
     fn run_git_capture(dir: &StdPath, args: &[&str]) -> String {
-        let out = Command::new("git")
+        let git = git_read();
+        let out = Command::new(&*git)
             .args(args)
             .current_dir(dir)
             .env("GIT_CONFIG_NOSYSTEM", "1")
@@ -1252,7 +1493,8 @@ mod tests {
         let blob = run_git_capture(&repo, &["hash-object", "-w", "payload"]);
         // mktree input: "<mode> blob <sha>\t<name>"
         let mktree_input = format!("100644 blob {blob}\t{name}\n");
-        let out = Command::new("git")
+        let git = git_read();
+        let out = Command::new(&*git)
             .args(["mktree"])
             .current_dir(&repo)
             .env("HOME", dir.path())
@@ -1385,8 +1627,11 @@ mod tests {
         cfg.vcs.fetch_timeout_secs = 2; // short, finite budget
         let fetcher = VcsFetcher::from_config(&cfg);
 
+        // Use git:// (an allowed transport) so the stall exercises the real
+        // fetch/timeout path rather than being short-circuited by the scheme
+        // allow-list (http:// would be rejected instantly).
         let start = Instant::now();
-        let res = fetcher.fetch(&format!("http://127.0.0.1:{port}/repo.git"), "main");
+        let res = fetcher.fetch(&format!("git://127.0.0.1:{port}/repo.git"), "main");
         let elapsed = start.elapsed();
 
         assert!(res.is_err(), "T-096-14: stalling fetch must Err, not hang");
@@ -1500,6 +1745,12 @@ mod tests {
 
         // Run the fetch with PATH pointing at an empty dir so no `git` binary is
         // resolvable.  The pure-Rust gix git:// transport must still succeed.
+        //
+        // Hold the WRITE side of the git-path lock for the whole strip: this
+        // excludes every other fixture's `git` spawn (which holds a read guard)
+        // so no concurrent test can observe the stripped `PATH`.  Acquire it
+        // BEFORE building anything else under the strip.
+        let _path_write = git_path_lock().write().unwrap();
         let empty_dir = tempfile::tempdir().unwrap();
         let original_path = std::env::var_os("PATH");
         // SAFETY: single-threaded test; restored immediately after the fetch.
@@ -1529,6 +1780,245 @@ mod tests {
             2,
             "T-096-19: fetch without git must still produce the tree"
         );
+    }
+
+    // ---- SEC-001/SEC-002: file:// fetch is rejected fail-closed, no subprocess,
+    //      host policy NOT bypassed (end-to-end through VcsFetcher::fetch) ----
+    #[test]
+    fn sec001_file_scheme_rejected_no_subprocess_no_policy_bypass() {
+        if !git_available() {
+            eprintln!("skip SEC-001 file://: git CLI not available for fixture authoring");
+            return;
+        }
+        // Build a REAL on-disk bare-able repo so that, if the allow-list were
+        // absent, gix's file:// transport would actually spawn git-upload-pack
+        // and succeed.  We assert it is rejected BEFORE that can happen.
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("src-repo");
+        std::fs::create_dir(&repo).unwrap();
+        run_git(&repo, &["init", "-q", "-b", "main"]);
+        std::fs::write(repo.join("a.txt"), b"hi").unwrap();
+        run_git(&repo, &["add", "-A"]);
+        run_git(&repo, &["commit", "-q", "-m", "init"]);
+        let head = run_git_capture(&repo, &["rev-parse", "HEAD"]);
+
+        let url = format!("file://{}", repo.display());
+
+        // Even with an allow-list that would permit the host (open default),
+        // and a valid ref, the file:// scheme must be rejected fail-closed.
+        let fetcher = VcsFetcher::from_config(&default_config());
+        let start = Instant::now();
+        let res = fetcher.fetch(&url, &head);
+        let elapsed = start.elapsed();
+
+        let err = res.expect_err("SEC-001: file:// fetch must be rejected fail-closed");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("scheme") && msg.contains("not permitted") && msg.contains("file://"),
+            "SEC-001: error must be a scheme rejection naming file://, got: {msg}"
+        );
+        // The rejection happens before any gix connection / git-upload-pack
+        // spawn / socket, so it returns effectively instantly.
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "SEC-001: file:// must be rejected before any subprocess/socket (took {elapsed:?})"
+        );
+        // Host policy is NOT bypassed: the rejection is the SCHEME gate, and the
+        // mention of scheme (not a successful fetch) proves no file:// fetch
+        // proceeded.  We also assert the fetch produced no FetchedTree at all.
+        // (res was an Err, asserted above.)
+    }
+
+    // SEC-002: an ssh:// (and scp-style) git URL is rejected fail-closed before
+    // any local `ssh` subprocess is spawned.
+    #[test]
+    fn sec002_ssh_and_scp_schemes_rejected_fail_closed() {
+        let fetcher = VcsFetcher::from_config(&default_config());
+
+        let start = Instant::now();
+        let res = fetcher.fetch("ssh://git@github.com/user/repo.git", "main");
+        let elapsed = start.elapsed();
+        let msg = format!("{:#}", res.expect_err("SEC-002: ssh:// must be rejected"));
+        assert!(
+            msg.contains("ssh://") && msg.contains("not permitted"),
+            "SEC-002: ssh:// rejection must name the scheme, got: {msg}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "SEC-002: ssh:// must be rejected before spawning ssh (took {elapsed:?})"
+        );
+
+        // scp-style user@host:path
+        let res2 = fetcher.fetch("git@github.com:user/repo.git", "main");
+        assert!(
+            res2.is_err(),
+            "SEC-002: scp-style git URL must be rejected fail-closed"
+        );
+    }
+
+    // SEC-002: the scheme gate runs BEFORE the host policy, so a disallowed
+    // scheme can never reach (and thus never bypass) the host check.  A file://
+    // URL whose "host" is empty must still fail on the scheme, not silently
+    // skip policy as the old is_local_scheme bypass did.
+    #[test]
+    fn sec002_local_scheme_does_not_bypass_host_policy() {
+        // Configure an allow-list that contains NOTHING the URL could match.
+        let mut cfg = default_config();
+        cfg.vcs.allowed_hosts = vec!["only-this-host.example".to_string()];
+        let fetcher = VcsFetcher::from_config(&cfg);
+        // file:// previously skipped the host check entirely (the bypass).  Now
+        // it must fail closed at the scheme gate.
+        let res = fetcher.fetch("file:///tmp/whatever", "deadbeef");
+        let msg = format!("{:#}", res.expect_err("file:// must fail closed"));
+        assert!(
+            msg.contains("file://") && msg.contains("not permitted"),
+            "SEC-002: file:// must be rejected at the scheme gate, got: {msg}"
+        );
+    }
+
+    // ---- SEC-003: deeply nested tree fails closed (no stack overflow) ----
+    #[test]
+    fn sec003_deeply_nested_tree_fails_closed() {
+        if !git_available() {
+            eprintln!("skip SEC-003 depth: git CLI not available");
+            return;
+        }
+        // Build a tree nested deeper than MAX_TREE_DEPTH using plumbing.
+        let (_daemon, url, head) = match build_repo_with_nested_tree(MAX_TREE_DEPTH + 5) {
+            Some(t) => t,
+            None => {
+                eprintln!("skip SEC-003: could not author nested tree / start daemon");
+                return;
+            }
+        };
+        let fetcher = VcsFetcher::from_config(&default_config());
+        let res = fetcher.fetch(&url, &head);
+        let msg = format!(
+            "{:#}",
+            res.expect_err("SEC-003: over-deep tree must fail closed")
+        );
+        assert!(
+            msg.contains("depth"),
+            "SEC-003: error must mention the depth limit, got: {msg}"
+        );
+    }
+
+    // ---- SEC-004: file-count budget exceeded fails closed ----
+    #[test]
+    fn sec004_file_count_budget_fails_closed() {
+        if !git_available() {
+            eprintln!("skip SEC-004 count: git CLI not available");
+            return;
+        }
+        let fx = fixture_or_skip!(
+            build_repo(&[
+                ("a.txt", b"1"),
+                ("b.txt", b"2"),
+                ("c.txt", b"3"),
+                ("d.txt", b"4"),
+            ]),
+            "SEC-004"
+        );
+        let mut cfg = default_config();
+        cfg.vcs.max_total_files = 2; // tiny budget — 4 files exceed it
+        let fetcher = VcsFetcher::from_config(&cfg);
+        let res = fetcher.fetch(&fx.url, &fx.head_sha);
+        let msg = format!(
+            "{:#}",
+            res.expect_err("SEC-004: exceeding file count must fail closed")
+        );
+        assert!(
+            msg.contains("file count"),
+            "SEC-004: error must mention the file-count cap, got: {msg}"
+        );
+    }
+
+    // ---- SEC-003: total-byte budget exceeded fails closed ----
+    #[test]
+    fn sec003_total_byte_budget_fails_closed() {
+        if !git_available() {
+            eprintln!("skip SEC-003 bytes: git CLI not available");
+            return;
+        }
+        let fx = fixture_or_skip!(
+            build_repo(&[
+                ("a.txt", b"hello world"),
+                ("b.txt", b"hello world"),
+                ("c.txt", b"hello world"),
+            ]),
+            "SEC-003-bytes"
+        );
+        let mut cfg = default_config();
+        // Per-blob cap stays generous; the AGGREGATE byte budget is what trips.
+        cfg.vcs.max_blob_bytes = 1024;
+        cfg.vcs.max_total_bytes = 15; // 3 * 11 bytes = 33 > 15
+        let fetcher = VcsFetcher::from_config(&cfg);
+        let res = fetcher.fetch(&fx.url, &fx.head_sha);
+        let msg = format!(
+            "{:#}",
+            res.expect_err("SEC-003: exceeding total bytes must fail closed")
+        );
+        assert!(
+            msg.contains("total bytes"),
+            "SEC-003: error must mention the total-byte cap, got: {msg}"
+        );
+    }
+
+    /// Build a repo whose root tree nests `depth` levels of single-subdirectory
+    /// trees (`d/d/d/.../leaf.txt`) using `git mktree`/`commit-tree` plumbing,
+    /// served over a local daemon.  Returns `(daemon, url, commit_sha)`.
+    fn build_repo_with_nested_tree(depth: usize) -> Option<(GitDaemon, String, String)> {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("src-repo");
+        std::fs::create_dir(&repo).unwrap();
+        run_git(&repo, &["init", "-q", "-b", "main"]);
+
+        // Leaf blob.
+        std::fs::write(repo.join("payload"), b"leaf\n").unwrap();
+        let blob = run_git_capture(&repo, &["hash-object", "-w", "payload"]);
+
+        // Innermost tree holds the leaf blob; each outer tree holds the prior
+        // tree under the name "d".
+        let mut current = mktree(&repo, &dir, &format!("100644 blob {blob}\tleaf.txt\n"))?;
+        for _ in 0..depth {
+            current = mktree(&repo, &dir, &format!("040000 tree {current}\td\n"))?;
+        }
+
+        let commit = run_git_capture(&repo, &["commit-tree", &current, "-m", "nested"]);
+        run_git(&repo, &["update-ref", "refs/heads/main", &commit]);
+
+        let dir = Box::leak(Box::new(dir));
+        let daemon = GitDaemon::start(dir.path())?;
+        let url = daemon.url("src-repo");
+        Some((daemon, url, commit))
+    }
+
+    /// Run `git mktree` with the given input, returning the tree SHA, or `None`
+    /// if git refused the input.
+    ///
+    /// Resolves `git` to an absolute path first so this fixture is immune to the
+    /// transient `PATH`-stripping window in T-096-19 (which mutates the
+    /// process-global `PATH` while it runs in parallel).
+    fn mktree(repo: &StdPath, dir: &TempDir, input: &str) -> Option<String> {
+        let git = git_read();
+        let out = Command::new(&*git)
+            .args(["mktree"])
+            .current_dir(repo)
+            .env("HOME", dir.path())
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .and_then(|mut child| {
+                use std::io::Write;
+                child.stdin.as_mut().unwrap().write_all(input.as_bytes())?;
+                child.wait_with_output()
+            })
+            .expect("git mktree failed to spawn");
+        if !out.status.success() {
+            return None;
+        }
+        Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
     }
 
     /// Resolve `git` on the current PATH, if any.

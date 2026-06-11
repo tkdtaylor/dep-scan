@@ -374,4 +374,27 @@ mod tests {
             "T-095-19: empty URL must be Err (fail-closed)"
         );
     }
+
+    // SEC-005: confirm the host dep-scan polices matches the host gix actually
+    // connects to for a tricky userinfo URL.  Only https/git reach the policy
+    // check after the scheme allow-list (task 096 hardening), so we compare our
+    // `extract_host` against gix's own URL parse on an https URL with an
+    // embedded `@` in the userinfo.  Both must agree on the connecting host so
+    // policy cannot be parsed against one host while gix connects to another.
+    #[test]
+    fn sec005_policed_host_matches_gix_parse_tricky_userinfo() {
+        // `a@b@host` — userinfo `a@b`, host `host`.  Our extractor uses rfind('@'),
+        // so it takes everything after the LAST '@' as host, matching gix.
+        let url = "https://a@b@host.example.com/x";
+        let ours = extract_host(url).expect("SEC-005: our parser must extract a host");
+        let gix_url = gix::url::parse(url.into()).expect("SEC-005: gix must parse the url");
+        let gix_host = gix_url
+            .host()
+            .expect("SEC-005: gix must report a host")
+            .to_ascii_lowercase();
+        assert_eq!(
+            ours, gix_host,
+            "SEC-005: policed host {ours:?} must equal gix's connecting host {gix_host:?}"
+        );
+    }
 }

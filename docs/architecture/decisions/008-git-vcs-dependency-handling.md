@@ -167,8 +167,11 @@ client follows. The transitive epic is last and gated on its own open questions.
 - **Host trust policy shape.** Allow-list, deny-list, or both; default posture; how it
   composes with enterprise mirrors. Must stay configuration-driven (no hardcoded hosts).
   *(Largely settled by task 095: both lists, deny-wins, open default posture, case-insensitive,
-  config-driven. Task 096 adds: `file://` and bare local paths bypass the host lists because
-  they open no network socket.)*
+  config-driven. Task 096 hardening: there is NO scheme bypass of the host policy. `file://`,
+  `ssh://`, bare local paths, and any non-`https`/`git` scheme are rejected fail-closed by the
+  scheme allow-list before the host check; the host policy applies to the permitted https/git
+  schemes. The earlier note that `file://` bypasses the host lists was the SEC-002 bypass and
+  has been removed.)*
 
 ## Piece 2 resolution (task 096 — sandboxed VCS fetch client)
 
@@ -186,11 +189,59 @@ shell-out acceleration is **omitted**: it would add a second code path, a second
 audit, and a correctness-parity burden, for no benefit on the dominant HTTPS path.
 
 `gix` feature set is minimal and deliberately excludes worktree checkout/mutation
-(`worktree-mutation`), submodule features, the curl transport, and the ssh transport.
+(`worktree-mutation`), submodule features, and the curl transport.
 
-Caveat noted for the implementer: gix's `file://` transport shells out to `git-upload-pack`;
-the pure-Rust transports are HTTPS (reqwest) and `git://` (TCP daemon protocol). dep-scan
-fetches real dependencies over HTTPS, so the pure-Rust guarantee holds for production use.
+#### Correction (security review): the ssh/file transports are NOT excluded by features
+
+An earlier draft of this section claimed the `ssh` and `file` transports were compiled out
+by the `gix` feature selection. **That claim was false.** `gix-transport` compiles the
+`file` **and** `ssh` transports in *unconditionally* — they are not behind any feature we
+can turn off — and **both spawn a subprocess**:
+
+- `file://` (and bare local paths) spawns `git-upload-pack`;
+- `ssh://` (and scp-style `user@host:path`) spawns the local `ssh` binary.
+
+Either subprocess can execute attacker-influenced code, which directly breaks the sandbox's
+central guarantee (*pure-Rust gix ⇒ no subprocess, no code execution*) for any URL an
+attacker-controlled lockfile can emit.
+
+#### Real defense: a fail-closed scheme allow-list at the fetch boundary (SEC-001/SEC-002)
+
+`VcsFetcher::fetch` enforces a **scheme allow-list as its very first action**, before any
+host-policy check, any gix connection, any socket, or any worker thread. Only the two
+transports gix services **entirely in-process** are permitted:
+
+- `https://` — the bundled `reqwest`/`rustls` HTTP transport (no subprocess);
+- `git://`   — the pure-Rust TCP daemon protocol (no subprocess).
+
+**Every** other input fails closed with an `Err` naming the disallowed scheme: `file://`,
+`ssh://`, `git+ssh://`, `ext::`, `http://` (cleartext — rejected to keep the allow-list to
+exactly the two audited in-process transports), scp-style `user@host:path`, bare local
+paths, and anything unrecognised. Because the gate runs before any connection is prepared,
+a rejected scheme opens **no socket and spawns no process**. The `Err` propagates to the
+scan loop, which fails closed (Warn, or Block under `mutable_git_ref = "block"`) — never
+Pass. Consequently, **no allowed transport (https/git) ever spawns a child process**, so the
+"no subprocess / no code execution" guarantee holds for every fetch that is permitted to run.
+
+The previous design exempted `file://` (and bare local paths) from the host-policy check on
+the rationale that they "open no network socket." That exemption was itself the bypass
+(SEC-002): it let an attacker-controlled local-scheme URL skip policy entirely. There is now
+**no scheme exemption** from the host check — unknown/local schemes fail closed at the
+allow-list gate, and the host policy still applies to the allowed https/git schemes.
+
+#### DoS caps on tree materialisation (SEC-003/SEC-004)
+
+In addition to the per-blob cap (`vcs.max_blob_bytes`, default 50 MiB), the materialiser
+enforces three aggregate budgets so an adversarial tree of individually-under-cap objects
+cannot exhaust disk, inodes, or the stack — each fails closed with a diagnostic:
+
+- **Total materialised bytes** — `vcs.max_total_bytes`, default 512 MiB.
+- **Total materialised file count** — `vcs.max_total_files`, default 50 000.
+- **Tree recursion depth** — constant `MAX_TREE_DEPTH = 100` (comfortably exceeds any real
+  repo layout while bounding stack usage); a tree nested past this limit fails closed before
+  it can overflow the stack.
+
+The byte and count budgets are configurable on `[vcs]`; the depth limit is a constant.
 
 ### Sandbox boundary: fetch-to-objects, materialise-ourselves
 
@@ -217,16 +268,23 @@ reading blobs from the object database and materialising files into an isolated 
   plumbing rejects it), so the only absolute-looking single-component name an adversary can
   smuggle into a *real* tree is the drive-prefix form, which the validator catches; the
   leading-slash case is covered by the path-component validator unit test.
-- **OOM protection** (T-096-12). A blob whose object header reports a size larger than
-  `vcs.max_blob_bytes` (default 50 MiB) is skipped with a `BlobTooLarge` diagnostic
-  *without being decoded into memory* — the size is read from the object header first.
+- **OOM / DoS protection** (T-096-12, SEC-003/SEC-004). A blob whose object header reports a
+  size larger than `vcs.max_blob_bytes` (default 50 MiB) is skipped with a `BlobTooLarge`
+  diagnostic *without being decoded into memory* — the size is read from the object header
+  first. Aggregate caps (total bytes `vcs.max_total_bytes` 512 MiB, total file count
+  `vcs.max_total_files` 50 000, and recursion depth `MAX_TREE_DEPTH` 100) fail the fetch
+  closed before disk/inode/stack exhaustion. See the DoS-caps subsection above.
 - **Timeout / fail-closed** (T-096-05/13/14/15). The fetch runs on a worker thread bounded by
   `vcs.fetch_timeout_secs` (default 30): an internal watchdog trips gix's cooperative
   interrupt flag, and the caller additionally bounds the channel receive so `fetch` returns
   within the budget plus a small grace even if gix is stuck in an uninterruptible syscall.
   Any network/DNS/timeout/ref-not-found error returns `Err`, which the scan loop turns into a
   `Warn` (or `Block` when `mutable_git_ref = "block"`) — an unfetchable dep is **never**
-  `Pass`.
+  `Pass`. **No subprocess-orphan concern (SEC-002):** because the only permitted transports
+  are https (reqwest) and `git://` (TCP), an allowed fetch spawns no child process at all, so
+  there is no child that could be left detached when the timeout fires. The subprocess-spawning
+  transports (`file://`, `ssh://`) never reach the fetch — they are rejected at the scheme
+  allow-list before any connection is prepared.
 
 **Platform notes.** Path-traversal and absolute-path validation normalise on both `/` and
 `\` separators and treat a leading drive-letter or UNC-style prefix as absolute, so a tree

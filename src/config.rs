@@ -348,6 +348,18 @@ pub struct VcsConfig {
     /// adversarially large fetched files.  Default 50 MiB.
     #[serde(default = "default_vcs_max_blob_bytes")]
     pub max_blob_bytes: u64,
+    /// Maximum total bytes that may be materialised across the *entire* fetched
+    /// tree (task 096 hardening, SEC-003).  A tree may carry many under-cap
+    /// blobs whose sum still exhausts disk; once this budget is exceeded the
+    /// fetch fails closed.  Default 512 MiB.
+    #[serde(default = "default_vcs_max_total_bytes")]
+    pub max_total_bytes: u64,
+    /// Maximum total number of files (blobs) that may be materialised across the
+    /// entire fetched tree (task 096 hardening, SEC-004).  Bounds an
+    /// adversarial tree that carries an enormous count of tiny files.  Once
+    /// exceeded the fetch fails closed.  Default 50_000.
+    #[serde(default = "default_vcs_max_total_files")]
+    pub max_total_files: u64,
 }
 
 fn default_vcs_fetch_timeout_secs() -> u64 {
@@ -358,6 +370,14 @@ fn default_vcs_max_blob_bytes() -> u64 {
     50 * 1024 * 1024
 }
 
+fn default_vcs_max_total_bytes() -> u64 {
+    512 * 1024 * 1024
+}
+
+fn default_vcs_max_total_files() -> u64 {
+    50_000
+}
+
 impl Default for VcsConfig {
     fn default() -> Self {
         Self {
@@ -365,6 +385,8 @@ impl Default for VcsConfig {
             denied_hosts: Vec::new(),
             fetch_timeout_secs: default_vcs_fetch_timeout_secs(),
             max_blob_bytes: default_vcs_max_blob_bytes(),
+            max_total_bytes: default_vcs_max_total_bytes(),
+            max_total_files: default_vcs_max_total_files(),
         }
     }
 }
@@ -629,6 +651,12 @@ fetch_timeout_secs = 30
 # Larger blobs are skipped with a warning and never read into memory, preventing
 # OOM on adversarially large files. Default 52428800 (50 MiB).
 max_blob_bytes = 52428800
+# Maximum TOTAL bytes materialised across the whole fetched tree (DoS cap).
+# Exceeding this fails the fetch closed. Default 536870912 (512 MiB).
+max_total_bytes = 536870912
+# Maximum TOTAL number of files materialised across the whole fetched tree
+# (DoS cap against a huge count of tiny files). Default 50000.
+max_total_files = 50000
 "#,
             version = dep_scan_version
         );
