@@ -40,6 +40,8 @@ ed25519-dalek = { version = "2.2.0", features = ["rand_core"] }
 # NamedTempFile uses O_CREAT|O_EXCL + mode 0600 on Unix, so no pre-existing
 # symlink can redirect writes. Promoted from dev-dependency to runtime dependency.
 tempfile = "3"
+# Task 084 — CycloneDX/SPDX SBOM generation: UUIDv4 for serialNumber / documentNamespace.
+uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
 # Ed25519 key generation for tests (uses OsRng from the rand crate ecosystem)

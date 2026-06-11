@@ -5,6 +5,7 @@ mod lockfile;
 mod osv;
 mod policy;
 mod registry;
+mod sbom;
 mod signed_note;
 mod sigstore_verify;
 mod types;
@@ -160,17 +161,17 @@ impl PackageRef {
 
 /// The result of checking a single package, suitable for JSON serialization.
 #[derive(Debug, Serialize)]
-struct CheckResult {
-    package: String,
-    version: String,
-    registry: String,
-    age_hours: Option<i64>,
-    result: String,
-    reason: Option<String>,
-    policies: Vec<PolicyDetail>,
+pub(crate) struct CheckResult {
+    pub(crate) package: String,
+    pub(crate) version: String,
+    pub(crate) registry: String,
+    pub(crate) age_hours: Option<i64>,
+    pub(crate) result: String,
+    pub(crate) reason: Option<String>,
+    pub(crate) policies: Vec<PolicyDetail>,
     /// Vulnerabilities found during the scan; used by the OSV render path.
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
-    vulns: Vec<VulnerabilityInfo>,
+    pub(crate) vulns: Vec<VulnerabilityInfo>,
 }
 
 /// Map a `RegistryType` to the OSV ecosystem string for use in OSV-format output.
@@ -901,14 +902,13 @@ async fn run_check(
             println!("{osv_output}");
         }
         OutputFormat::CycloneDx => {
-            return Err(anyhow::anyhow!(
-                "--format cyclonedx: not yet implemented — see tasks 084/085"
-            ));
+            let cdx =
+                sbom::render_cyclonedx(&results).context("Failed to render CycloneDX output")?;
+            println!("{cdx}");
         }
         OutputFormat::Spdx => {
-            return Err(anyhow::anyhow!(
-                "--format spdx: not yet implemented — see tasks 084/085"
-            ));
+            let spdx = sbom::render_spdx(&results).context("Failed to render SPDX output")?;
+            println!("{spdx}");
         }
         OutputFormat::Vex => {
             return Err(anyhow::anyhow!(
