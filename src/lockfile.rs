@@ -111,6 +111,63 @@ pub fn parse(path: &Path, format: Option<LockfileFormat>) -> Result<Vec<Lockfile
     }
 }
 
+/// Classify an npm `resolved` field value into a `DependencySource`.
+///
+/// Returns `Some(DependencySource::Git { .. })` when the resolved value indicates a git source:
+/// - `git+https://`, `git+ssh://`, `git+http://` prefixes (stripped of `git+`, `#fragment` as ref)
+/// - `github:user/repo#ref`, `gitlab:user/repo#ref`, `bitbucket:user/repo#ref` shorthands
+///
+/// Returns `None` when the resolved value is absent or not a JSON string (caller should skip entry).
+/// Returns `Some(DependencySource::Registry { registry: Npm })` for non-git resolved URLs.
+/// Degenerate git URLs (e.g. `git+https://`) are stored as-is rather than panicking.
+fn classify_npm_resolved(resolved_value: Option<&Value>) -> Option<DependencySource> {
+    let resolved_val = resolved_value?;
+    // If the resolved field is not a string, return None (skip the entry)
+    let resolved = resolved_val.as_str()?;
+
+    // Check for git+ scheme prefixes
+    for prefix in &["git+https://", "git+ssh://", "git+http://"] {
+        if resolved.starts_with(prefix) {
+            // Strip `git+` from the front (4 bytes)
+            let without_git_plus = &resolved[4..];
+            // Split on `#` to extract ref
+            let (url, ref_) = match without_git_plus.find('#') {
+                Some(idx) => (&without_git_plus[..idx], &without_git_plus[idx + 1..]),
+                None => (without_git_plus, ""),
+            };
+            return Some(DependencySource::Git {
+                url: url.to_string(),
+                ref_: ref_.to_string(),
+            });
+        }
+    }
+
+    // Check for shorthand forms: github:, gitlab:, bitbucket:
+    let shorthand_expansions: &[(&str, &str)] = &[
+        ("github:", "https://github.com/"),
+        ("gitlab:", "https://gitlab.com/"),
+        ("bitbucket:", "https://bitbucket.org/"),
+    ];
+    for (shorthand_prefix, canonical_base) in shorthand_expansions {
+        if let Some(path_and_ref) = resolved.strip_prefix(shorthand_prefix) {
+            let (path, ref_) = match path_and_ref.find('#') {
+                Some(idx) => (&path_and_ref[..idx], &path_and_ref[idx + 1..]),
+                None => (path_and_ref, ""),
+            };
+            let url = format!("{}{}", canonical_base, path);
+            return Some(DependencySource::Git {
+                url,
+                ref_: ref_.to_string(),
+            });
+        }
+    }
+
+    // Not a git URL — standard registry dep
+    Some(DependencySource::Registry {
+        registry: RegistryType::Npm,
+    })
+}
+
 /// Parse an npm package-lock.json string (v2/v3 `packages` format, with v1 `dependencies` fallback).
 pub fn parse_package_lock_json(content: &str) -> Result<Vec<LockfileDependency>> {
     let json: Value =
@@ -133,20 +190,33 @@ pub fn parse_package_lock_json(content: &str) -> Result<Vec<LockfileDependency>>
             if name.is_empty() {
                 continue;
             }
+
+            let resolved_field = value.get("resolved");
+            let source = match classify_npm_resolved(resolved_field) {
+                Some(s) => s,
+                // resolved is not a string type — skip this entry
+                None if resolved_field.is_some() => continue,
+                // No resolved field — fall through to version-based classification
+                None => DependencySource::Registry {
+                    registry: RegistryType::Npm,
+                },
+            };
+
+            // For git deps: emit regardless of version field.
+            // For registry deps: require a non-empty version.
             let version = value
                 .get("version")
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
-            if version.is_empty() {
+            if matches!(source, DependencySource::Registry { .. }) && version.is_empty() {
                 continue;
             }
+
             deps.push(LockfileDependency {
                 name,
                 version,
-                source: DependencySource::Registry {
-                    registry: RegistryType::Npm,
-                },
+                source,
             });
         }
         return Ok(deps);
@@ -156,20 +226,30 @@ pub fn parse_package_lock_json(content: &str) -> Result<Vec<LockfileDependency>>
     if let Some(dependencies) = json.get("dependencies").and_then(|d| d.as_object()) {
         let mut deps = Vec::new();
         for (name, value) in dependencies {
+            let resolved_field = value.get("resolved");
+            let source = match classify_npm_resolved(resolved_field) {
+                Some(s) => s,
+                // resolved is not a string type — skip this entry
+                None if resolved_field.is_some() => continue,
+                // No resolved field — fall through to version-based classification
+                None => DependencySource::Registry {
+                    registry: RegistryType::Npm,
+                },
+            };
+
             let version = value
                 .get("version")
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
-            if version.is_empty() {
+            if matches!(source, DependencySource::Registry { .. }) && version.is_empty() {
                 continue;
             }
+
             deps.push(LockfileDependency {
                 name: name.clone(),
                 version,
-                source: DependencySource::Registry {
-                    registry: RegistryType::Npm,
-                },
+                source,
             });
         }
         return Ok(deps);
@@ -957,5 +1037,405 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
                 registry: RegistryType::Go
             }
         );
+    }
+
+    // --- T-091 tests: npm lockfile git URL parser ---
+
+    // T-091-01: git+https:// resolved URL is recognised
+    #[test]
+    fn t091_01_git_https_resolved_url_recognised() {
+        let content = r#"{
+            "lockfileVersion": 3,
+            "packages": {
+                "": { "name": "root", "version": "1.0.0" },
+                "node_modules/mypkg": {
+                    "version": "1.0.0",
+                    "resolved": "git+https://github.com/user/repo.git#abc1234"
+                }
+            }
+        }"#;
+        let deps = parse_package_lock_json(content).unwrap();
+        assert_eq!(deps.len(), 1);
+        assert_eq!(
+            deps[0].source,
+            DependencySource::Git {
+                url: "https://github.com/user/repo.git".to_string(),
+                ref_: "abc1234".to_string(),
+            }
+        );
+    }
+
+    // T-091-02: git+ssh:// resolved URL is recognised
+    #[test]
+    fn t091_02_git_ssh_resolved_url_recognised() {
+        let content = r#"{
+            "lockfileVersion": 3,
+            "packages": {
+                "": { "name": "root", "version": "1.0.0" },
+                "node_modules/mypkg": {
+                    "version": "1.0.0",
+                    "resolved": "git+ssh://git@github.com/user/repo.git#abc1234"
+                }
+            }
+        }"#;
+        let deps = parse_package_lock_json(content).unwrap();
+        assert_eq!(deps.len(), 1);
+        assert_eq!(
+            deps[0].source,
+            DependencySource::Git {
+                url: "ssh://git@github.com/user/repo.git".to_string(),
+                ref_: "abc1234".to_string(),
+            }
+        );
+    }
+
+    // T-091-03: git+http:// resolved URL is recognised
+    #[test]
+    fn t091_03_git_http_resolved_url_recognised() {
+        let content = r#"{
+            "lockfileVersion": 3,
+            "packages": {
+                "": { "name": "root", "version": "1.0.0" },
+                "node_modules/mypkg": {
+                    "version": "1.0.0",
+                    "resolved": "git+http://git.example.com/org/repo#deadbeef"
+                }
+            }
+        }"#;
+        let deps = parse_package_lock_json(content).unwrap();
+        assert_eq!(deps.len(), 1);
+        assert_eq!(
+            deps[0].source,
+            DependencySource::Git {
+                url: "http://git.example.com/org/repo".to_string(),
+                ref_: "deadbeef".to_string(),
+            }
+        );
+    }
+
+    // T-091-04: github: shorthand is recognised and expanded
+    #[test]
+    fn t091_04_github_shorthand_recognised() {
+        let content = r#"{
+            "lockfileVersion": 3,
+            "packages": {
+                "": { "name": "root", "version": "1.0.0" },
+                "node_modules/mypkg": {
+                    "version": "1.0.0",
+                    "resolved": "github:user/repo#abc1234"
+                }
+            }
+        }"#;
+        let deps = parse_package_lock_json(content).unwrap();
+        assert_eq!(deps.len(), 1);
+        assert_eq!(
+            deps[0].source,
+            DependencySource::Git {
+                url: "https://github.com/user/repo".to_string(),
+                ref_: "abc1234".to_string(),
+            }
+        );
+    }
+
+    // T-091-05: gitlab: shorthand is recognised and expanded
+    #[test]
+    fn t091_05_gitlab_shorthand_recognised() {
+        let content = r#"{
+            "lockfileVersion": 3,
+            "packages": {
+                "": { "name": "root", "version": "1.0.0" },
+                "node_modules/mypkg": {
+                    "version": "1.0.0",
+                    "resolved": "gitlab:user/repo#abc1234"
+                }
+            }
+        }"#;
+        let deps = parse_package_lock_json(content).unwrap();
+        assert_eq!(deps.len(), 1);
+        assert_eq!(
+            deps[0].source,
+            DependencySource::Git {
+                url: "https://gitlab.com/user/repo".to_string(),
+                ref_: "abc1234".to_string(),
+            }
+        );
+    }
+
+    // T-091-06: bitbucket: shorthand is recognised and expanded
+    #[test]
+    fn t091_06_bitbucket_shorthand_recognised() {
+        let content = r#"{
+            "lockfileVersion": 3,
+            "packages": {
+                "": { "name": "root", "version": "1.0.0" },
+                "node_modules/mypkg": {
+                    "version": "1.0.0",
+                    "resolved": "bitbucket:user/repo#abc1234"
+                }
+            }
+        }"#;
+        let deps = parse_package_lock_json(content).unwrap();
+        assert_eq!(deps.len(), 1);
+        assert_eq!(
+            deps[0].source,
+            DependencySource::Git {
+                url: "https://bitbucket.org/user/repo".to_string(),
+                ref_: "abc1234".to_string(),
+            }
+        );
+    }
+
+    // T-091-07: Package name is preserved from the lockfile key
+    #[test]
+    fn t091_07_package_name_preserved() {
+        let content = r#"{
+            "lockfileVersion": 3,
+            "packages": {
+                "": { "name": "root", "version": "1.0.0" },
+                "node_modules/evil-pkg": {
+                    "version": "1.0.0",
+                    "resolved": "git+https://github.com/bad/evil#main"
+                }
+            }
+        }"#;
+        let deps = parse_package_lock_json(content).unwrap();
+        assert_eq!(deps.len(), 1);
+        assert_eq!(deps[0].name, "evil-pkg");
+    }
+
+    // T-091-08: Non-git resolved URL does not trigger git parsing
+    #[test]
+    fn t091_08_non_git_resolved_url_stays_registry() {
+        let content = r#"{
+            "lockfileVersion": 3,
+            "packages": {
+                "": { "name": "root", "version": "1.0.0" },
+                "node_modules/express": {
+                    "version": "4.18.2",
+                    "resolved": "https://registry.npmjs.org/express/-/express-4.18.2.tgz"
+                }
+            }
+        }"#;
+        let deps = parse_package_lock_json(content).unwrap();
+        assert_eq!(deps.len(), 1);
+        assert_eq!(
+            deps[0].source,
+            DependencySource::Registry {
+                registry: RegistryType::Npm
+            }
+        );
+    }
+
+    // T-091-09: Ref is extracted from the # fragment
+    #[test]
+    fn t091_09_ref_extracted_from_fragment() {
+        let content = r#"{
+            "lockfileVersion": 3,
+            "packages": {
+                "": { "name": "root", "version": "1.0.0" },
+                "node_modules/mypkg": {
+                    "version": "1.0.0",
+                    "resolved": "git+https://github.com/user/repo#abc1234def5678901234567890abcdef12345678"
+                }
+            }
+        }"#;
+        let deps = parse_package_lock_json(content).unwrap();
+        assert_eq!(deps.len(), 1);
+        assert_eq!(
+            deps[0].source.git_ref(),
+            Some("abc1234def5678901234567890abcdef12345678")
+        );
+    }
+
+    // T-091-10: URL without # fragment gets empty ref
+    #[test]
+    fn t091_10_url_without_fragment_empty_ref() {
+        let content = r#"{
+            "lockfileVersion": 3,
+            "packages": {
+                "": { "name": "root", "version": "1.0.0" },
+                "node_modules/mypkg": {
+                    "version": "1.0.0",
+                    "resolved": "git+https://github.com/user/repo"
+                }
+            }
+        }"#;
+        let deps = parse_package_lock_json(content).unwrap();
+        assert_eq!(deps.len(), 1);
+        assert_eq!(
+            deps[0].source,
+            DependencySource::Git {
+                url: "https://github.com/user/repo".to_string(),
+                ref_: "".to_string(),
+            }
+        );
+    }
+
+    // T-091-11: # in URL but no ref after it gets empty ref
+    #[test]
+    fn t091_11_hash_with_no_ref_gives_empty_ref() {
+        let content = r#"{
+            "lockfileVersion": 3,
+            "packages": {
+                "": { "name": "root", "version": "1.0.0" },
+                "node_modules/mypkg": {
+                    "version": "1.0.0",
+                    "resolved": "git+https://github.com/user/repo#"
+                }
+            }
+        }"#;
+        let deps = parse_package_lock_json(content).unwrap();
+        assert_eq!(deps.len(), 1);
+        assert_eq!(deps[0].source.git_ref(), Some(""));
+    }
+
+    // T-091-12: Entry with empty version but git resolved is no longer dropped
+    #[test]
+    fn t091_12_empty_version_git_resolved_not_dropped() {
+        let content = r#"{
+            "lockfileVersion": 3,
+            "packages": {
+                "": { "name": "root", "version": "1.0.0" },
+                "node_modules/mypkg": {
+                    "version": "",
+                    "resolved": "git+https://github.com/user/repo#abc"
+                }
+            }
+        }"#;
+        let deps = parse_package_lock_json(content).unwrap();
+        assert_eq!(deps.len(), 1);
+        assert!(matches!(deps[0].source, DependencySource::Git { .. }));
+    }
+
+    // T-091-13: Entry with placeholder version and git resolved emits Git dep, not Registry dep
+    #[test]
+    fn t091_13_placeholder_version_git_resolved_emits_git() {
+        let content = r#"{
+            "lockfileVersion": 3,
+            "packages": {
+                "": { "name": "root", "version": "1.0.0" },
+                "node_modules/mypkg": {
+                    "version": "1.0.0",
+                    "resolved": "git+https://github.com/user/repo#abc"
+                }
+            }
+        }"#;
+        let deps = parse_package_lock_json(content).unwrap();
+        assert_eq!(deps.len(), 1);
+        assert!(matches!(deps[0].source, DependencySource::Git { .. }));
+    }
+
+    // T-091-14: Lockfile with both registry and git deps produces both kinds
+    #[test]
+    fn t091_14_mixed_lockfile_produces_both_kinds() {
+        let content = r#"{
+            "lockfileVersion": 3,
+            "packages": {
+                "": { "name": "root", "version": "1.0.0" },
+                "node_modules/express": {
+                    "version": "4.18.2",
+                    "resolved": "https://registry.npmjs.org/express/-/express-4.18.2.tgz"
+                },
+                "node_modules/evil-pkg": {
+                    "version": "1.0.0",
+                    "resolved": "git+https://github.com/bad/evil#main"
+                }
+            }
+        }"#;
+        let deps = parse_package_lock_json(content).unwrap();
+        assert_eq!(deps.len(), 2);
+
+        let registry_deps: Vec<_> = deps
+            .iter()
+            .filter(|d| matches!(d.source, DependencySource::Registry { .. }))
+            .collect();
+        let git_deps: Vec<_> = deps
+            .iter()
+            .filter(|d| matches!(d.source, DependencySource::Git { .. }))
+            .collect();
+        assert_eq!(registry_deps.len(), 1);
+        assert_eq!(git_deps.len(), 1);
+    }
+
+    // T-091-15: v1 dependencies format also parses git resolved URLs
+    #[test]
+    fn t091_15_v1_dependencies_format_parses_git_resolved() {
+        let content = r#"{
+            "name": "my-project",
+            "version": "1.0.0",
+            "lockfileVersion": 1,
+            "dependencies": {
+                "mypkg": {
+                    "version": "1.0.0",
+                    "resolved": "git+https://github.com/user/repo#abc"
+                }
+            }
+        }"#;
+        let deps = parse_package_lock_json(content).unwrap();
+        assert_eq!(deps.len(), 1);
+        assert_eq!(
+            deps[0].source,
+            DependencySource::Git {
+                url: "https://github.com/user/repo".to_string(),
+                ref_: "abc".to_string(),
+            }
+        );
+    }
+
+    // T-091-16: Scoped package with git resolved preserves scoped name
+    #[test]
+    fn t091_16_scoped_package_git_resolved_preserves_name() {
+        let content = r#"{
+            "lockfileVersion": 3,
+            "packages": {
+                "": { "name": "root", "version": "1.0.0" },
+                "node_modules/@myorg/mylib": {
+                    "version": "1.0.0",
+                    "resolved": "git+https://github.com/myorg/mylib#abc"
+                }
+            }
+        }"#;
+        let deps = parse_package_lock_json(content).unwrap();
+        assert_eq!(deps.len(), 1);
+        assert_eq!(deps[0].name, "@myorg/mylib");
+    }
+
+    // T-091-17: Truncated git URL (no host, no path) is stored as-is, not panicked
+    #[test]
+    fn t091_17_truncated_git_url_stored_as_is_no_panic() {
+        let content = r#"{
+            "lockfileVersion": 3,
+            "packages": {
+                "": { "name": "root", "version": "1.0.0" },
+                "node_modules/mypkg": {
+                    "version": "1.0.0",
+                    "resolved": "git+https://"
+                }
+            }
+        }"#;
+        // Must not panic
+        let deps = parse_package_lock_json(content).unwrap();
+        assert_eq!(deps.len(), 1);
+        assert!(matches!(deps[0].source, DependencySource::Git { .. }));
+        // The url stored is whatever follows git+
+        assert_eq!(deps[0].source.git_url(), Some("https://"));
+    }
+
+    // T-091-18: resolved value is not a string (JSON number) — entry is skipped, no panic
+    #[test]
+    fn t091_18_resolved_not_string_entry_skipped_no_panic() {
+        let content = r#"{
+            "lockfileVersion": 3,
+            "packages": {
+                "": { "name": "root", "version": "1.0.0" },
+                "node_modules/mypkg": {
+                    "version": "1.0.0",
+                    "resolved": 12345
+                }
+            }
+        }"#;
+        // Must not panic; entry with non-string resolved is skipped
+        let deps = parse_package_lock_json(content).unwrap();
+        assert_eq!(deps.len(), 0);
     }
 }
