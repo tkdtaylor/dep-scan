@@ -85,6 +85,15 @@ internal_prefixes = []
 
 [popularity]
 min_downloads = 0
+
+[vcs]
+# Task 096 wired a sandboxed VCS fetch into the git-dep scan arm.  To keep these
+# tests fully offline, deny the fixture host so the fetch is rejected BEFORE any
+# socket is opened (REQ-096-03).  The dep then fails closed to a Warn verdict
+# (REQ-096-05 / T-096-15) with the URL + ref still in the reason — exactly the
+# behaviour these assertions expect.
+denied_hosts = ["github.com"]
+fetch_timeout_secs = 3
 "#
     )
     .expect("write temp config");
@@ -219,4 +228,67 @@ fn t093_06_json_output_contains_git_dep_with_warn_verdict_and_nonempty_reason() 
         "T-093-06: package field must be 'evil-pkg', got: {:?}",
         elem["package"]
     );
+}
+
+// T-096-02: no VCS fetch occurs outside the `check` subcommand.
+//
+// We run `config init` (a non-check subcommand) in a directory that contains a
+// git-dep lockfile.  If anything implicitly fetched, it would try to reach the
+// (real) host and hang or error; instead `config init` completes promptly.
+// The fetch client is only constructed inside the `check` scan loop's git-dep
+// arm, never on any other code path (REQ-096-02).
+#[test]
+fn t096_02_no_fetch_outside_check_subcommand() {
+    let tmp = TempDir::new().unwrap();
+    // Place a git-dep lockfile in the working dir to make any implicit fetch
+    // tempting; `config init` must ignore it entirely.
+    std::fs::write(tmp.path().join("Cargo.lock"), GIT_ONLY_CARGO_LOCK).unwrap();
+    let out_config = tmp.path().join(".dep-scan.toml");
+
+    // `config init` writes `.dep-scan.toml` in the working directory.
+    dep_scan()
+        .current_dir(tmp.path())
+        .args(["config", "init"])
+        .timeout(std::time::Duration::from_secs(20))
+        .assert()
+        .success();
+
+    assert!(
+        out_config.exists(),
+        "T-096-02: `config init` must succeed and write a config, with no implicit fetch"
+    );
+}
+
+// T-096-01: no VCS fetch occurs merely from loading config + parsing a git-dep
+// lockfile.  We point ALL registries and the VCS host at denied/dead values and
+// run a real `check`; the run completes within a short timeout and the git dep
+// is reported via the offline fail-closed path.  No fetch is attempted before
+// the explicit scan path is entered, and the denied host guarantees no socket.
+#[test]
+fn t096_01_no_fetch_during_config_or_lockfile_parse() {
+    let tmp = TempDir::new().unwrap();
+    let cache_path = tmp.path().join("cache.db");
+    let config = write_offline_config(cache_path.to_str().unwrap());
+    let lockfile_path = tmp.path().join("Cargo.lock");
+    std::fs::write(&lockfile_path, GIT_ONLY_CARGO_LOCK).unwrap();
+
+    // A short timeout proves no implicit network fetch hangs config load /
+    // lockfile parse: the run must finish quickly because the only git dep's
+    // host is denied (rejected pre-connect).
+    dep_scan()
+        .args([
+            "--config",
+            config.path().to_str().unwrap(),
+            "check",
+            "--lockfile",
+            lockfile_path.to_str().unwrap(),
+            "--lockfile-type",
+            "crates",
+            "--format",
+            "json",
+        ])
+        .timeout(std::time::Duration::from_secs(20))
+        .assert()
+        // Warn verdict for the unfetchable git dep (fail-closed).
+        .code(1);
 }

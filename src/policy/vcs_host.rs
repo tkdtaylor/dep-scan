@@ -209,6 +209,7 @@ mod tests {
             vcs: VcsConfig {
                 allowed_hosts: allowed.into_iter().map(|s| s.to_string()).collect(),
                 denied_hosts: denied.into_iter().map(|s| s.to_string()).collect(),
+                ..VcsConfig::default()
             },
             ..Config::default()
         }
