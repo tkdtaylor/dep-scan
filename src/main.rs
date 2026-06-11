@@ -11,6 +11,7 @@ mod sigstore_verify;
 mod types;
 mod typosquat;
 mod validation;
+mod vex;
 
 use std::path::Path;
 use std::process;
@@ -352,6 +353,39 @@ fn run_config(config_path: Option<&Path>, action: ConfigAction) -> Result<i32> {
             Config::write_default(target)?;
             println!("Created {}", target.display());
             Ok(0)
+        }
+    }
+}
+
+/// Render a slice of `CheckResult`s according to the requested output format.
+///
+/// This is the pure format→renderer dispatch used by `run_check`.  Extracted as a
+/// standalone function so that tests can exercise the dispatch path without making
+/// network calls.
+///
+/// Returns `Ok(String)` with the rendered output, or `Err` if serialization fails.
+/// The `Native` variant is *not* handled here — it writes a multi-line table directly
+/// to stdout in `run_check` because it uses `println!` inside a `for` loop.  All other
+/// formats produce a single serialized string.
+pub(crate) fn render_results(
+    results: &[CheckResult],
+    output_format: &OutputFormat,
+) -> Result<String> {
+    match output_format {
+        OutputFormat::Json => {
+            serde_json::to_string_pretty(results).context("Failed to serialize results to JSON")
+        }
+        OutputFormat::Osv => Ok(render_osv(results)),
+        OutputFormat::CycloneDx => {
+            sbom::render_cyclonedx(results).context("Failed to render CycloneDX output")
+        }
+        OutputFormat::Spdx => sbom::render_spdx(results).context("Failed to render SPDX output"),
+        OutputFormat::Vex => vex::render_vex(results).context("Failed to render VEX output"),
+        OutputFormat::Native => {
+            // Native format is rendered inline in run_check (multi-line table, println!).
+            // This branch is unreachable when called from run_check, but is a valid
+            // no-op for tests that only need to exercise the other paths.
+            Ok(String::new())
         }
     }
 }
@@ -892,29 +926,6 @@ async fn run_check(
 
     // Output results
     match output_format {
-        OutputFormat::Json => {
-            let json = serde_json::to_string_pretty(&results)
-                .context("Failed to serialize results to JSON")?;
-            println!("{json}");
-        }
-        OutputFormat::Osv => {
-            let osv_output = render_osv(&results);
-            println!("{osv_output}");
-        }
-        OutputFormat::CycloneDx => {
-            let cdx =
-                sbom::render_cyclonedx(&results).context("Failed to render CycloneDX output")?;
-            println!("{cdx}");
-        }
-        OutputFormat::Spdx => {
-            let spdx = sbom::render_spdx(&results).context("Failed to render SPDX output")?;
-            println!("{spdx}");
-        }
-        OutputFormat::Vex => {
-            return Err(anyhow::anyhow!(
-                "--format vex: not yet implemented — see tasks 084/085"
-            ));
-        }
         OutputFormat::Native => {
             // Human-readable table
             println!("{:<20} {:<12} {:<10} Result", "Package", "Version", "Age");
@@ -958,6 +969,11 @@ async fn run_check(
                     println!("{detail_display}");
                 }
             }
+        }
+        _ => {
+            // All other formats are handled by the pure render_results dispatcher.
+            let rendered = render_results(&results, &output_format)?;
+            println!("{rendered}");
         }
     }
 
@@ -2425,69 +2441,85 @@ mod tests {
         );
     }
 
-    /// Helper for T-083-20..22: simulate the render dispatch for unimplemented formats.
-    ///
-    /// Mirrors the `OutputFormat::CycloneDx/Spdx/Vex` branches in `run_check`, which
-    /// return `Err(anyhow::anyhow!(...))`.  Returns the error message string so the
-    /// tests can assert on its content without a network or filesystem dependency.
-    fn render_unimplemented(format: OutputFormat) -> anyhow::Error {
-        match format {
-            OutputFormat::CycloneDx => {
-                anyhow::anyhow!("--format cyclonedx: not yet implemented — see tasks 084/085")
-            }
-            OutputFormat::Spdx => {
-                anyhow::anyhow!("--format spdx: not yet implemented — see tasks 084/085")
-            }
-            OutputFormat::Vex => {
-                anyhow::anyhow!("--format vex: not yet implemented — see tasks 084/085")
-            }
-            _ => panic!("render_unimplemented called with an implemented format"),
-        }
-    }
-
-    // T-083-20: `--format cyclonedx` render returns an error containing "not yet implemented"
-    // and "cyclonedx".
+    // T-083-20: `--format cyclonedx` dispatch via render_results produces valid JSON
+    // (the stub was replaced by task 084; this verifies the real dispatch path).
     #[test]
-    fn t083_20_cyclonedx_render_returns_not_yet_implemented_error() {
-        let err = render_unimplemented(OutputFormat::CycloneDx);
-        let err_msg = err.to_string();
+    fn t083_20_cyclonedx_dispatch_produces_valid_json() {
+        let results = vec![make_check_result(
+            "lodash",
+            "4.17.21",
+            "npm",
+            "pass",
+            vec![],
+        )];
+        let output = render_results(&results, &OutputFormat::CycloneDx)
+            .expect("T-083-20: render_results for CycloneDX must succeed");
+        let _: serde_json::Value =
+            serde_json::from_str(&output).expect("T-083-20: CycloneDX output must be valid JSON");
         assert!(
-            err_msg.contains("not yet implemented"),
-            "T-083-20: cyclonedx error must contain 'not yet implemented', got: {err_msg}"
-        );
-        assert!(
-            err_msg.to_lowercase().contains("cyclonedx"),
-            "T-083-20: cyclonedx error must contain 'cyclonedx', got: {err_msg}"
+            !output.contains("not yet implemented"),
+            "T-083-20: CycloneDX output must not contain 'not yet implemented', got: {output:.80}"
         );
     }
 
-    // T-083-21: `--format spdx` exits with a non-zero code and clear error
+    // T-083-21: `--format spdx` dispatch via render_results produces valid JSON
+    // (the stub was replaced by task 084; this verifies the real dispatch path).
     #[test]
-    fn t083_21_spdx_render_returns_not_yet_implemented_error() {
-        let err = render_unimplemented(OutputFormat::Spdx);
-        let err_msg = err.to_string();
+    fn t083_21_spdx_dispatch_produces_valid_json() {
+        let results = vec![make_check_result(
+            "lodash",
+            "4.17.21",
+            "npm",
+            "pass",
+            vec![],
+        )];
+        let output = render_results(&results, &OutputFormat::Spdx)
+            .expect("T-083-21: render_results for SPDX must succeed");
+        let _: serde_json::Value =
+            serde_json::from_str(&output).expect("T-083-21: SPDX output must be valid JSON");
         assert!(
-            err_msg.contains("not yet implemented"),
-            "T-083-21: spdx error must contain 'not yet implemented', got: {err_msg}"
-        );
-        assert!(
-            err_msg.to_lowercase().contains("spdx"),
-            "T-083-21: spdx error must contain 'spdx', got: {err_msg}"
+            !output.contains("not yet implemented"),
+            "T-083-21: SPDX output must not contain 'not yet implemented', got: {output:.80}"
         );
     }
 
-    // T-083-22: `--format vex` exits with a non-zero code and clear error
+    // T-083-22 / T-085-14: `--format vex` dispatch via render_results produces valid
+    // OpenVEX JSON — NOT the "not yet implemented" stub.
+    // This verifies the REAL format→renderer dispatch maps OutputFormat::Vex to render_vex.
     #[test]
-    fn t083_22_vex_render_returns_not_yet_implemented_error() {
-        let err = render_unimplemented(OutputFormat::Vex);
-        let err_msg = err.to_string();
-        assert!(
-            err_msg.contains("not yet implemented"),
-            "T-083-22: vex error must contain 'not yet implemented', got: {err_msg}"
+    fn t083_22_t085_14_vex_dispatch_produces_openvex_json() {
+        // T-083-22 / T-085-14
+        let results = vec![make_check_result(
+            "lodash",
+            "4.17.21",
+            "npm",
+            "pass",
+            vec![],
+        )];
+        let output = render_results(&results, &OutputFormat::Vex)
+            .expect("T-083-22/T-085-14: render_results for VEX must succeed");
+
+        // Must be valid JSON.
+        let v: serde_json::Value = serde_json::from_str(&output)
+            .expect("T-083-22/T-085-14: VEX output must be valid JSON");
+
+        // Must have the OpenVEX @context field — proves render_vex was called, not a stub.
+        assert_eq!(
+            v["@context"].as_str(),
+            Some("https://openvex.dev/ns/v0.2.0"),
+            "T-083-22/T-085-14: dispatch must route VEX to render_vex (OpenVEX @context expected)"
         );
+
+        // Must have a statements array.
         assert!(
-            err_msg.to_lowercase().contains("vex"),
-            "T-083-22: vex error must contain 'vex', got: {err_msg}"
+            v["statements"].is_array(),
+            "T-083-22/T-085-14: VEX output must have a 'statements' array"
+        );
+
+        // Must NOT contain the old stub message.
+        assert!(
+            !output.contains("not yet implemented"),
+            "T-083-22/T-085-14: VEX output must not contain 'not yet implemented'"
         );
     }
 
