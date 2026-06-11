@@ -107,7 +107,7 @@
 | 089 | Public-key export for consumers (ADR 007 point 3) | 089-pubkey-export-test-spec.md | 19/19 | ✅ (spec-verifier APPROVE after T-089-11/13 error-message assertions added + PEM-type detection; ed25519_keyid reused; runtime export-pubkey verified; cargo test/clippy/fmt clean) |
 | 090 | Dependency source model (`DependencySource` enum) (ADR 008 piece 1 — data model) | 090-dependency-source-model-test-spec.md | 15/15 | ✅ (spec-verifier APPROVE after T-090-13 made a real assertion via extracted classify_dep_routing helper; breaking registry→source migration verified; cargo test/clippy/fmt clean) |
 | 091 | npm lockfile git URL parser (ADR 008 piece 1 — npm) | 091-npm-git-url-parser-test-spec.md | 18/19 (T-091-19 is tooling gate) | ✅ (spec-verifier APPROVE — all 19 real assertions, v1+v2/v3 formats, no hardcoded registry URLs; cargo test/clippy/fmt clean) |
-| 092 | Cargo lockfile git source parser (ADR 008 piece 1 — Cargo) | 092-cargo-git-source-parser-test-spec.md | 16/16 | 🟡 (L4: cargo test 880 passed + clippy clean + fmt clean; classify_cargo_source helper, parse_cargo_lock updated; T-092-01 through T-092-16 all pass) |
+| 092 | Cargo lockfile git source parser (ADR 008 piece 1 — Cargo) | 092-cargo-git-source-parser-test-spec.md | 16/16 | ✅ (spec-verifier APPROVE — all 16 real assertions; query-string-in-url vs #fragment-as-ref correct; cargo test/clippy/fmt clean) |
 | 093 | Surface git deps in scan output (ADR 008 piece 1 — visibility deliverable) | 093-surface-git-deps-in-scan-output-test-spec.md | 0/13 | ❌ |
 | 094 | Mutable-ref policy (ADR 008 piece 3) | 094-mutable-ref-policy-test-spec.md | 0/23 | ❌ |
 | 095 | VCS host policy configuration (ADR 008 piece 2 — config) | 095-vcs-host-policy-config-test-spec.md | 0/22 | ❌ |
