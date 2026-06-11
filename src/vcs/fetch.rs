@@ -188,6 +188,22 @@ impl FetchedTree {
     fn root(&self) -> PathBuf {
         self._temp.path().join("materialised")
     }
+
+    /// Construct a `FetchedTree` from in-memory `(path, content)` pairs, backed by
+    /// an empty throwaway temp dir.  Test-only constructor used to exercise
+    /// consumers of the tree (e.g. the task-097 git content-hash) without
+    /// performing a real network fetch.
+    #[cfg(test)]
+    pub(crate) fn from_files_for_test(files: Vec<(PathBuf, Vec<u8>)>) -> Self {
+        Self {
+            _temp: TempDir::new().expect("temp dir for test tree"),
+            files: files
+                .into_iter()
+                .map(|(path, content)| FetchedFileOwned { path, content })
+                .collect(),
+            diagnostics: Vec::new(),
+        }
+    }
 }
 
 /// A sandboxed, read-only VCS fetch client.

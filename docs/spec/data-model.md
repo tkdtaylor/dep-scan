@@ -35,15 +35,17 @@ Not in this file:
 field_name           type   nullable   notes
 ─────────────────────────────────────────────
 name                 TEXT   no         Package name, exactly as supplied
-version              TEXT   no         Resolved version, never the string "latest" (task 038)
-registry             TEXT   no         Lowercase: npm | pypi | crates | go
+version              TEXT   no         Resolved version, never the string "latest" (task 038); for git rows: the full commit SHA (task 097)
+registry             TEXT   no         Lowercase: npm | pypi | crates | go | git
 result               TEXT   no         Aggregate verdict: pass | warn | block
 scanned_at           TEXT   no         RFC 3339 UTC timestamp
-content_hash         TEXT   yes        <algo>:<hex> — see Content-hash rules
+content_hash         TEXT   yes        <algo>:<hex> — see Content-hash rules; for git rows: sha256 over the fetched tree (task 097)
 provenance_identity  TEXT   yes        Verified OIDC subject (npm/PyPI) or "sum.golang.org" (Go)
+source_kind          TEXT   yes        "git" for git-sourced rows (task 097); NULL for registry and legacy rows
 ```
 
-- **Identity:** composite primary key `(name, version, registry)`.
+- **Identity:** composite primary key `(name, version, registry)`. Git-sourced rows use the slot `registry = "git"` with `version = commit_sha` (task 097); the `"git"` slot does not collide with any `RegistryType` string.
+- **Git source cacheability (task 097):** only **pinned commit SHAs** are cached — an immutable SHA uniquely identifies the fetched tree. **Mutable refs** (branch/tag/short-hash/empty, per `classify_ref` task 094) are **never** written; every scan re-fetches. Git rows are gated by the same content-hash decision matrix below: a missing/`sha1:`/mismatched `content_hash` forces a re-fetch (fail-closed).
 - **Lifecycle:** rows are written after every scan (B-021). Invalidated and re-written on content-hash mismatch. Deleted only via cache file removal or manual SQL.
 - **Relationships:** none — flat table.
 - **Indexes:** primary key index covers all current lookup patterns. No secondary indexes.
@@ -71,6 +73,7 @@ Migration history:
 - Initial schema (task 007): `(name, version, registry, result, scanned_at)`.
 - Task 029: added `content_hash TEXT NULL`.
 - Task 032: added `provenance_identity TEXT NULL`.
+- Task 097: added `source_kind TEXT NULL` (`"git"` for git-sourced rows, NULL for registry/legacy rows). Existing registry rows remain valid with no backfill.
 
 ---
 

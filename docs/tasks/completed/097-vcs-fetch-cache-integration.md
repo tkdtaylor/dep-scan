@@ -1,6 +1,6 @@
 # Task 097 — VCS fetch cache integration
 
-**Status:** backlog
+**Status:** completed
 **Depends on:** 090 (source model), 096 (VCS fetch client), 007 (SQLite cache)
 **ADR:** 008 (piece 2 — cache open question: key for git sources, mutable-ref
          cacheability)

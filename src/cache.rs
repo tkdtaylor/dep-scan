@@ -26,6 +26,10 @@ pub struct CacheEntry {
     /// registry does not (yet) publish one, or because the verification could
     /// not be completed.
     pub provenance_identity: Option<String>,
+    /// Provenance of the row (task 097):
+    ///   - `Some("git")` for git-sourced rows keyed `(name, commit_sha, "git")`,
+    ///   - `None` for registry-sourced rows and every legacy/pre-097 row.
+    pub source_kind: Option<String>,
 }
 
 /// Local SQLite cache for storing scan results so already-scanned packages
@@ -149,6 +153,22 @@ impl Cache {
             )?;
         }
 
+        // Additive migration (task 097): add source_kind column.
+        //
+        // Git-sourced cache rows (ADR 008 piece 2) are stored in the same
+        // `scanned_packages` table, keyed `(name, commit_sha, "git")`.  The
+        // `source_kind` column records the provenance of a row explicitly:
+        // `"git"` for git-sourced rows, NULL for registry-sourced rows (which is
+        // also what every legacy/pre-097 row carries).  Keeping this additive and
+        // nullable means existing registry rows remain valid with no backfill —
+        // the column simply reads back as NULL for them (T-097-06/08).  The
+        // migration is idempotent: the column is only added when absent
+        // (T-097-07), mirroring the content_hash / provenance_identity
+        // migrations above.
+        if !existing_columns.iter().any(|n| n == "source_kind") {
+            conn.execute_batch("ALTER TABLE scanned_packages ADD COLUMN source_kind TEXT;")?;
+        }
+
         Ok(Self { conn })
     }
 
@@ -163,7 +183,7 @@ impl Cache {
     /// Returns `None` if no entry exists for the given key.
     pub fn lookup(&self, name: &str, version: &str, registry: &str) -> Result<Option<CacheEntry>> {
         let mut stmt = self.conn.prepare(
-            "SELECT result, scanned_at, content_hash, provenance_identity
+            "SELECT result, scanned_at, content_hash, provenance_identity, source_kind
              FROM scanned_packages
              WHERE name = ?1 AND version = ?2 AND registry = ?3",
         )?;
@@ -174,6 +194,7 @@ impl Cache {
                 scanned_at: row.get(1)?,
                 content_hash: row.get(2)?,
                 provenance_identity: row.get(3)?,
+                source_kind: row.get(4)?,
             })
         })?;
 
@@ -203,10 +224,12 @@ impl Cache {
         provenance_identity: Option<&str>,
     ) -> Result<()> {
         let scanned_at = Utc::now().to_rfc3339();
+        // Registry-sourced rows carry source_kind = NULL (matches legacy rows).
         self.conn.execute(
             "INSERT OR REPLACE INTO scanned_packages
-             (name, version, registry, result, scanned_at, content_hash, provenance_identity)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+             (name, version, registry, result, scanned_at, content_hash, provenance_identity,
+              source_kind)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL)",
             rusqlite::params![
                 name,
                 version,
@@ -216,6 +239,39 @@ impl Cache {
                 content_hash,
                 provenance_identity
             ],
+        )?;
+        Ok(())
+    }
+
+    /// Insert or update a git-sourced cache entry (task 097, ADR 008 piece 2).
+    ///
+    /// Git rows are keyed `(name, commit_sha, "git")`: the `commit_sha` is the
+    /// full pinned commit hash (an immutable identifier that uniquely names the
+    /// fetched tree), and the registry slot is the literal `"git"`, which does
+    /// not collide with any `RegistryType` string (npm/pypi/crates/go).
+    ///
+    /// `content_hash` is the digest of the fetched tree (`<algo>:<hex>`); it
+    /// feeds the task-030 hash-verify gate on the next lookup so a tampered
+    /// cache row is rejected and the dep re-fetched (REQ-097-04, fail-closed).
+    ///
+    /// Callers MUST NOT invoke this for mutable refs — a mutable branch name does
+    /// not uniquely identify a tree, so caching it would serve stale/poisoned
+    /// content (REQ-097-02).  The mutable-vs-pinned decision lives in the scan
+    /// loop via `classify_ref` (task 094).
+    pub fn insert_git(
+        &self,
+        name: &str,
+        commit_sha: &str,
+        result: &str,
+        content_hash: Option<&str>,
+    ) -> Result<()> {
+        let scanned_at = Utc::now().to_rfc3339();
+        self.conn.execute(
+            "INSERT OR REPLACE INTO scanned_packages
+             (name, version, registry, result, scanned_at, content_hash, provenance_identity,
+              source_kind)
+             VALUES (?1, ?2, 'git', ?3, ?4, ?5, NULL, 'git')",
+            rusqlite::params![name, commit_sha, result, scanned_at, content_hash],
         )?;
         Ok(())
     }
@@ -1507,4 +1563,231 @@ mod tests {
     //   `cargo test cache` which includes insert/lookup/invalidate/clear tests above.
     // T-059-15: `cargo test`, `cargo clippy --all-targets -- -D warnings`, and
     //   `cargo fmt --check` all pass — verified by the pre-commit gate.
+
+    // ── T-097 tests — VCS fetch cache integration (ADR 008 piece 2) ─────────────
+
+    const SHA1_PIN: &str = "a3b5c7d9e1f2a3b5c7d9e1f2a3b5c7d9e1f2a3b5";
+
+    // T-097-01: A pinned-SHA git dep stores under key (name, commit_sha, "git").
+    #[test]
+    fn t097_01_insert_git_keys_by_name_sha_git() {
+        let cache = Cache::in_memory().unwrap();
+        cache
+            .insert_git("pkg-name", SHA1_PIN, "pass", Some("sha256:deadbeef"))
+            .unwrap();
+
+        let entry = cache
+            .lookup("pkg-name", SHA1_PIN, "git")
+            .unwrap()
+            .expect("T-097-01: git entry should be looked up by (name, sha, \"git\")");
+        assert_eq!(entry.result, "pass");
+        assert_eq!(entry.source_kind, Some("git".to_string()));
+        assert_eq!(entry.content_hash, Some("sha256:deadbeef".to_string()));
+    }
+
+    // T-097-05: The "git" registry slot does not collide with any RegistryType
+    // string.  A registry crate `foo`@`abc...` and a git dep `foo`@`abc...` are
+    // distinct rows.
+    #[test]
+    fn t097_05_git_slot_does_not_collide_with_registry() {
+        let cache = Cache::in_memory().unwrap();
+        // A crates.io row and a git row that share name and version string.
+        cache
+            .insert(
+                "foo",
+                SHA1_PIN,
+                "crates",
+                "block",
+                Some("sha256:aaaa"),
+                None,
+            )
+            .unwrap();
+        cache
+            .insert_git("foo", SHA1_PIN, "pass", Some("sha256:bbbb"))
+            .unwrap();
+
+        let crates_entry = cache.lookup("foo", SHA1_PIN, "crates").unwrap().unwrap();
+        let git_entry = cache.lookup("foo", SHA1_PIN, "git").unwrap().unwrap();
+        assert_eq!(
+            crates_entry.result, "block",
+            "T-097-05: crates row must be independent of the git row"
+        );
+        assert_eq!(
+            git_entry.result, "pass",
+            "T-097-05: git row must be independent of the crates row"
+        );
+        // Confirm "git" is none of the RegistryType strings.
+        for reg in ["npm", "pypi", "crates", "go"] {
+            assert_ne!(
+                reg, "git",
+                "T-097-05: \"git\" slot must not equal any RegistryType string"
+            );
+        }
+    }
+
+    // T-097-06: An existing cache DB with no git entries is not corrupted by the
+    // 097 migration; pre-existing registry entries remain readable.
+    #[test]
+    fn t097_06_existing_registry_entries_survive_migration() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("t097_06.db");
+
+        // Pre-097 schema: has content_hash + provenance_identity but no source_kind.
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE scanned_packages (
+                    name                TEXT NOT NULL,
+                    version             TEXT NOT NULL,
+                    registry            TEXT NOT NULL,
+                    result              TEXT NOT NULL,
+                    scanned_at          TEXT NOT NULL,
+                    content_hash        TEXT,
+                    provenance_identity TEXT,
+                    PRIMARY KEY (name, version, registry)
+                );",
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO scanned_packages
+                 (name, version, registry, result, scanned_at, content_hash)
+                 VALUES ('lodash', '4.17.21', 'npm', 'pass',
+                         '2025-01-01T00:00:00Z', 'sha512:abcd')",
+                [],
+            )
+            .unwrap();
+        }
+
+        // Run the 097 migration via Cache::new.
+        let cache = Cache::new(&db_path).expect("T-097-06: migration should succeed");
+
+        let entry = cache
+            .lookup("lodash", "4.17.21", "npm")
+            .unwrap()
+            .expect("T-097-06: pre-existing registry row must survive migration");
+        assert_eq!(entry.result, "pass");
+        assert_eq!(entry.content_hash, Some("sha512:abcd".to_string()));
+        assert_eq!(
+            entry.source_kind, None,
+            "T-097-06: legacy registry row must read source_kind = None"
+        );
+    }
+
+    // T-097-07: The 097 schema migration is idempotent.
+    #[test]
+    fn t097_07_migration_is_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("t097_07.db");
+
+        // First open creates the table with source_kind already present.
+        {
+            let cache = Cache::new(&db_path).unwrap();
+            cache
+                .insert_git("g", SHA1_PIN, "warn", Some("sha256:cafe"))
+                .unwrap();
+        }
+        // Second open must not error (no duplicate source_kind column).
+        let cache = Cache::new(&db_path).expect("T-097-07: second open must not error");
+        // The git row is still intact and unchanged.
+        let entry = cache.lookup("g", SHA1_PIN, "git").unwrap().unwrap();
+        assert_eq!(
+            entry.result, "warn",
+            "T-097-07: git row must be unchanged after a second migration pass"
+        );
+        assert_eq!(entry.content_hash, Some("sha256:cafe".to_string()));
+    }
+
+    // T-097-08: The migration is additive — it adds a nullable column and does
+    // not require backfill of existing rows.
+    #[test]
+    fn t097_08_source_kind_column_is_additive_nullable() {
+        let cache = Cache::in_memory().unwrap();
+        let mut stmt = cache
+            .conn
+            .prepare("PRAGMA table_info(scanned_packages)")
+            .unwrap();
+        let col = stmt
+            .query_map([], |row| {
+                let name: String = row.get(1)?;
+                let col_type: String = row.get(2)?;
+                let not_null: i64 = row.get(3)?;
+                Ok((name, col_type, not_null))
+            })
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .find(|(name, _, _)| name == "source_kind");
+
+        let col = col.expect("T-097-08: source_kind column should exist");
+        assert_eq!(col.1.to_uppercase(), "TEXT", "column type should be TEXT");
+        assert_eq!(
+            col.2, 0,
+            "T-097-08: source_kind must be nullable (no backfill required)"
+        );
+    }
+
+    // T-097-08b: A pre-029 legacy DB (no content_hash, no provenance_identity,
+    // no source_kind) migrates all the way forward without data loss.
+    #[test]
+    fn t097_08b_legacy_pre029_db_migrates_to_097_schema() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("t097_08b.db");
+
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE scanned_packages (
+                    name       TEXT NOT NULL,
+                    version    TEXT NOT NULL,
+                    registry   TEXT NOT NULL,
+                    result     TEXT NOT NULL,
+                    scanned_at TEXT NOT NULL,
+                    PRIMARY KEY (name, version, registry)
+                );",
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO scanned_packages (name, version, registry, result, scanned_at)
+                 VALUES ('old', '1.0.0', 'npm', 'pass', '2024-01-01T00:00:00Z')",
+                [],
+            )
+            .unwrap();
+        }
+
+        let cache = Cache::new(&db_path).expect("T-097-08b: full migration should succeed");
+        let entry = cache.lookup("old", "1.0.0", "npm").unwrap().unwrap();
+        assert_eq!(entry.result, "pass");
+        assert_eq!(entry.content_hash, None);
+        assert_eq!(entry.provenance_identity, None);
+        assert_eq!(entry.source_kind, None);
+    }
+
+    // T-097-08c: insert_git upserts on the same (name, sha) — re-scan updates the
+    // stored verdict and hash without creating a duplicate row.
+    #[test]
+    fn t097_08c_insert_git_upserts() {
+        let cache = Cache::in_memory().unwrap();
+        cache
+            .insert_git("p", SHA1_PIN, "pass", Some("sha256:1111"))
+            .unwrap();
+        cache
+            .insert_git("p", SHA1_PIN, "block", Some("sha256:2222"))
+            .unwrap();
+        let entry = cache.lookup("p", SHA1_PIN, "git").unwrap().unwrap();
+        assert_eq!(entry.result, "block");
+        assert_eq!(entry.content_hash, Some("sha256:2222".to_string()));
+    }
+
+    // T-097-08d: A registry insert stores source_kind = NULL (never "git").
+    #[test]
+    fn t097_08d_registry_insert_has_null_source_kind() {
+        let cache = Cache::in_memory().unwrap();
+        cache
+            .insert("pkg", "1.0.0", "npm", "pass", None, None)
+            .unwrap();
+        let entry = cache.lookup("pkg", "1.0.0", "npm").unwrap().unwrap();
+        assert_eq!(
+            entry.source_kind, None,
+            "T-097-08d: registry rows must carry source_kind = NULL"
+        );
+    }
 }

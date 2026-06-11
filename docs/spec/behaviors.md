@@ -1,7 +1,7 @@
 # Behaviors
 
 **Project:** dep-scan
-**Last updated:** 2026-06-11 (v1.2.1 — B-096: sandboxed VCS fetch + B-031 updated, task 096)
+**Last updated:** 2026-06-11 (v1.2.1 — B-097: git-source cache integration, task 097)
 
 What the system does, observably. Each behavior describes a triggering condition, the system's response, and any externally-visible side effects. This is the "you can verify this from outside the process" view.
 
@@ -240,6 +240,16 @@ For each DSSE-signed attestation bundle, the following steps run in order in [`s
 - **Trigger:** `Cache::lookup` returns an `Err` (DB locked, schema corruption, I/O).
 - **Response:** Surface the error to stderr. Fail-open is preserved — the scan continues as if cache miss — but the failure is visible.
 - **References:** [F-023](fitness-functions.md#f-023), task 047.
+
+### B-097: Git-source cache integration
+
+- **Trigger:** A git-sourced dependency (`DependencySource::Git { url, ref_ }`) reaches the git-dep scan arm.
+- **Response:**
+  - The ref is classified via `classify_ref` (B/task 094). **Pinned commit SHAs** are looked up in the cache under `(name, commit_sha, "git")`; a verified hit (content-hash gate per B-020) reuses the stored verdict **without re-fetching**. On a miss, hash mismatch, or `sha1:`/missing stored hash, the dep is fetched (task 096), and on a successful fetch the verdict is written under `(name, commit_sha, "git")` with a `sha256:` `content_hash` over the fetched tree.
+  - **Mutable refs** (branch/tag/short-hash/empty) are **never** cached — neither looked up nor written — so every scan re-fetches. A fetch failure is never cached (fail-closed).
+  - A cache **lookup error** for a git dep is surfaced to stderr as a warning and the scan proceeds with a full re-fetch (never a silent pass, never a hard abort — same posture as B-023 / REQ-047).
+- **Side effects:** SQLite INSERT OR REPLACE keyed `(name, commit_sha, "git")` with `source_kind = "git"`, pinned refs only.
+- **References:** [ADR 008 § Piece 2 cache resolution](../architecture/decisions/008-git-vcs-dependency-handling.md), B-020, B-023, B-096, tasks 094 / 096 / 097.
 
 ---
 
