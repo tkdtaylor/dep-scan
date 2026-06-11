@@ -198,17 +198,70 @@ mod tests {
     }
 
     /// T-085-05: Status derivation depends only on OSV data, not on dep-scan verdict.
-    /// Two packages with identical VulnerabilityInfo but different results produce
-    /// the same VEX status.
+    /// Build two CheckResult values carrying identical VulnerabilityInfo but different
+    /// dep-scan verdicts ("block" vs "pass"), run BOTH through render_vex, parse the JSON,
+    /// and assert the emitted `status` field is identical for both statements.
+    /// This test can fail if the mapper ever reads the verdict field.
     #[test]
     fn t085_05_status_independent_of_dep_scan_verdict() {
         // T-085-05
-        let vuln_a = make_vuln("CVE-2021-23337", vec!["4.17.21"], None, None);
-        let vuln_b = vuln_a.clone();
+        // Same VulnerabilityInfo, but one result is "block" and the other is "pass".
+        let vuln = make_vuln(
+            "CVE-2021-23337",
+            vec!["4.17.21"],
+            Some("Prototype pollution"),
+            None,
+        );
+
+        let result_block = make_result("lodash", "4.17.21", "npm", "block", vec![vuln.clone()]);
+        let result_pass = make_result("express", "4.18.2", "npm", "pass", vec![vuln.clone()]);
+
+        // Run the package with "block" verdict through render_vex.
+        let output_block =
+            render_vex(&[result_block]).expect("T-085-05: render_vex must succeed for block");
+        let v_block: serde_json::Value =
+            serde_json::from_str(&output_block).expect("T-085-05: block output must be valid JSON");
+        let stmts_block = v_block["statements"]
+            .as_array()
+            .expect("T-085-05: block statements must be an array");
         assert_eq!(
-            osv_to_vex_status(&vuln_a),
-            osv_to_vex_status(&vuln_b),
-            "T-085-05: identical VulnerabilityInfo must produce identical VEX status regardless of verdict"
+            stmts_block.len(),
+            1,
+            "T-085-05: block result with one vuln must produce one statement"
+        );
+        let status_block = stmts_block[0]["status"]
+            .as_str()
+            .expect("T-085-05: block statement must have a status field");
+
+        // Run the package with "pass" verdict through render_vex (same VulnerabilityInfo).
+        let output_pass =
+            render_vex(&[result_pass]).expect("T-085-05: render_vex must succeed for pass");
+        let v_pass: serde_json::Value =
+            serde_json::from_str(&output_pass).expect("T-085-05: pass output must be valid JSON");
+        let stmts_pass = v_pass["statements"]
+            .as_array()
+            .expect("T-085-05: pass statements must be an array");
+        assert_eq!(
+            stmts_pass.len(),
+            1,
+            "T-085-05: pass result with one vuln must produce one statement"
+        );
+        let status_pass = stmts_pass[0]["status"]
+            .as_str()
+            .expect("T-085-05: pass statement must have a status field");
+
+        assert_eq!(
+            status_block, status_pass,
+            "T-085-05: VEX status must be identical for identical VulnerabilityInfo \
+             regardless of dep-scan verdict (block={status_block:?}, pass={status_pass:?})"
+        );
+
+        // Both must be "fixed" since fixed_versions is non-empty — an extra sanity check
+        // that ensures the test can distinguish a working mapper from one that always
+        // returns the same constant value.
+        assert_eq!(
+            status_block, "fixed",
+            "T-085-05: expected 'fixed' for non-empty fixed_versions, got: {status_block:?}"
         );
     }
 
@@ -454,19 +507,51 @@ mod tests {
 
     // ── Stub removal ──────────────────────────────────────────────────────────
 
-    /// T-085-14: `render_vex` does not return "not yet implemented".
+    /// T-085-14: `OutputFormat::Vex` dispatches to `render_vex` and produces valid
+    /// OpenVEX JSON — not the old "not yet implemented" stub.
+    ///
+    /// This test exercises the real format→renderer dispatch through `render_results`
+    /// (the pure helper in main.rs that `run_check` delegates to).  It verifies:
+    ///   1. The dispatch succeeds (no error).
+    ///   2. The output is valid JSON.
+    ///   3. The root object has the OpenVEX `@context` field (proves `render_vex`
+    ///      was called, not any other renderer).
+    ///   4. The output does NOT contain "not yet implemented".
+    ///
+    /// The dispatch-level test is also exercised from main.rs as
+    /// `t083_22_t085_14_vex_dispatch_produces_openvex_json`.
     #[test]
-    fn t085_14_render_vex_not_stub() {
+    fn t085_14_vex_dispatch_produces_openvex_json_not_stub() {
         // T-085-14
+        use crate::cli::OutputFormat;
         let results = vec![make_result("lodash", "4.17.21", "npm", "pass", vec![])];
-        let output = render_vex(&results).expect("T-085-14: render_vex must succeed");
+
+        // Exercise the real dispatch path: render_results is the same function
+        // that run_check delegates to for non-native formats.
+        let output = crate::render_results(&results, &OutputFormat::Vex)
+            .expect("T-085-14: render_results(Vex) must succeed");
+
+        // Must be valid JSON.
+        let v: serde_json::Value =
+            serde_json::from_str(&output).expect("T-085-14: VEX output must be valid JSON");
+
+        // Must have OpenVEX @context — proves render_vex was called, not a stub.
+        assert_eq!(
+            v["@context"].as_str(),
+            Some("https://openvex.dev/ns/v0.2.0"),
+            "T-085-14: dispatch must route Vex to render_vex; expected OpenVEX @context"
+        );
+
+        // Must have a statements array.
+        assert!(
+            v["statements"].is_array(),
+            "T-085-14: VEX output must have a 'statements' array"
+        );
+
+        // Must NOT contain the old stub message.
         assert!(
             !output.contains("not yet implemented"),
-            "T-085-14: render_vex output must not contain 'not yet implemented'"
-        );
-        assert!(
-            !output.is_empty(),
-            "T-085-14: render_vex output must not be empty"
+            "T-085-14: VEX output must not contain 'not yet implemented'"
         );
     }
 
