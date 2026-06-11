@@ -359,7 +359,7 @@ Notable contract details:
 
 - `sign` is **synchronous**; `KeylessSigner` bridges to its async Fulcio/Rekor
   HTTP work via `block_in_place` + `Handle::block_on` (requires a multi-thread
-  tokio runtime — see ADR 009). `OperatorKeySigner::sign` does no I/O.
+  tokio runtime — see ADR 010). `OperatorKeySigner::sign` does no I/O.
 - `ed25519_keyid` is the **only** place the operator key-id is derived
   (lowercase hex SHA-256 of the 32 raw public-key bytes); task 089's public-key
   export and the verifier match on this exact value.

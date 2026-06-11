@@ -331,7 +331,7 @@ impl InterchangeSigner for OperatorKeySigner {
 /// fail-closed and never produces a partial/unsigned result.
 ///
 /// The synchronous `sign` drives the async Fulcio/Rekor HTTP calls via the
-/// `block_in_place` bridge documented in ADR 009.
+/// `block_in_place` bridge documented in ADR 010.
 pub struct KeylessSigner {
     fulcio_url: String,
     rekor_url: String,
@@ -433,7 +433,7 @@ impl KeylessSigner {
 
 impl InterchangeSigner for KeylessSigner {
     fn sign(&self, pae: &[u8]) -> Result<(Vec<u8>, String)> {
-        // Bridge the synchronous trait to the async HTTP flow (ADR 009).
+        // Bridge the synchronous trait to the async HTTP flow (ADR 010).
         // Requires a multi-threaded tokio runtime on the call stack, which the
         // live `run_check` path (`#[tokio::main]`) and the multi-thread test
         // runtime both provide.

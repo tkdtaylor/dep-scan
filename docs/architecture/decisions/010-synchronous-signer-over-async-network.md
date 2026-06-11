@@ -1,4 +1,4 @@
-# ADR 009 — Driving the async sigstore network from the synchronous `InterchangeSigner` trait
+# ADR 010 — Driving the async sigstore network from the synchronous `InterchangeSigner` trait
 
 **Status:** Accepted
 **Date:** 2026-06-11
