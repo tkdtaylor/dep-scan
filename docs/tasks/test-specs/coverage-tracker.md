@@ -110,7 +110,7 @@
 | 092 | Cargo lockfile git source parser (ADR 008 piece 1 — Cargo) | 092-cargo-git-source-parser-test-spec.md | 16/16 | ✅ (spec-verifier APPROVE — all 16 real assertions; query-string-in-url vs #fragment-as-ref correct; cargo test/clippy/fmt clean) |
 | 093 | Surface git deps in scan output (ADR 008 piece 1 — visibility deliverable) | 093-surface-git-deps-in-scan-output-test-spec.md | 13/13 | ✅ (spec-verifier APPROVE after adding end-to-end git-dep scan integration test — T-093-09 exit-code + T-093-05/06 real dispatch, offline-guaranteed; routing-classifier isolation accepted; cargo test/clippy/fmt clean) |
 | 094 | Mutable-ref policy (ADR 008 piece 3) | 094-mutable-ref-policy-test-spec.md | 23/23 | ✅ (spec-verifier APPROVE after T-094-21 rewritten to npm #main git dep asserting literal "main" in warn message; classify_ref + MutableRefPolicy + config; zero-network wiremock test; cargo test/clippy/fmt clean) |
-| 095 | VCS host policy configuration (ADR 008 piece 2 — config) | 095-vcs-host-policy-config-test-spec.md | 0/22 | ❌ |
+| 095 | VCS host policy configuration (ADR 008 piece 2 — config) | 095-vcs-host-policy-config-test-spec.md | 22/22 | 🟡 L4: CI pending; L3: clippy+fmt clean; L2: `test result: ok. 1073 passed` (cargo test); Verified by: L3 fitness pass + L2 unit tests; no-hardcoded-host grep clean |
 | 096 | VCS fetch client — sandboxed, read-only fetch (ADR 008 piece 2 — fetch) | 096-vcs-fetch-sandbox-test-spec.md | 0/21 | ❌ |
 | 097 | VCS fetch cache integration (ADR 008 piece 2 — cache) | 097-vcs-fetch-cache-integration-test-spec.md | 0/12 | ❌ |
 | 098 | Policy pipeline on fetched git trees (ADR 008 piece 2 — policy wiring) | 098-policy-pipeline-on-fetched-trees-test-spec.md | 0/16 | ❌ |

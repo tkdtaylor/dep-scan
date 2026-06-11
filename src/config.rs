@@ -313,6 +313,31 @@ impl Default for DependencyConfusionConfig {
     }
 }
 
+/// VCS host allow/deny policy configuration.
+///
+/// Controls which VCS hosts may be fetched when scanning git-sourced
+/// dependencies (ADR 008).  Both lists default to empty, which permits any
+/// host — an "open" posture that operators can restrict by setting
+/// `allowed_hosts` and/or `denied_hosts` in `.dep-scan.toml`.
+///
+/// Rules (applied in priority order):
+/// 1. If `denied_hosts` is non-empty and contains the host → **reject**.
+/// 2. If `allowed_hosts` is non-empty and does **not** contain the host → **reject**.
+/// 3. Otherwise → **permit**.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct VcsConfig {
+    /// Hosts that are explicitly allowed.  An empty list means any host is
+    /// allowed (unless on the deny list).  Case-insensitive matching.
+    #[serde(default)]
+    pub allowed_hosts: Vec<String>,
+    /// Hosts that are explicitly denied.  Takes precedence over
+    /// `allowed_hosts`.  An empty list means no host is denied by default.
+    /// Case-insensitive matching.
+    #[serde(default)]
+    pub denied_hosts: Vec<String>,
+}
+
 /// Main configuration for dep-scan.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Config {
@@ -353,6 +378,13 @@ pub struct Config {
     /// Controls the `valid_until` field embedded in signed interchange payloads.
     #[serde(default)]
     pub freshness: FreshnessConfig,
+
+    /// VCS host allow/deny policy configuration (task 095).
+    ///
+    /// Controls which VCS hosts may be fetched when scanning git-sourced
+    /// dependencies.  Default is empty lists (any host permitted).
+    #[serde(default)]
+    pub vcs: VcsConfig,
 }
 
 fn default_min_package_age_hours() -> u64 {
@@ -371,6 +403,7 @@ impl Default for Config {
             popularity: PopularityConfig::default(),
             signing: SigningConfig::default(),
             freshness: FreshnessConfig::default(),
+            vcs: VcsConfig::default(),
         }
     }
 }
@@ -549,6 +582,15 @@ internal_prefixes = ["internal-", "private-", "corp-"]
 # fulcio_url = ""
 # rekor_url = ""
 # oidc_token = ""
+
+[vcs]
+# VCS host allow/deny policy for git-sourced dependencies (ADR 008).
+# Empty lists (the default) permit fetching from any host.
+# Set allowed_hosts to restrict fetching to specific hosts, e.g. an internal
+# mirror. Set denied_hosts to block specific hosts; deny takes precedence.
+# Case-insensitive matching. Example:
+# allowed_hosts = ["git.corp.example.com"]
+# denied_hosts = ["untrusted.example.com"]
 "#,
             version = dep_scan_version
         );
@@ -995,6 +1037,134 @@ osv_url = "https://custom-osv.example.com"
         assert!(
             err_msg.contains("mutable_git_ref"),
             "T-094-19: error message must mention mutable_git_ref, got: {err_msg}"
+        );
+    }
+
+    // T-095-01: Config::default() has vcs.allowed_hosts = [] and vcs.denied_hosts = []
+    #[test]
+    fn t095_01_default_vcs_lists_are_empty() {
+        // T-095-01
+        let config = Config::default();
+        assert!(
+            config.vcs.allowed_hosts.is_empty(),
+            "T-095-01: default vcs.allowed_hosts must be empty"
+        );
+        assert!(
+            config.vcs.denied_hosts.is_empty(),
+            "T-095-01: default vcs.denied_hosts must be empty"
+        );
+    }
+
+    // T-095-01 (cont.): Config::load with no [vcs] section uses defaults
+    #[test]
+    fn t095_01_absent_vcs_section_uses_defaults() {
+        // T-095-01
+        let config = Config::from_toml_str("min_package_age_hours = 48\n").unwrap();
+        assert!(
+            config.vcs.allowed_hosts.is_empty(),
+            "T-095-01: absent [vcs] section must default to empty allowed_hosts"
+        );
+        assert!(
+            config.vcs.denied_hosts.is_empty(),
+            "T-095-01: absent [vcs] section must default to empty denied_hosts"
+        );
+    }
+
+    // T-095-02: allowed_hosts accepts a list of hostname strings
+    #[test]
+    fn t095_02_allowed_hosts_parses() {
+        // T-095-02
+        let toml_str = r#"[vcs]
+allowed_hosts = ["github.com", "gitlab.com"]
+"#;
+        let config = Config::from_toml_str(toml_str).unwrap();
+        assert_eq!(
+            config.vcs.allowed_hosts,
+            vec!["github.com", "gitlab.com"],
+            "T-095-02"
+        );
+    }
+
+    // T-095-03: denied_hosts accepts a list of hostname strings
+    #[test]
+    fn t095_03_denied_hosts_parses() {
+        // T-095-03
+        let toml_str = r#"[vcs]
+denied_hosts = ["evil.example.com"]
+"#;
+        let config = Config::from_toml_str(toml_str).unwrap();
+        assert_eq!(
+            config.vcs.denied_hosts,
+            vec!["evil.example.com"],
+            "T-095-03"
+        );
+    }
+
+    // T-095-04: Both lists present simultaneously is valid
+    #[test]
+    fn t095_04_both_lists_present_valid() {
+        // T-095-04
+        let toml_str = r#"[vcs]
+allowed_hosts = ["github.com"]
+denied_hosts = ["evil.example.com"]
+"#;
+        let result = Config::from_toml_str(toml_str);
+        assert!(
+            result.is_ok(),
+            "T-095-04: both lists must parse without error"
+        );
+        let config = result.unwrap();
+        assert_eq!(config.vcs.allowed_hosts, vec!["github.com"]);
+        assert_eq!(config.vcs.denied_hosts, vec!["evil.example.com"]);
+    }
+
+    // T-095-05: Non-string entry in host list returns error at config load
+    #[test]
+    fn t095_05_non_string_entry_returns_error() {
+        // T-095-05
+        let toml_str = "[vcs]\nallowed_hosts = [123]\n";
+        let result = Config::from_toml_str(toml_str);
+        assert!(
+            result.is_err(),
+            "T-095-05: integer in allowed_hosts must return Err, got Ok"
+        );
+    }
+
+    // T-095-20: config init emits [vcs] section with commented examples
+    #[test]
+    fn t095_20_config_init_emits_vcs_section() {
+        // T-095-20
+        use tempfile::NamedTempFile;
+        let f = NamedTempFile::new().expect("tempfile");
+        Config::write_default(f.path()).expect("write_default");
+        let content = std::fs::read_to_string(f.path()).expect("read config");
+
+        assert!(
+            content.contains("[vcs]"),
+            "T-095-20: config init must include [vcs] section, got:\n{content}"
+        );
+        // allowed_hosts and denied_hosts must appear as commented-out examples.
+        let has_allowed_comment = content
+            .lines()
+            .any(|l| l.trim_start().starts_with('#') && l.contains("allowed_hosts"));
+        assert!(
+            has_allowed_comment,
+            "T-095-20: [vcs] section must include commented allowed_hosts example, got:\n{content}"
+        );
+        let has_denied_comment = content
+            .lines()
+            .any(|l| l.trim_start().starts_with('#') && l.contains("denied_hosts"));
+        assert!(
+            has_denied_comment,
+            "T-095-20: [vcs] section must include commented denied_hosts example, got:\n{content}"
+        );
+        // Must include a comment explaining that empty lists allow any host.
+        let has_explanation = content
+            .lines()
+            .any(|l| l.trim_start().starts_with('#') && l.contains("any host"));
+        assert!(
+            has_explanation,
+            "T-095-20: [vcs] section must explain that empty lists allow any host, got:\n{content}"
         );
     }
 
