@@ -32,13 +32,14 @@ use policy::dependency_confusion::DependencyConfusionPolicy;
 use policy::go_sumdb::{GoSumDbPolicy, RealSumDbVerifier};
 use policy::install_script::InstallScriptPolicy;
 use policy::maintainer::MaintainerChangePolicy;
+use policy::mutable_ref::MutableRefPolicy;
 use policy::npm_provenance::{NpmProvenancePolicy, extract_provenance_identity};
 use policy::obfuscation::ObfuscationPolicy;
 use policy::popularity::PopularityPolicy;
 use policy::pypi_provenance::{PyPiProvenancePolicy, extract_pypi_provenance_identity};
 use policy::typosquatting::TyposquattingPolicy;
 use policy::vulnerability::VulnerabilityPolicy;
-use policy::{Policy, PolicyDetail, aggregate_results};
+use policy::{Policy, PolicyDetail, PolicyResult, aggregate_results};
 use registry::crates::CratesRegistry;
 use registry::go::GoRegistry;
 use registry::go_sumdb::SumDbClient;
@@ -48,7 +49,7 @@ use registry::pypi::PyPiRegistry;
 use registry::pypi_provenance::PyPiProvenanceClient;
 use registry::{Registry, RegistryType};
 use sigstore_verify::RealSigstoreVerifier;
-use types::{ScanContext, VulnerabilityInfo};
+use types::{PackageMetadata, ScanContext, VulnerabilityInfo};
 
 /// Decision returned by `verify_hash` for a cache-hit entry.
 #[derive(Debug, PartialEq)]
@@ -752,23 +753,73 @@ async fn run_check(
         // helper so the branch can be unit-tested without network calls (T-090-13).
         match classify_dep_routing(dep_source.as_ref(), reg_type) {
             DepRouting::GitSkip { url, ref_ } => {
-                // REQ-093-01: Dedicated git-dep arm — constructs a Warn CheckResult.
+                // REQ-093-01: Dedicated git-dep arm — constructs a CheckResult via
+                //             MutableRefPolicy (task 094, REQ-094-05: no VCS fetch).
                 // REQ-093-02: Returns BEFORE any registry client is instantiated.
-                // REQ-093-03: Verdict is Warn, never Pass.
                 // REQ-093-05: Included in all output formats (native and json).
                 // T-093-12: The git ref is used as the display version.
-                let message = format!(
-                    "git-sourced dependency: url={url}, ref={ref_} — not fetched or scanned",
-                );
-                has_failure = true;
+                // T-094-05: Policy fires before and independently of any VCS fetch.
+                //
+                // Build a minimal ScanContext carrying only the git source info.
+                // The mutable-ref policy inspects ctx.git_source and returns
+                // Pass/Warn/Block based on config.policies.mutable_git_ref.
+                let minimal_meta = PackageMetadata {
+                    name: pkg_ref.name.clone(),
+                    version: ref_.clone(),
+                    description: None,
+                    published_at: None,
+                    maintainers: vec![],
+                    downloads: None,
+                    repository_url: None,
+                    content_hash: None,
+                };
+                let mut git_ctx = ScanContext::from_metadata(minimal_meta);
+                git_ctx.git_source = Some((url.clone(), ref_.clone()));
+
+                let mutable_ref_policy =
+                    MutableRefPolicy::new(config.policies.mutable_git_ref.clone());
+                let mutable_ref_result = mutable_ref_policy.evaluate(&git_ctx);
+                let mutable_ref_detail =
+                    PolicyDetail::from_result(mutable_ref_policy.name(), &mutable_ref_result);
+
+                // The overall result for a git dep is the mutable-ref verdict.
+                // If the policy is off → Pass (no warning for this dep).
+                // Additionally, we always surface the "git-sourced dependency" context.
+                let (result_str, reason) = match &mutable_ref_result {
+                    PolicyResult::Pass => {
+                        // Pinned SHA or policy off — still note it's a git dep.
+                        (
+                            "pass".to_string(),
+                            Some(format!(
+                                "git-sourced dependency: url={url}, ref={ref_} — not fetched or scanned"
+                            )),
+                        )
+                    }
+                    PolicyResult::Warn(msg) => (
+                        "warn".to_string(),
+                        Some(format!(
+                            "git-sourced dependency: url={url}, ref={ref_} — {msg}"
+                        )),
+                    ),
+                    PolicyResult::Block(msg) => (
+                        "block".to_string(),
+                        Some(format!(
+                            "git-sourced dependency: url={url}, ref={ref_} — {msg}"
+                        )),
+                    ),
+                };
+
+                if result_str == "warn" || result_str == "block" {
+                    has_failure = true;
+                }
                 results.push(CheckResult {
                     package: pkg_ref.name.clone(),
                     version: ref_.clone(),
                     registry: "git".to_string(),
                     age_hours: None,
-                    result: "warn".to_string(),
-                    reason: Some(message),
-                    policies: vec![],
+                    result: result_str,
+                    reason,
+                    policies: vec![mutable_ref_detail],
                     vulns: vec![],
                 });
                 continue;

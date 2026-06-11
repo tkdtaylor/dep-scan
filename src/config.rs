@@ -3,6 +3,8 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+use crate::policy::mutable_ref::MutableRefSeverity;
+
 /// Registry URL configuration for supported package managers.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct RegistryConfig {
@@ -135,6 +137,18 @@ pub struct PolicyConfig {
     /// so existing users are not flooded with warnings on every new package scan.
     #[serde(default = "default_false")]
     pub maintainer_first_seen_warning: bool,
+
+    /// Policy severity for git dependencies that point at a mutable ref
+    /// (branch name, tag, short hash, or empty string).
+    ///
+    /// A full 40-hex (SHA-1) or 64-hex (SHA-256) commit hash is treated as
+    /// immutable and always passes.  Everything else is mutable and triggers
+    /// this policy.
+    ///
+    /// Accepted values: `"warn"` (default), `"block"`, `"off"`.
+    /// Unknown values are rejected at config load time.
+    #[serde(default)]
+    pub mutable_git_ref: MutableRefSeverity,
 }
 
 fn default_true() -> bool {
@@ -161,6 +175,7 @@ impl Default for PolicyConfig {
             check_go_sumdb: true,
             require_go_sumdb: false,
             maintainer_first_seen_warning: false,
+            mutable_git_ref: MutableRefSeverity::Warn,
         }
     }
 }
@@ -517,6 +532,10 @@ require_pypi_provenance = false
 check_go_sumdb = true
 require_go_sumdb = false
 maintainer_first_seen_warning = false
+# Policy for git dependencies that point at a mutable ref (branch name, tag,
+# short hash, or empty string). A full 40- or 64-hex commit SHA is treated as
+# immutable and always passes. Accepted values: "warn" (default), "block", "off".
+mutable_git_ref = "warn"
 
 [popularity]
 min_downloads = 1000
@@ -938,6 +957,79 @@ osv_url = "https://custom-osv.example.com"
         assert!(
             policy.first_seen_warning,
             "Policy should carry the first_seen_warning flag from config"
+        );
+    }
+
+    // T-094-17: mutable_git_ref defaults to Warn when no key is in the config
+    #[test]
+    fn t094_17_mutable_git_ref_defaults_to_warn() {
+        // T-094-17
+        use crate::policy::mutable_ref::MutableRefSeverity;
+        let config = Config::default();
+        assert_eq!(
+            config.policies.mutable_git_ref,
+            MutableRefSeverity::Warn,
+            "T-094-17: default mutable_git_ref must be Warn"
+        );
+
+        // Also verify that a TOML without the key still defaults to Warn.
+        let config2 = Config::from_toml_str("min_package_age_hours = 48\n").unwrap();
+        assert_eq!(
+            config2.policies.mutable_git_ref,
+            MutableRefSeverity::Warn,
+            "T-094-17: missing mutable_git_ref key must default to Warn"
+        );
+    }
+
+    // T-094-19: Unknown mutable_git_ref value returns Err at config load
+    #[test]
+    fn t094_19_unknown_mutable_git_ref_returns_err() {
+        // T-094-19
+        let toml_str = "[policies]\nmutable_git_ref = \"explode\"\n";
+        let result = Config::from_toml_str(toml_str);
+        assert!(
+            result.is_err(),
+            "T-094-19: unknown mutable_git_ref value must return Err, got Ok"
+        );
+        let err_msg = format!("{:#}", result.unwrap_err());
+        assert!(
+            err_msg.contains("mutable_git_ref"),
+            "T-094-19: error message must mention mutable_git_ref, got: {err_msg}"
+        );
+    }
+
+    // T-094-20: config init emits [policies] mutable_git_ref with default and comment
+    #[test]
+    fn t094_20_config_init_emits_mutable_git_ref() {
+        // T-094-20
+        use tempfile::NamedTempFile;
+        let f = NamedTempFile::new().expect("tempfile");
+        Config::write_default(f.path()).expect("write_default");
+        let content = std::fs::read_to_string(f.path()).expect("read config");
+
+        assert!(
+            content.contains("mutable_git_ref = \"warn\""),
+            "T-094-20: config init must include mutable_git_ref = \"warn\", got:\n{content}"
+        );
+        // Must appear under [policies]
+        let policies_pos = content
+            .find("[policies]")
+            .expect("T-094-20: [policies] section must exist");
+        let mutable_ref_pos = content
+            .find("mutable_git_ref")
+            .expect("T-094-20: mutable_git_ref must appear");
+        assert!(
+            mutable_ref_pos > policies_pos,
+            "T-094-20: mutable_git_ref must appear after [policies] header"
+        );
+        // Must include a descriptive comment
+        let has_comment = content.lines().any(|l| {
+            l.trim_start().starts_with('#')
+                && (l.contains("mutable") || l.contains("git") || l.contains("branch"))
+        });
+        assert!(
+            has_comment,
+            "T-094-20: [policies] section must have a comment about mutable_git_ref, got:\n{content}"
         );
     }
 }
