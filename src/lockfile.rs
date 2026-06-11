@@ -325,6 +325,39 @@ fn find_version_operator(s: &str) -> Option<usize> {
     None
 }
 
+/// Classify a Cargo.lock `source` field value into a `DependencySource`.
+///
+/// Returns `Some(DependencySource::Git { .. })` when the source starts with `git+`.
+/// Returns `Some(DependencySource::Registry { registry: Crates })` when it starts with `registry+`.
+/// Returns `None` for unknown prefixes (fail-safe — caller skips the entry without panicking).
+///
+/// For `git+` sources:
+/// - The `git+` prefix is stripped from the stored URL.
+/// - The fragment after `#` becomes `ref_`; if no `#` is present, `ref_` is an empty string.
+/// - Query parameters (`?branch=`, `?tag=`, `?rev=`) are part of the URL and preserved in `url`.
+fn classify_cargo_source(source: &str) -> Option<DependencySource> {
+    if let Some(without_git_plus) = source.strip_prefix("git+") {
+        // Split on `#` to extract ref fragment; query params stay in the URL portion
+        let (url, ref_) = match without_git_plus.find('#') {
+            Some(idx) => (&without_git_plus[..idx], &without_git_plus[idx + 1..]),
+            None => (without_git_plus, ""),
+        };
+        return Some(DependencySource::Git {
+            url: url.to_string(),
+            ref_: ref_.to_string(),
+        });
+    }
+
+    if source.starts_with("registry+") {
+        return Some(DependencySource::Registry {
+            registry: RegistryType::Crates,
+        });
+    }
+
+    // Unknown prefix — fail-safe: skip without panicking
+    None
+}
+
 /// Parse a Cargo.lock (TOML) string.
 pub fn parse_cargo_lock(content: &str) -> Result<Vec<LockfileDependency>> {
     let parsed: toml::Value =
@@ -334,11 +367,18 @@ pub fn parse_cargo_lock(content: &str) -> Result<Vec<LockfileDependency>> {
 
     if let Some(packages) = parsed.get("package").and_then(|p| p.as_array()) {
         for pkg in packages {
-            let source = pkg.get("source").and_then(|s| s.as_str());
+            let source_str = pkg.get("source").and_then(|s| s.as_str());
             // Skip local/path dependencies (no source field)
-            if source.is_none() {
-                continue;
-            }
+            let source_str = match source_str {
+                Some(s) => s,
+                None => continue,
+            };
+
+            // Classify the source; skip unknown prefixes (fail-safe)
+            let dep_source = match classify_cargo_source(source_str) {
+                Some(s) => s,
+                None => continue,
+            };
 
             let name = pkg
                 .get("name")
@@ -351,15 +391,20 @@ pub fn parse_cargo_lock(content: &str) -> Result<Vec<LockfileDependency>> {
                 .unwrap_or("")
                 .to_string();
 
-            if !name.is_empty() && !version.is_empty() {
-                deps.push(LockfileDependency {
-                    name,
-                    version,
-                    source: DependencySource::Registry {
-                        registry: RegistryType::Crates,
-                    },
-                });
+            // Always require a non-empty name.
+            // Version is required for registry deps but not for git deps.
+            if name.is_empty() {
+                continue;
             }
+            if matches!(dep_source, DependencySource::Registry { .. }) && version.is_empty() {
+                continue;
+            }
+
+            deps.push(LockfileDependency {
+                name,
+                version,
+                source: dep_source,
+            });
         }
     }
 
@@ -1437,5 +1482,299 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
         // Must not panic; entry with non-string resolved is skipped
         let deps = parse_package_lock_json(content).unwrap();
         assert_eq!(deps.len(), 0);
+    }
+
+    // --- T-092 tests: Cargo lockfile git source parser ---
+
+    // T-092-01: registry+ source produces DependencySource::Registry(Crates)
+    #[test]
+    fn t092_01_registry_source_produces_registry_crates() {
+        let content = r#"
+[[package]]
+name = "serde"
+version = "1.0.228"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+"#;
+        let deps = parse_cargo_lock(content).unwrap();
+        assert_eq!(deps.len(), 1);
+        assert_eq!(
+            deps[0].source,
+            DependencySource::Registry {
+                registry: RegistryType::Crates
+            }
+        );
+    }
+
+    // T-092-02: git+https:// source produces DependencySource::Git with stripped prefix and split ref
+    #[test]
+    fn t092_02_git_https_source_produces_git() {
+        let content = r#"
+[[package]]
+name = "some-crate"
+version = "0.5.0"
+source = "git+https://github.com/user/repo#abc1234"
+"#;
+        let deps = parse_cargo_lock(content).unwrap();
+        assert_eq!(deps.len(), 1);
+        assert_eq!(
+            deps[0].source,
+            DependencySource::Git {
+                url: "https://github.com/user/repo".to_string(),
+                ref_: "abc1234".to_string(),
+            }
+        );
+    }
+
+    // T-092-03: git+ssh:// source produces DependencySource::Git
+    #[test]
+    fn t092_03_git_ssh_source_produces_git() {
+        let content = r#"
+[[package]]
+name = "some-crate"
+version = "0.5.0"
+source = "git+ssh://git@github.com/user/repo.git#abc1234"
+"#;
+        let deps = parse_cargo_lock(content).unwrap();
+        assert_eq!(deps.len(), 1);
+        assert_eq!(
+            deps[0].source,
+            DependencySource::Git {
+                url: "ssh://git@github.com/user/repo.git".to_string(),
+                ref_: "abc1234".to_string(),
+            }
+        );
+    }
+
+    // T-092-04: git+https:// with ?branch= query preserves query in url, splits # as ref
+    #[test]
+    fn t092_04_git_source_with_branch_query_preserves_url() {
+        let content = r#"
+[[package]]
+name = "some-crate"
+version = "0.5.0"
+source = "git+https://github.com/user/repo?branch=main#abc1234"
+"#;
+        let deps = parse_cargo_lock(content).unwrap();
+        assert_eq!(deps.len(), 1);
+        assert_eq!(
+            deps[0].source,
+            DependencySource::Git {
+                url: "https://github.com/user/repo?branch=main".to_string(),
+                ref_: "abc1234".to_string(),
+            }
+        );
+    }
+
+    // T-092-05: git+https:// with ?rev= query — both query and fragment carried through
+    #[test]
+    fn t092_05_git_source_with_rev_query() {
+        let content = r#"
+[[package]]
+name = "some-crate"
+version = "0.5.0"
+source = "git+https://github.com/user/repo?rev=abc1234#abc1234"
+"#;
+        let deps = parse_cargo_lock(content).unwrap();
+        assert_eq!(deps.len(), 1);
+        assert_eq!(
+            deps[0].source.git_url(),
+            Some("https://github.com/user/repo?rev=abc1234")
+        );
+        assert_eq!(deps[0].source.git_ref(), Some("abc1234"));
+    }
+
+    // T-092-06: git+https:// with no # fragment gets empty ref, no panic
+    #[test]
+    fn t092_06_git_source_no_fragment_empty_ref() {
+        let content = r#"
+[[package]]
+name = "some-crate"
+version = "0.5.0"
+source = "git+https://github.com/user/repo"
+"#;
+        let deps = parse_cargo_lock(content).unwrap();
+        assert_eq!(deps.len(), 1);
+        assert_eq!(deps[0].source.git_ref(), Some(""));
+    }
+
+    // T-092-07: Local path dep (no source field) is still skipped
+    #[test]
+    fn t092_07_local_path_dep_no_source_skipped() {
+        let content = r#"
+[[package]]
+name = "my-project"
+version = "0.1.0"
+"#;
+        let deps = parse_cargo_lock(content).unwrap();
+        assert!(deps.is_empty());
+    }
+
+    // T-092-08: Name and version are preserved for git-source entries
+    #[test]
+    fn t092_08_name_and_version_preserved_for_git_source() {
+        let content = r#"
+[[package]]
+name = "some-crate"
+version = "0.5.0"
+source = "git+https://github.com/user/repo#abc"
+"#;
+        let deps = parse_cargo_lock(content).unwrap();
+        assert_eq!(deps.len(), 1);
+        assert_eq!(deps[0].name, "some-crate");
+        assert_eq!(deps[0].version, "0.5.0");
+    }
+
+    // T-092-09: Git dep with empty version is emitted (version not required for git)
+    #[test]
+    fn t092_09_git_dep_empty_version_not_skipped() {
+        let content = r#"
+[[package]]
+name = "crate-no-ver"
+source = "git+https://github.com/user/repo#abc"
+"#;
+        let deps = parse_cargo_lock(content).unwrap();
+        assert_eq!(deps.len(), 1);
+        assert_eq!(deps[0].name, "crate-no-ver");
+        assert_eq!(deps[0].version, "");
+        assert!(matches!(deps[0].source, DependencySource::Git { .. }));
+    }
+
+    // T-092-10: Lockfile with registry and git entries produces both kinds
+    #[test]
+    fn t092_10_mixed_lockfile_both_kinds() {
+        let content = r#"
+[[package]]
+name = "serde"
+version = "1.0.228"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+
+[[package]]
+name = "git-dep"
+version = "0.1.0"
+source = "git+https://github.com/user/repo#abc1234"
+"#;
+        let deps = parse_cargo_lock(content).unwrap();
+        assert_eq!(deps.len(), 2);
+
+        let registry_deps: Vec<_> = deps
+            .iter()
+            .filter(|d| matches!(d.source, DependencySource::Registry { .. }))
+            .collect();
+        let git_deps: Vec<_> = deps
+            .iter()
+            .filter(|d| matches!(d.source, DependencySource::Git { .. }))
+            .collect();
+        assert_eq!(registry_deps.len(), 1);
+        assert_eq!(git_deps.len(), 1);
+    }
+
+    // T-092-11: Local, registry, and git all present — only registry + git emitted
+    #[test]
+    fn t092_11_local_registry_git_only_two_emitted() {
+        let content = r#"
+[[package]]
+name = "my-project"
+version = "0.1.0"
+
+[[package]]
+name = "serde"
+version = "1.0.228"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+
+[[package]]
+name = "git-dep"
+version = "0.1.0"
+source = "git+https://github.com/user/repo#abc1234"
+"#;
+        let deps = parse_cargo_lock(content).unwrap();
+        assert_eq!(deps.len(), 2);
+        // Verify the local dep is not present
+        assert!(!deps.iter().any(|d| d.name == "my-project"));
+    }
+
+    // T-092-12: Commit SHA as ref is stored verbatim
+    #[test]
+    fn t092_12_commit_sha_stored_verbatim() {
+        let full_sha = "abcdef1234567890abcdef1234567890abcdef12";
+        let content = format!(
+            r#"
+[[package]]
+name = "some-crate"
+version = "0.5.0"
+source = "git+https://github.com/user/repo#{full_sha}"
+"#
+        );
+        let deps = parse_cargo_lock(&content).unwrap();
+        assert_eq!(deps.len(), 1);
+        assert_eq!(deps[0].source.git_ref(), Some(full_sha));
+    }
+
+    // T-092-13: # with no content after it gives empty ref, not panic
+    #[test]
+    fn t092_13_hash_with_no_content_gives_empty_ref() {
+        let content = r#"
+[[package]]
+name = "some-crate"
+version = "0.5.0"
+source = "git+https://github.com/user/repo#"
+"#;
+        let deps = parse_cargo_lock(content).unwrap();
+        assert_eq!(deps.len(), 1);
+        assert_eq!(deps[0].source.git_ref(), Some(""));
+    }
+
+    // T-092-14: Unknown source prefix is skipped, not panicked
+    #[test]
+    fn t092_14_unknown_source_prefix_skipped_no_panic() {
+        let content = r#"
+[[package]]
+name = "bzr-dep"
+version = "1.0.0"
+source = "bzr+https://bazaar.example.com/repo"
+"#;
+        // Must not panic; entry with unknown prefix is skipped
+        let deps = parse_cargo_lock(content).unwrap();
+        assert!(deps.is_empty());
+    }
+
+    // T-092-15: Syntactically invalid TOML returns Err, not panic
+    #[test]
+    fn t092_15_invalid_toml_returns_err_no_panic() {
+        let content = "[[invalid toml";
+        let result = parse_cargo_lock(content);
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("Failed to parse Cargo.lock"));
+    }
+
+    // T-092-16: No regressions — existing tests cover this; verify classify_cargo_source directly
+    #[test]
+    fn t092_16_classify_cargo_source_direct() {
+        // registry+ -> Registry(Crates)
+        let s = classify_cargo_source("registry+https://github.com/rust-lang/crates.io-index");
+        assert_eq!(
+            s,
+            Some(DependencySource::Registry {
+                registry: RegistryType::Crates
+            })
+        );
+
+        // git+ -> Git
+        let s = classify_cargo_source("git+https://github.com/user/repo#abc");
+        assert_eq!(
+            s,
+            Some(DependencySource::Git {
+                url: "https://github.com/user/repo".to_string(),
+                ref_: "abc".to_string(),
+            })
+        );
+
+        // unknown prefix -> None
+        let s = classify_cargo_source("bzr+https://example.com/repo");
+        assert_eq!(s, None);
+
+        // empty string -> None
+        let s = classify_cargo_source("");
+        assert_eq!(s, None);
     }
 }
