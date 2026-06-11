@@ -25,7 +25,7 @@ use serde::Serialize;
 use cache::Cache;
 use cli::{Cli, Command, ConfigAction, OutputFormat, resolve_format};
 use config::Config;
-use osv::{OsvClient, registry_to_ecosystem};
+use osv::{OsvClient, OsvQueryContext, registry_to_ecosystem};
 use policy::age::AgePolicy;
 use policy::dependency_confusion::DependencyConfusionPolicy;
 use policy::go_sumdb::{GoSumDbPolicy, RealSumDbVerifier};
@@ -203,13 +203,9 @@ fn registry_to_osv_ecosystem(reg: RegistryType) -> &'static str {
 /// Output shape:
 /// ```json
 /// {
-///   "results": [
-///     {
-///       "package": { "name": "...", "version": "...", "ecosystem": "..." },
-///       "vulns": [ { "id": "..." }, ... ],
-///       "dep_scan_result": "pass" | "warn" | "block"
-///     }
-///   ]
+///   "results": [ ... ],
+///   "osv_snapshot": { "queried_at": "<rfc3339>" },  // only when ctx is Some
+///   "valid_until": "<rfc3339>"                        // only when ctx is Some
 /// }
 /// ```
 ///
@@ -217,7 +213,16 @@ fn registry_to_osv_ecosystem(reg: RegistryType) -> &'static str {
 /// from the `registry` field of each result using `registry_to_osv_ecosystem`.
 /// The `dep_scan_result` extension field carries the dep-scan verdict so the
 /// file doubles as both an OSV document and a dep-scan report.
-fn render_osv(results: &[CheckResult]) -> String {
+///
+/// When `osv_ctx` is `Some`, `osv_snapshot.queried_at` and `valid_until` are
+/// embedded in the payload (REQ-088-02).  When `None`, those fields are omitted
+/// (cache-hit path — no false freshness claim).
+fn render_osv(
+    results: &[CheckResult],
+    osv_ctx: Option<&OsvQueryContext>,
+    config: &Config,
+) -> String {
+    use chrono::Duration;
     use serde_json::{Value, json};
 
     let result_elements: Vec<Value> = results
@@ -249,7 +254,18 @@ fn render_osv(results: &[CheckResult]) -> String {
         })
         .collect();
 
-    let output = json!({ "results": result_elements });
+    let mut output = json!({ "results": result_elements });
+
+    // REQ-088-02: embed freshness signals when we have a fresh OSV query context.
+    if let Some(ctx) = osv_ctx {
+        let queried_at_str = ctx.queried_at.to_rfc3339();
+        let valid_until =
+            ctx.queried_at + Duration::hours(config.freshness.valid_until_hours as i64);
+        let valid_until_str = valid_until.to_rfc3339();
+        output["osv_snapshot"] = json!({ "queried_at": queried_at_str });
+        output["valid_until"] = json!(valid_until_str);
+    }
+
     serde_json::to_string_pretty(&output)
         .unwrap_or_else(|e| format!("{{\"error\": \"failed to serialize OSV output: {e}\"}}"))
 }
@@ -368,6 +384,11 @@ fn run_config(config_path: Option<&Path>, action: ConfigAction) -> Result<i32> {
 /// standalone function so that tests can exercise the dispatch path without making
 /// network calls.
 ///
+/// `osv_ctx` carries the freshness context for the four signed interchange formats
+/// (`Osv`, `CycloneDx`, `Spdx`, `Vex`).  Pass `None` when no fresh OSV query was
+/// issued (cache-only path) or when rendering the `Json` / `Native` formats (which
+/// do not carry freshness fields per REQ-088 — task 088).
+///
 /// Returns `Ok(String)` with the rendered output, or `Err` if serialization fails.
 /// The `Native` variant is *not* handled here — it writes a multi-line table directly
 /// to stdout in `run_check` because it uses `println!` inside a `for` loop.  All other
@@ -375,17 +396,23 @@ fn run_config(config_path: Option<&Path>, action: ConfigAction) -> Result<i32> {
 pub(crate) fn render_results(
     results: &[CheckResult],
     output_format: &OutputFormat,
+    osv_ctx: Option<&OsvQueryContext>,
+    config: &Config,
 ) -> Result<String> {
     match output_format {
         OutputFormat::Json => {
+            // Json path: never carries freshness fields (REQ-088-06 / T-088-16).
             serde_json::to_string_pretty(results).context("Failed to serialize results to JSON")
         }
-        OutputFormat::Osv => Ok(render_osv(results)),
-        OutputFormat::CycloneDx => {
-            sbom::render_cyclonedx(results).context("Failed to render CycloneDX output")
+        OutputFormat::Osv => Ok(render_osv(results, osv_ctx, config)),
+        OutputFormat::CycloneDx => sbom::render_cyclonedx(results, osv_ctx, config)
+            .context("Failed to render CycloneDX output"),
+        OutputFormat::Spdx => {
+            sbom::render_spdx(results, osv_ctx, config).context("Failed to render SPDX output")
         }
-        OutputFormat::Spdx => sbom::render_spdx(results).context("Failed to render SPDX output"),
-        OutputFormat::Vex => vex::render_vex(results).context("Failed to render VEX output"),
+        OutputFormat::Vex => {
+            vex::render_vex(results, osv_ctx, config).context("Failed to render VEX output")
+        }
         OutputFormat::Native => {
             // Native format is rendered inline in run_check (multi-line table, println!).
             // This branch is unreachable when called from run_check, but is a valid
@@ -420,6 +447,8 @@ fn produce_serialized_output(
     output_format: &OutputFormat,
     allow_unsigned: bool,
     signer: &dyn interchange_sign::InterchangeSigner,
+    osv_ctx: Option<&OsvQueryContext>,
+    config: &Config,
 ) -> Result<String> {
     match output_format {
         OutputFormat::Native => {
@@ -427,10 +456,10 @@ fn produce_serialized_output(
         }
         // Bespoke JSON array — never signed (ADR 006 Q8). The signer argument
         // is intentionally untouched on this path: zero signing cost for the
-        // primary local-developer scan.
-        OutputFormat::Json => render_results(results, output_format),
+        // primary local-developer scan. No freshness fields on this path (T-088-16).
+        OutputFormat::Json => render_results(results, output_format, None, config),
         OutputFormat::Osv | OutputFormat::CycloneDx | OutputFormat::Spdx | OutputFormat::Vex => {
-            let rendered = render_results(results, output_format)?;
+            let rendered = render_results(results, output_format, osv_ctx, config)?;
             if allow_unsigned {
                 interchange_sign::mark_unsigned(rendered.as_bytes())
             } else {
@@ -647,6 +676,10 @@ async fn run_check(
     let mut results: Vec<CheckResult> = Vec::new();
     let mut has_failure = false;
     let mut has_error = false;
+    // Track the OSV freshness context.  Set to Some on the first successful live
+    // OSV query; remains None for runs where all results came from the cache or
+    // the OSV policy is disabled (T-088-06 — no false freshness claim).
+    let mut osv_query_context: Option<OsvQueryContext> = None;
 
     for pkg_ref in &all_packages {
         let pkg_name = &pkg_ref.name;
@@ -905,19 +938,45 @@ async fn run_check(
         ctx.pypi_provenance_fetch_error = pypi_provenance_fetch_error;
         ctx.go_sumdb_result = go_sumdb_result;
 
-        // Query OSV for known vulnerabilities
+        // Query OSV for known vulnerabilities.
+        // On the first successful query, capture the OsvQueryContext so the render
+        // functions can embed osv_snapshot.queried_at and valid_until in the payload
+        // (REQ-088-01).  Subsequent packages reuse the same context (one timestamp
+        // per run, set when data was first requested).
         if let Some(ref osv) = osv_client {
             let ecosystem = registry_to_ecosystem(&reg_type);
-            match osv
-                .query(&metadata.name, &metadata.version, ecosystem)
-                .await
-            {
-                Ok(vulns) => {
-                    ctx.vulnerabilities = vulns;
+            if osv_query_context.is_none() {
+                // First live query this run — use query_batch to get the context.
+                match osv
+                    .query_batch(&[(&metadata.name, &metadata.version, ecosystem)])
+                    .await
+                {
+                    Ok((batch_vulns, ctx_captured)) => {
+                        osv_query_context = Some(ctx_captured);
+                        if let Some(vulns) = batch_vulns.into_iter().next() {
+                            ctx.vulnerabilities = vulns;
+                        }
+                    }
+                    Err(e) => {
+                        if verbose {
+                            eprintln!("Warning: OSV lookup failed for {pkg_name}: {e:#}");
+                        }
+                    }
                 }
-                Err(e) => {
-                    if verbose {
-                        eprintln!("Warning: OSV lookup failed for {pkg_name}: {e:#}");
+            } else {
+                // Subsequent packages in the same run — use the single-query path;
+                // the context timestamp has already been captured.
+                match osv
+                    .query(&metadata.name, &metadata.version, ecosystem)
+                    .await
+                {
+                    Ok(vulns) => {
+                        ctx.vulnerabilities = vulns;
+                    }
+                    Err(e) => {
+                        if verbose {
+                            eprintln!("Warning: OSV lookup failed for {pkg_name}: {e:#}");
+                        }
                     }
                 }
             }
@@ -1097,6 +1156,8 @@ async fn run_check(
                             &output_format,
                             allow_unsigned,
                             signer.as_ref(),
+                            osv_query_context.as_ref(),
+                            &config,
                         )?;
                         println!("{out}");
                     }
@@ -1121,6 +1182,8 @@ async fn run_check(
                     &output_format,
                     allow_unsigned,
                     &placeholder,
+                    osv_query_context.as_ref(),
+                    &config,
                 )?;
                 println!("{out}");
             }
@@ -2413,7 +2476,7 @@ mod tests {
         let results = vec![make_check_result(
             "lodash", "4.17.20", "npm", "block", vulns,
         )];
-        let output = render_osv(&results);
+        let output = render_osv(&results, None, &Config::default());
         let value: serde_json::Value =
             serde_json::from_str(&output).expect("T-083-14: OSV output must be valid JSON");
         let arr = value
@@ -2439,7 +2502,7 @@ mod tests {
         let results = vec![make_check_result(
             "lodash", "4.17.20", "npm", "block", vulns,
         )];
-        let output = render_osv(&results);
+        let output = render_osv(&results, None, &Config::default());
         let value: serde_json::Value = serde_json::from_str(&output).unwrap();
         let elem = &value["results"][0];
 
@@ -2506,7 +2569,7 @@ mod tests {
         let results = vec![make_check_result(
             "lodash", "4.17.20", "npm", "block", vulns,
         )];
-        let output = render_osv(&results);
+        let output = render_osv(&results, None, &Config::default());
         let value: serde_json::Value = serde_json::from_str(&output).unwrap();
         let vulns_arr = value["results"][0]["vulns"]
             .as_array()
@@ -2535,7 +2598,7 @@ mod tests {
             "pass",
             vec![],
         )];
-        let output = render_osv(&results);
+        let output = render_osv(&results, None, &Config::default());
         let value: serde_json::Value = serde_json::from_str(&output).unwrap();
         let vulns_arr = value["results"][0]["vulns"]
             .as_array()
@@ -2554,7 +2617,7 @@ mod tests {
             make_check_result("pkg-b", "2.0.0", "npm", "warn", vec![]),
             make_check_result("pkg-c", "3.0.0", "npm", "block", vec![]),
         ];
-        let output = render_osv(&results);
+        let output = render_osv(&results, None, &Config::default());
         let value: serde_json::Value = serde_json::from_str(&output).unwrap();
         let arr = value["results"].as_array().unwrap();
         assert_eq!(
@@ -2582,7 +2645,7 @@ mod tests {
             make_check_result("pkg-b", "2.0.0", "npm", "pass", vec![]),
             make_check_result("pkg-c", "3.0.0", "npm", "pass", vec![]),
         ];
-        let output = render_osv(&results);
+        let output = render_osv(&results, None, &Config::default());
         let value: serde_json::Value = serde_json::from_str(&output).unwrap();
         let arr = value["results"]
             .as_array()
@@ -2605,7 +2668,7 @@ mod tests {
             "pass",
             vec![],
         )];
-        let output = render_results(&results, &OutputFormat::CycloneDx)
+        let output = render_results(&results, &OutputFormat::CycloneDx, None, &Config::default())
             .expect("T-083-20: render_results for CycloneDX must succeed");
         let _: serde_json::Value =
             serde_json::from_str(&output).expect("T-083-20: CycloneDX output must be valid JSON");
@@ -2626,7 +2689,7 @@ mod tests {
             "pass",
             vec![],
         )];
-        let output = render_results(&results, &OutputFormat::Spdx)
+        let output = render_results(&results, &OutputFormat::Spdx, None, &Config::default())
             .expect("T-083-21: render_results for SPDX must succeed");
         let _: serde_json::Value =
             serde_json::from_str(&output).expect("T-083-21: SPDX output must be valid JSON");
@@ -2649,7 +2712,7 @@ mod tests {
             "pass",
             vec![],
         )];
-        let output = render_results(&results, &OutputFormat::Vex)
+        let output = render_results(&results, &OutputFormat::Vex, None, &Config::default())
             .expect("T-083-22/T-085-14: render_results for VEX must succeed");
 
         // Must be valid JSON.
@@ -2695,8 +2758,9 @@ mod tests {
             vec![],
         )];
         let signer = interchange_sign::StaticEd25519Signer::generate();
-        let out = produce_serialized_output(&results, &format, false, &signer)
-            .unwrap_or_else(|e| panic!("{marker}: signing dispatch must succeed: {e}"));
+        let out =
+            produce_serialized_output(&results, &format, false, &signer, None, &Config::default())
+                .unwrap_or_else(|e| panic!("{marker}: signing dispatch must succeed: {e}"));
         let v: serde_json::Value =
             serde_json::from_str(&out).unwrap_or_else(|e| panic!("{marker}: must be JSON: {e}"));
         assert!(
@@ -2752,7 +2816,14 @@ mod tests {
             vec![],
         )];
         let signer = interchange_sign::StaticEd25519Signer::generate();
-        let out = produce_serialized_output(&results, &OutputFormat::Native, false, &signer);
+        let out = produce_serialized_output(
+            &results,
+            &OutputFormat::Native,
+            false,
+            &signer,
+            None,
+            &Config::default(),
+        );
         assert!(
             out.is_err(),
             "T-086-13: Native must not be serialized/signed via the interchange dispatch"
@@ -2770,8 +2841,15 @@ mod tests {
             vec![],
         )];
         let signer = interchange_sign::StaticEd25519Signer::generate();
-        let out = produce_serialized_output(&results, &OutputFormat::Json, false, &signer)
-            .expect("T-086-14: Json dispatch must succeed");
+        let out = produce_serialized_output(
+            &results,
+            &OutputFormat::Json,
+            false,
+            &signer,
+            None,
+            &Config::default(),
+        )
+        .expect("T-086-14: Json dispatch must succeed");
         let v: serde_json::Value = serde_json::from_str(&out).expect("T-086-14: must be JSON");
         assert!(
             v.is_array(),
@@ -2799,8 +2877,15 @@ mod tests {
             ));
         }
         let signer = interchange_sign::StaticEd25519Signer::generate();
-        let out = produce_serialized_output(&results, &OutputFormat::Osv, false, &signer)
-            .expect("T-086-15: dispatch must succeed");
+        let out = produce_serialized_output(
+            &results,
+            &OutputFormat::Osv,
+            false,
+            &signer,
+            None,
+            &Config::default(),
+        )
+        .expect("T-086-15: dispatch must succeed");
         let v: serde_json::Value = serde_json::from_str(&out).unwrap();
         assert_eq!(
             v["signatures"].as_array().unwrap().len(),
@@ -2833,14 +2918,28 @@ mod tests {
         )];
         let failing = interchange_sign::FailingSigner;
         // If Json touched the signer, this would be Err; it must be Ok.
-        let out = produce_serialized_output(&results, &OutputFormat::Json, false, &failing)
-            .expect("T-086-16: Json must not invoke the signer (no signing cost)");
+        let out = produce_serialized_output(
+            &results,
+            &OutputFormat::Json,
+            false,
+            &failing,
+            None,
+            &Config::default(),
+        )
+        .expect("T-086-16: Json must not invoke the signer (no signing cost)");
         let v: serde_json::Value = serde_json::from_str(&out).unwrap();
         assert!(v.is_array(), "T-086-16: Json output unaffected by signer");
 
         // Contrast: an interchange format with the same failing signer DOES
         // fail — confirming the signer is wired on the interchange path only.
-        let osv = produce_serialized_output(&results, &OutputFormat::Osv, false, &failing);
+        let osv = produce_serialized_output(
+            &results,
+            &OutputFormat::Osv,
+            false,
+            &failing,
+            None,
+            &Config::default(),
+        );
         assert!(
             osv.is_err(),
             "T-086-16: interchange path must invoke the signer (fails with FailingSigner)"
@@ -2859,7 +2958,14 @@ mod tests {
             vec![],
         )];
         let failing = interchange_sign::FailingSigner;
-        let out = produce_serialized_output(&results, &OutputFormat::Vex, false, &failing);
+        let out = produce_serialized_output(
+            &results,
+            &OutputFormat::Vex,
+            false,
+            &failing,
+            None,
+            &Config::default(),
+        );
         assert!(
             out.is_err(),
             "T-086-17: a signer failure must propagate as Err with no output produced"
@@ -2879,8 +2985,15 @@ mod tests {
         )];
         // A FailingSigner proves the signer is never invoked on this path.
         let failing = interchange_sign::FailingSigner;
-        let out = produce_serialized_output(&results, &OutputFormat::Osv, true, &failing)
-            .expect("T-086-18: --allow-unsigned must succeed without invoking the signer");
+        let out = produce_serialized_output(
+            &results,
+            &OutputFormat::Osv,
+            true,
+            &failing,
+            None,
+            &Config::default(),
+        )
+        .expect("T-086-18: --allow-unsigned must succeed without invoking the signer");
         let v: serde_json::Value = serde_json::from_str(&out).unwrap();
         // Not a DSSE envelope.
         assert!(
@@ -2911,10 +3024,24 @@ mod tests {
             vec![],
         )];
         let signer = interchange_sign::StaticEd25519Signer::generate();
-        let signed_off = produce_serialized_output(&results, &OutputFormat::Json, false, &signer)
-            .expect("json without flag");
-        let signed_on = produce_serialized_output(&results, &OutputFormat::Json, true, &signer)
-            .expect("json with flag");
+        let signed_off = produce_serialized_output(
+            &results,
+            &OutputFormat::Json,
+            false,
+            &signer,
+            None,
+            &Config::default(),
+        )
+        .expect("json without flag");
+        let signed_on = produce_serialized_output(
+            &results,
+            &OutputFormat::Json,
+            true,
+            &signer,
+            None,
+            &Config::default(),
+        )
+        .expect("json with flag");
         assert_eq!(
             signed_off, signed_on,
             "json output must be identical regardless of --allow-unsigned"
@@ -2964,4 +3091,349 @@ mod tests {
     // T-083-27: No regressions — all tooling checks pass.
     // Verified in the pre-commit gate: cargo test, cargo clippy, cargo fmt --check.
     const _T_083_27_NO_REGRESSIONS: () = ();
+
+    // ==========================================================================
+    // Task 088 — statement freshness tests (render_osv + dispatch paths)
+    // ==========================================================================
+
+    fn make_osv_ctx_at(queried_at: chrono::DateTime<chrono::Utc>) -> OsvQueryContext {
+        OsvQueryContext { queried_at }
+    }
+
+    /// T-088-02: render_osv embeds osv_snapshot.queried_at (RFC 3339) and valid_until.
+    #[test]
+    fn t088_02_render_osv_embeds_osv_snapshot_queried_at() {
+        // T-088-02
+        use chrono::TimeZone as _;
+        let queried_at = chrono::Utc.with_ymd_and_hms(2026, 6, 4, 12, 0, 0).unwrap();
+        let ctx = make_osv_ctx_at(queried_at);
+        let results = vec![make_check_result(
+            "lodash",
+            "4.17.21",
+            "npm",
+            "pass",
+            vec![],
+        )];
+        let cfg = Config::default();
+
+        let output = render_osv(&results, Some(&ctx), &cfg);
+        let v: serde_json::Value = serde_json::from_str(&output).expect("valid JSON");
+
+        let qs = v["osv_snapshot"]["queried_at"]
+            .as_str()
+            .expect("T-088-02: osv_snapshot.queried_at must be a string");
+        assert!(
+            qs.contains("2026-06-04"),
+            "T-088-02: queried_at must be the query date, got: {qs}"
+        );
+        // Validate RFC 3339 parse
+        chrono::DateTime::parse_from_rfc3339(qs)
+            .expect("T-088-02: queried_at must be a valid RFC 3339 timestamp");
+    }
+
+    /// T-088-07: Default valid_until is 24 hours after osv_queried_at.
+    #[test]
+    fn t088_07_valid_until_is_24h_after_queried_at() {
+        // T-088-07
+        use chrono::TimeZone as _;
+        let queried_at = chrono::Utc.with_ymd_and_hms(2026, 6, 4, 12, 0, 0).unwrap();
+        let ctx = make_osv_ctx_at(queried_at);
+        let results = vec![make_check_result(
+            "lodash",
+            "4.17.21",
+            "npm",
+            "pass",
+            vec![],
+        )];
+        let mut cfg = Config::default();
+        cfg.freshness.valid_until_hours = 24;
+
+        let output = render_osv(&results, Some(&ctx), &cfg);
+        let v: serde_json::Value = serde_json::from_str(&output).expect("valid JSON");
+
+        let vu = v["valid_until"]
+            .as_str()
+            .expect("T-088-07: valid_until must be a string");
+        // queried_at = 2026-06-04T12:00:00Z → valid_until = 2026-06-05T12:00:00Z
+        assert_eq!(
+            vu, "2026-06-05T12:00:00+00:00",
+            "T-088-07: valid_until must be exactly 24h after queried_at, got: {vu}"
+        );
+    }
+
+    /// T-088-09: freshness.valid_until_hours = 1 changes the window.
+    #[test]
+    fn t088_09_valid_until_hours_1_changes_window() {
+        // T-088-09
+        use chrono::TimeZone as _;
+        let queried_at = chrono::Utc.with_ymd_and_hms(2026, 6, 4, 12, 0, 0).unwrap();
+        let ctx = make_osv_ctx_at(queried_at);
+        let results = vec![make_check_result(
+            "lodash",
+            "4.17.21",
+            "npm",
+            "pass",
+            vec![],
+        )];
+        let mut cfg = Config::default();
+        cfg.freshness.valid_until_hours = 1;
+
+        let output = render_osv(&results, Some(&ctx), &cfg);
+        let v: serde_json::Value = serde_json::from_str(&output).expect("valid JSON");
+
+        let vu = v["valid_until"]
+            .as_str()
+            .expect("T-088-09: valid_until must be a string");
+        // queried_at = 2026-06-04T12:00:00Z → valid_until = 2026-06-04T13:00:00Z
+        assert_eq!(
+            vu, "2026-06-04T13:00:00+00:00",
+            "T-088-09: valid_until with 1h window must be 13:00, got: {vu}"
+        );
+    }
+
+    /// T-088-10: valid_until_hours = 168 (one week) is accepted.
+    #[test]
+    fn t088_10_valid_until_hours_168_accepted_and_used() {
+        // T-088-10
+        use chrono::TimeZone as _;
+        let queried_at = chrono::Utc.with_ymd_and_hms(2026, 6, 4, 12, 0, 0).unwrap();
+        let ctx = make_osv_ctx_at(queried_at);
+        let results = vec![make_check_result(
+            "lodash",
+            "4.17.21",
+            "npm",
+            "pass",
+            vec![],
+        )];
+        let mut cfg = Config::default();
+        cfg.freshness.valid_until_hours = 168;
+
+        let output = render_osv(&results, Some(&ctx), &cfg);
+        let v: serde_json::Value = serde_json::from_str(&output).expect("valid JSON");
+
+        let vu = v["valid_until"]
+            .as_str()
+            .expect("T-088-10: valid_until must be a string");
+        // queried_at = 2026-06-04T12:00:00Z → valid_until = 2026-06-11T12:00:00Z (+168h)
+        assert_eq!(
+            vu, "2026-06-11T12:00:00+00:00",
+            "T-088-10: valid_until with 168h window must be one week later, got: {vu}"
+        );
+    }
+
+    /// T-088-06: When osv_ctx is None, osv_snapshot is absent from OSV output.
+    #[test]
+    fn t088_06_no_freshness_when_ctx_none_osv() {
+        // T-088-06
+        let results = vec![make_check_result(
+            "lodash",
+            "4.17.21",
+            "npm",
+            "pass",
+            vec![],
+        )];
+        let output = render_osv(&results, None, &Config::default());
+        assert!(
+            !output.contains("osv_snapshot"),
+            "T-088-06: OSV output must not contain osv_snapshot when ctx is None"
+        );
+        assert!(
+            !output.contains("valid_until"),
+            "T-088-06: OSV output must not contain valid_until when ctx is None"
+        );
+    }
+
+    /// T-088-12: valid_until and osv_queried_at are inside the payload (base64-decoded),
+    /// not in the outer DSSE envelope wrapper.
+    #[test]
+    fn t088_12_freshness_inside_payload_not_envelope() {
+        // T-088-12
+        use base64::Engine as _;
+        use chrono::TimeZone as _;
+        let queried_at = chrono::Utc.with_ymd_and_hms(2026, 6, 4, 12, 0, 0).unwrap();
+        let ctx = make_osv_ctx_at(queried_at);
+        let results = vec![make_check_result(
+            "lodash",
+            "4.17.21",
+            "npm",
+            "pass",
+            vec![],
+        )];
+        let signer = interchange_sign::StaticEd25519Signer::generate();
+        let mut cfg = Config::default();
+        cfg.freshness.valid_until_hours = 24;
+
+        let envelope_str = produce_serialized_output(
+            &results,
+            &OutputFormat::Osv,
+            false,
+            &signer,
+            Some(&ctx),
+            &cfg,
+        )
+        .expect("T-088-12: signing must succeed");
+
+        let envelope: serde_json::Value =
+            serde_json::from_str(&envelope_str).expect("T-088-12: envelope must be valid JSON");
+
+        // The outer envelope must NOT directly contain freshness fields.
+        assert!(
+            envelope.get("osv_snapshot").is_none(),
+            "T-088-12: outer envelope must not contain osv_snapshot directly"
+        );
+        assert!(
+            envelope.get("valid_until").is_none(),
+            "T-088-12: outer envelope must not contain valid_until directly"
+        );
+
+        // Decode the payload and confirm freshness is inside.
+        let payload_b64 = envelope["payload"]
+            .as_str()
+            .expect("T-088-12: envelope must have a payload field");
+        let payload_bytes = base64::engine::general_purpose::STANDARD
+            .decode(payload_b64)
+            .expect("T-088-12: payload must be valid base64");
+        let payload: serde_json::Value =
+            serde_json::from_slice(&payload_bytes).expect("T-088-12: payload must be valid JSON");
+
+        assert!(
+            payload.get("osv_snapshot").is_some(),
+            "T-088-12: osv_snapshot must be inside the decoded payload"
+        );
+        assert!(
+            payload.get("valid_until").is_some(),
+            "T-088-12: valid_until must be inside the decoded payload"
+        );
+    }
+
+    /// T-088-13: A consumer can extract valid_until without verifying the signature
+    /// (just base64-decode the payload and parse JSON).
+    #[test]
+    fn t088_13_consumer_can_read_valid_until_without_verification() {
+        // T-088-13
+        use base64::Engine as _;
+        use chrono::TimeZone as _;
+        let queried_at = chrono::Utc.with_ymd_and_hms(2026, 6, 4, 12, 0, 0).unwrap();
+        let ctx = make_osv_ctx_at(queried_at);
+        let results = vec![make_check_result(
+            "lodash",
+            "4.17.21",
+            "npm",
+            "pass",
+            vec![],
+        )];
+        let signer = interchange_sign::StaticEd25519Signer::generate();
+        let cfg = Config::default();
+
+        let envelope_str = produce_serialized_output(
+            &results,
+            &OutputFormat::Osv,
+            false,
+            &signer,
+            Some(&ctx),
+            &cfg,
+        )
+        .expect("sign");
+
+        // Consumer path: parse envelope → decode payload → read valid_until
+        // without calling any verify function.
+        let envelope: serde_json::Value = serde_json::from_str(&envelope_str).unwrap();
+        let payload_b64 = envelope["payload"].as_str().unwrap();
+        let payload_bytes = base64::engine::general_purpose::STANDARD
+            .decode(payload_b64)
+            .unwrap();
+        let payload: serde_json::Value = serde_json::from_slice(&payload_bytes).unwrap();
+        let valid_until = payload["valid_until"]
+            .as_str()
+            .expect("T-088-13: valid_until must be readable from the unverified payload");
+        assert!(
+            !valid_until.is_empty(),
+            "T-088-13: valid_until must be non-empty"
+        );
+        // Must be a parseable RFC 3339 timestamp
+        chrono::DateTime::parse_from_rfc3339(valid_until)
+            .expect("T-088-13: valid_until must be valid RFC 3339");
+    }
+
+    /// T-088-14: No OCSP / CRL revocation-list calls are made (static assertion).
+    /// The offline guarantee is preserved — no online revocation calls exist in the
+    /// freshness implementation. The spec permits satisfying this via code review
+    /// for a static architectural guarantee (no OCSP/CRL client code exists).
+    const _T_088_14_NO_OCSP_CRL_CALLS: () = ();
+
+    /// T-088-15: --format native output does not contain freshness fields.
+    /// Even when an OsvQueryContext is present, the Native render path must not
+    /// leak freshness fields into its output. render_results returns an empty
+    /// string for Native (inline table rendering happens in run_check), so any
+    /// freshness leakage here would be a regression we can catch.
+    #[test]
+    fn t088_15_native_format_no_freshness_fields() {
+        // T-088-15
+        use chrono::TimeZone as _;
+        let queried_at = chrono::Utc.with_ymd_and_hms(2026, 6, 4, 12, 0, 0).unwrap();
+        let ctx = make_osv_ctx_at(queried_at);
+        let results = vec![make_check_result(
+            "lodash",
+            "4.17.21",
+            "npm",
+            "pass",
+            vec![],
+        )];
+        let cfg = Config::default();
+
+        // Even when an OsvQueryContext is present, Native must produce no freshness fields.
+        let out = render_results(&results, &OutputFormat::Native, Some(&ctx), &cfg)
+            .expect("T-088-15: Native dispatch must succeed");
+
+        assert!(
+            !out.contains("valid_until"),
+            "T-088-15: --format native must not contain valid_until, got: {out:.100}"
+        );
+        assert!(
+            !out.contains("osv_snapshot"),
+            "T-088-15: --format native must not contain osv_snapshot, got: {out:.100}"
+        );
+    }
+
+    /// T-088-16: --format json output does not contain freshness fields.
+    #[test]
+    fn t088_16_json_format_no_freshness_fields() {
+        // T-088-16
+        use chrono::TimeZone as _;
+        let queried_at = chrono::Utc.with_ymd_and_hms(2026, 6, 4, 12, 0, 0).unwrap();
+        let ctx = make_osv_ctx_at(queried_at);
+        let results = vec![make_check_result(
+            "lodash",
+            "4.17.21",
+            "npm",
+            "pass",
+            vec![],
+        )];
+        let signer = interchange_sign::StaticEd25519Signer::generate();
+        let cfg = Config::default();
+
+        // Even when an OsvQueryContext is present, the Json path must omit freshness.
+        // Note: produce_serialized_output passes None for osv_ctx on the Json path.
+        let out = produce_serialized_output(
+            &results,
+            &OutputFormat::Json,
+            false,
+            &signer,
+            Some(&ctx), // ctx is present but Json path ignores it
+            &cfg,
+        )
+        .expect("T-088-16: Json dispatch must succeed");
+
+        assert!(
+            !out.contains("valid_until"),
+            "T-088-16: --format json must not contain valid_until, got: {out:.100}"
+        );
+        assert!(
+            !out.contains("osv_snapshot"),
+            "T-088-16: --format json must not contain osv_snapshot, got: {out:.100}"
+        );
+    }
+
+    /// T-088-19: No regressions — tooling gate.
+    const _T_088_19_NO_REGRESSIONS: () = ();
 }
