@@ -1,7 +1,22 @@
 use anyhow::{Context, Result};
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::types::VulnerabilityInfo;
+
+/// Context returned alongside OSV query results.
+///
+/// Captures the exact instant a fresh OSV query was issued so the downstream
+/// render functions can embed `osv_snapshot.queried_at` and compute `valid_until`
+/// inside the signed interchange payload (REQ-088-01).
+///
+/// When OSV was NOT queried (cache-only hit), no `OsvQueryContext` is produced —
+/// the caller holds `None` and the render functions omit the freshness fields.
+#[derive(Debug, Clone)]
+pub struct OsvQueryContext {
+    /// The instant (UTC) at which the OSV batch query was issued.
+    pub queried_at: DateTime<Utc>,
+}
 
 /// Client for querying the OSV.dev vulnerability database.
 ///
@@ -164,6 +179,29 @@ impl OsvClient {
             .collect();
 
         Ok(vulns)
+    }
+
+    /// Query OSV for a batch of (name, version, ecosystem) triples and return
+    /// the results together with the query context.
+    ///
+    /// Captures `queried_at = Utc::now()` before the first HTTP call so the
+    /// timestamp reflects when the data was requested, not when parsing finished.
+    ///
+    /// Returns `(Vec<Vec<VulnerabilityInfo>>, OsvQueryContext)` — one inner Vec
+    /// per input triple, in the same order.  If any individual query fails the
+    /// error is returned and no context is produced (the caller should treat the
+    /// freshness context as unavailable for that run).
+    pub async fn query_batch(
+        &self,
+        packages: &[(&str, &str, &str)],
+    ) -> Result<(Vec<Vec<VulnerabilityInfo>>, OsvQueryContext)> {
+        let queried_at = Utc::now();
+        let mut all_results = Vec::with_capacity(packages.len());
+        for (name, version, ecosystem) in packages {
+            let results = self.query(name, version, ecosystem).await?;
+            all_results.push(results);
+        }
+        Ok((all_results, OsvQueryContext { queried_at }))
     }
 }
 
@@ -368,5 +406,43 @@ mod tests {
     fn registry_type_to_ecosystem_crates_and_go() {
         assert_eq!(registry_to_ecosystem(&RegistryType::Crates), "crates.io");
         assert_eq!(registry_to_ecosystem(&RegistryType::Go), "Go");
+    }
+
+    // T-088-01: query_batch returns OsvQueryContext with a queried_at within 1 second
+    // of Utc::now() at call time.
+    #[tokio::test]
+    async fn t088_01_query_batch_returns_context_with_timestamp() {
+        // T-088-01
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/v1/query"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(osv_response_empty()))
+            .mount(&server)
+            .await;
+
+        let client = OsvClient::new(server.uri());
+        let before = chrono::Utc::now();
+        let (results, ctx) = client
+            .query_batch(&[("safe-pkg", "1.0.0", "npm")])
+            .await
+            .expect("T-088-01: query_batch must succeed");
+        let after = chrono::Utc::now();
+
+        assert_eq!(results.len(), 1, "T-088-01: one result per input triple");
+        assert!(
+            ctx.queried_at >= before,
+            "T-088-01: queried_at must not be before the call"
+        );
+        assert!(
+            ctx.queried_at <= after,
+            "T-088-01: queried_at must not be after the call returns"
+        );
+        // Also assert within 1 second (relaxed to 5s for slow CI)
+        let delta = (ctx.queried_at - before).num_milliseconds();
+        assert!(
+            (0..5000).contains(&delta),
+            "T-088-01: queried_at should be within 5s of call start, got delta={delta}ms"
+        );
     }
 }

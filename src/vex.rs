@@ -13,11 +13,13 @@
 //! REQ-085-03: Stub replaced (wired in main.rs)
 
 use anyhow::Result;
-use chrono::Utc;
+use chrono::{Duration, Utc};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
 use crate::CheckResult;
+use crate::config::Config;
+use crate::osv::OsvQueryContext;
 use crate::sbom::{registry_type_from_str, to_purl};
 use crate::types::VulnerabilityInfo;
 
@@ -60,7 +62,15 @@ pub(crate) fn osv_to_vex_status(info: &VulnerabilityInfo) -> &'static str {
 ///
 /// Packages with no vulnerability findings contribute no statements.
 /// The `statements` array is `[]` when all packages pass cleanly.
-pub(crate) fn render_vex(results: &[CheckResult]) -> Result<String> {
+///
+/// When `osv_ctx` is `Some`, freshness fields are added at the top level:
+/// - `metadata.osv_queried_at`: RFC 3339 timestamp of the OSV query.
+/// - `valid_until`: RFC 3339 timestamp of expiry.
+pub(crate) fn render_vex(
+    results: &[CheckResult],
+    osv_ctx: Option<&OsvQueryContext>,
+    config: &Config,
+) -> Result<String> {
     let timestamp = Utc::now().to_rfc3339();
     let doc_id = format!("urn:dep-scan:vex:{}", Uuid::new_v4());
 
@@ -83,7 +93,7 @@ pub(crate) fn render_vex(results: &[CheckResult]) -> Result<String> {
         }
     }
 
-    let doc = json!({
+    let mut doc = json!({
         "@context": "https://openvex.dev/ns/v0.2.0",
         "@id": doc_id,
         "author": "dep-scan",
@@ -91,12 +101,23 @@ pub(crate) fn render_vex(results: &[CheckResult]) -> Result<String> {
         "statements": statements
     });
 
+    // REQ-088-02: embed freshness signals when we have a fresh OSV query context.
+    if let Some(ctx) = osv_ctx {
+        let queried_at_str = ctx.queried_at.to_rfc3339();
+        let valid_until =
+            ctx.queried_at + Duration::hours(config.freshness.valid_until_hours as i64);
+        let valid_until_str = valid_until.to_rfc3339();
+        doc["metadata"] = json!({ "osv_queried_at": queried_at_str });
+        doc["valid_until"] = json!(valid_until_str);
+    }
+
     Ok(serde_json::to_string_pretty(&doc)?)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::Config;
 
     /// Build a minimal `VulnerabilityInfo` for unit tests.
     fn make_vuln(
@@ -142,7 +163,8 @@ mod tests {
     #[test]
     fn t085_01_no_vulns_no_statement() {
         let results = vec![make_result("lodash", "4.17.21", "npm", "pass", vec![])];
-        let output = render_vex(&results).expect("T-085-01: render_vex must succeed");
+        let output = render_vex(&results, None, &Config::default())
+            .expect("T-085-01: render_vex must succeed");
         let v: serde_json::Value =
             serde_json::from_str(&output).expect("T-085-01: output must be valid JSON");
         let stmts = v["statements"]
@@ -217,8 +239,8 @@ mod tests {
         let result_pass = make_result("express", "4.18.2", "npm", "pass", vec![vuln.clone()]);
 
         // Run the package with "block" verdict through render_vex.
-        let output_block =
-            render_vex(&[result_block]).expect("T-085-05: render_vex must succeed for block");
+        let output_block = render_vex(&[result_block], None, &Config::default())
+            .expect("T-085-05: render_vex must succeed for block");
         let v_block: serde_json::Value =
             serde_json::from_str(&output_block).expect("T-085-05: block output must be valid JSON");
         let stmts_block = v_block["statements"]
@@ -234,8 +256,8 @@ mod tests {
             .expect("T-085-05: block statement must have a status field");
 
         // Run the package with "pass" verdict through render_vex (same VulnerabilityInfo).
-        let output_pass =
-            render_vex(&[result_pass]).expect("T-085-05: render_vex must succeed for pass");
+        let output_pass = render_vex(&[result_pass], None, &Config::default())
+            .expect("T-085-05: render_vex must succeed for pass");
         let v_pass: serde_json::Value =
             serde_json::from_str(&output_pass).expect("T-085-05: pass output must be valid JSON");
         let stmts_pass = v_pass["statements"]
@@ -273,7 +295,8 @@ mod tests {
         // T-085-06
         let vulns = vec![make_vuln("CVE-2021-23337", vec!["4.17.21"], None, None)];
         let results = vec![make_result("lodash", "4.17.21", "npm", "block", vulns)];
-        let output = render_vex(&results).expect("T-085-06: render_vex must succeed");
+        let output = render_vex(&results, None, &Config::default())
+            .expect("T-085-06: render_vex must succeed");
         let _: serde_json::Value =
             serde_json::from_str(&output).expect("T-085-06: output must be valid JSON");
     }
@@ -284,7 +307,7 @@ mod tests {
         // T-085-07
         let vulns = vec![make_vuln("CVE-2021-23337", vec!["4.17.21"], None, None)];
         let results = vec![make_result("lodash", "4.17.21", "npm", "block", vulns)];
-        let output = render_vex(&results).expect("render");
+        let output = render_vex(&results, None, &Config::default()).expect("render");
         let v: serde_json::Value = serde_json::from_str(&output).expect("valid JSON");
 
         assert_eq!(
@@ -320,7 +343,7 @@ mod tests {
             Some("high"),
         )];
         let results = vec![make_result("lodash", "4.17.21", "npm", "block", vulns)];
-        let output = render_vex(&results).expect("render");
+        let output = render_vex(&results, None, &Config::default()).expect("render");
         let v: serde_json::Value = serde_json::from_str(&output).expect("valid JSON");
         let stmts = v["statements"]
             .as_array()
@@ -356,7 +379,7 @@ mod tests {
         // T-085-09
         let vulns = vec![make_vuln("CVE-2021-23337", vec!["4.17.21"], None, None)];
         let results = vec![make_result("lodash", "4.17.21", "npm", "block", vulns)];
-        let output = render_vex(&results).expect("render");
+        let output = render_vex(&results, None, &Config::default()).expect("render");
         let v: serde_json::Value = serde_json::from_str(&output).expect("valid JSON");
         let stmts = v["statements"].as_array().expect("statements array");
         let product_id = stmts[0]["products"][0]["id"]
@@ -386,7 +409,7 @@ mod tests {
             make_result("pkg-a", "1.0.0", "npm", "block", vulns_a),
             make_result("pkg-b", "2.0.0", "npm", "warn", vulns_b),
         ];
-        let output = render_vex(&results).expect("render");
+        let output = render_vex(&results, None, &Config::default()).expect("render");
         let v: serde_json::Value = serde_json::from_str(&output).expect("valid JSON");
         let stmts = v["statements"]
             .as_array()
@@ -406,7 +429,8 @@ mod tests {
             make_result("lodash", "4.17.21", "npm", "pass", vec![]),
             make_result("requests", "2.31.0", "pypi", "pass", vec![]),
         ];
-        let output = render_vex(&results).expect("T-085-11: render_vex must succeed");
+        let output = render_vex(&results, None, &Config::default())
+            .expect("T-085-11: render_vex must succeed");
         let v: serde_json::Value = serde_json::from_str(&output).expect("valid JSON");
         let stmts = v["statements"]
             .as_array()
@@ -445,7 +469,8 @@ mod tests {
                 vec![make_vuln("GHSA-test", vec![], None, Some("medium"))],
             ),
         ];
-        let output = render_vex(&results).expect("T-085-12: render_vex must succeed");
+        let output = render_vex(&results, None, &Config::default())
+            .expect("T-085-12: render_vex must succeed");
         let v: serde_json::Value = serde_json::from_str(&output).expect("valid JSON");
         let stmts = v["statements"]
             .as_array()
@@ -498,7 +523,7 @@ mod tests {
         // Also verify in rendered output
         let all_vulns = vec![vuln_fixed, vuln_affected, vuln_under_inv];
         let results = vec![make_result("pkg-x", "1.0.0", "npm", "block", all_vulns)];
-        let output = render_vex(&results).expect("render");
+        let output = render_vex(&results, None, &Config::default()).expect("render");
         assert!(
             !output.contains("not_affected"),
             "T-085-13: rendered VEX output must never contain 'not_affected'"
@@ -528,7 +553,7 @@ mod tests {
 
         // Exercise the real dispatch path: render_results is the same function
         // that run_check delegates to for non-native formats.
-        let output = crate::render_results(&results, &OutputFormat::Vex)
+        let output = crate::render_results(&results, &OutputFormat::Vex, None, &Config::default())
             .expect("T-085-14: render_results(Vex) must succeed");
 
         // Must be valid JSON.
@@ -563,4 +588,72 @@ mod tests {
     /// T-085-16: No regressions — cargo test / clippy / fmt all pass.
     /// Verified in the pre-commit gate. This marker satisfies the spec-marker grep.
     const _T_085_16_NO_REGRESSIONS: () = ();
+
+    // ── T-088: freshness in VEX ───────────────────────────────────────────────
+
+    fn make_osv_ctx(queried_at: chrono::DateTime<chrono::Utc>) -> OsvQueryContext {
+        OsvQueryContext { queried_at }
+    }
+
+    /// T-088-05: render_vex embeds osv_queried_at in metadata field
+    #[test]
+    fn t088_05_vex_osv_snapshot_in_metadata() {
+        // T-088-05
+        use chrono::TimeZone as _;
+        let queried_at = chrono::Utc.with_ymd_and_hms(2026, 6, 4, 12, 0, 0).unwrap();
+        let ctx = make_osv_ctx(queried_at);
+        let vulns = vec![make_vuln("CVE-2021-23337", vec!["4.17.21"], None, None)];
+        let results = vec![make_result("lodash", "4.17.21", "npm", "block", vulns)];
+        let cfg = Config::default();
+
+        let output = render_vex(&results, Some(&ctx), &cfg).expect("render");
+        let v: serde_json::Value = serde_json::from_str(&output).expect("valid JSON");
+
+        let qs = v["metadata"]["osv_queried_at"]
+            .as_str()
+            .expect("T-088-05: metadata.osv_queried_at must be a string in VEX output");
+        assert!(
+            qs.contains("2026-06-04"),
+            "T-088-05: metadata.osv_queried_at must contain the query date, got: {qs}"
+        );
+    }
+
+    /// T-088-08 (partial): valid_until is present in VEX output
+    #[test]
+    fn t088_08_vex_has_valid_until() {
+        // T-088-08
+        use chrono::TimeZone as _;
+        let queried_at = chrono::Utc.with_ymd_and_hms(2026, 6, 4, 12, 0, 0).unwrap();
+        let ctx = make_osv_ctx(queried_at);
+        let vulns = vec![make_vuln("CVE-2021-23337", vec!["4.17.21"], None, None)];
+        let results = vec![make_result("lodash", "4.17.21", "npm", "block", vulns)];
+        let cfg = Config::default(); // 24h
+
+        let output = render_vex(&results, Some(&ctx), &cfg).expect("render");
+        let v: serde_json::Value = serde_json::from_str(&output).expect("valid JSON");
+
+        let vu = v["valid_until"]
+            .as_str()
+            .expect("T-088-08: valid_until must be present in VEX output");
+        assert!(
+            vu.contains("2026-06-05"),
+            "T-088-08: valid_until must be 24h after queried_at (2026-06-05), got: {vu}"
+        );
+    }
+
+    /// T-088-06 (partial): When osv_ctx is None, no freshness fields appear in VEX
+    #[test]
+    fn t088_06_vex_no_freshness_when_ctx_none() {
+        // T-088-06
+        let results = vec![make_result("lodash", "4.17.21", "npm", "pass", vec![])];
+        let output = render_vex(&results, None, &Config::default()).expect("render");
+        assert!(
+            !output.contains("osv_queried_at"),
+            "T-088-06: VEX must not contain osv_queried_at when ctx is None"
+        );
+        assert!(
+            !output.contains("valid_until"),
+            "T-088-06: VEX must not contain valid_until when ctx is None"
+        );
+    }
 }

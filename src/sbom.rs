@@ -12,11 +12,13 @@
 //! REQ-084-03: PURL generation helper
 
 use anyhow::Result;
-use chrono::Utc;
+use chrono::{Duration, Utc};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
 use crate::CheckResult;
+use crate::config::Config;
+use crate::osv::OsvQueryContext;
 use crate::registry::RegistryType;
 
 /// Map a `RegistryType` to a PURL type string.
@@ -58,7 +60,15 @@ pub(crate) fn registry_type_from_str(s: &str) -> RegistryType {
 /// - `components` array: one per analyzed package (type "library", name,
 ///   version, purl, properties with dep-scan:result)
 /// - `vulnerabilities` array: entries for any packages with vuln findings
-pub(crate) fn render_cyclonedx(results: &[CheckResult]) -> Result<String> {
+///
+/// When `osv_ctx` is `Some`, freshness fields are embedded:
+/// - `metadata.properties` gets `dep-scan:osv_queried_at` and `dep-scan:valid_until`.
+/// - Top-level `valid_until` field for quick consumer access.
+pub(crate) fn render_cyclonedx(
+    results: &[CheckResult],
+    osv_ctx: Option<&OsvQueryContext>,
+    config: &Config,
+) -> Result<String> {
     let timestamp = Utc::now().to_rfc3339();
     let serial_number = format!("urn:uuid:{}", Uuid::new_v4());
 
@@ -106,25 +116,55 @@ pub(crate) fn render_cyclonedx(results: &[CheckResult]) -> Result<String> {
 
     let dep_scan_version = env!("CARGO_PKG_VERSION");
 
+    // Build metadata.properties — starts empty; freshness entries added below.
+    let mut metadata_properties: Vec<Value> = Vec::new();
+    if let Some(ctx) = osv_ctx {
+        let queried_at_str = ctx.queried_at.to_rfc3339();
+        let valid_until =
+            ctx.queried_at + Duration::hours(config.freshness.valid_until_hours as i64);
+        let valid_until_str = valid_until.to_rfc3339();
+        metadata_properties.push(json!({
+            "name": "dep-scan:osv_queried_at",
+            "value": queried_at_str
+        }));
+        metadata_properties.push(json!({
+            "name": "dep-scan:valid_until",
+            "value": valid_until_str
+        }));
+    }
+
+    let mut metadata = json!({
+        "timestamp": timestamp,
+        "tools": [
+            {
+                "name": "dep-scan",
+                "version": dep_scan_version
+            }
+        ]
+    });
+
+    if !metadata_properties.is_empty() {
+        metadata["properties"] = json!(metadata_properties);
+    }
+
     let mut doc = json!({
         "bomFormat": "CycloneDX",
         "specVersion": "1.4",
         "version": 1,
         "serialNumber": serial_number,
-        "metadata": {
-            "timestamp": timestamp,
-            "tools": [
-                {
-                    "name": "dep-scan",
-                    "version": dep_scan_version
-                }
-            ]
-        },
+        "metadata": metadata,
         "components": components
     });
 
     if !vulnerabilities.is_empty() {
         doc["vulnerabilities"] = json!(vulnerabilities);
+    }
+
+    // Embed top-level valid_until for quick consumer access (REQ-088-02).
+    if let Some(ctx) = osv_ctx {
+        let valid_until =
+            ctx.queried_at + Duration::hours(config.freshness.valid_until_hours as i64);
+        doc["valid_until"] = json!(valid_until.to_rfc3339());
     }
 
     Ok(serde_json::to_string_pretty(&doc)?)
@@ -136,7 +176,15 @@ pub(crate) fn render_cyclonedx(results: &[CheckResult]) -> Result<String> {
 /// - `spdxVersion`, `SPDXID`, `name`, `dataLicense`, `documentNamespace`
 /// - `packages` array: one per analyzed package (SPDXID, name, versionInfo,
 ///   externalRefs with PURL, comment carrying dep-scan verdict)
-pub(crate) fn render_spdx(results: &[CheckResult]) -> Result<String> {
+///
+/// When `osv_ctx` is `Some`, freshness fields are added at the top level:
+/// - `dep_scan_osv_queried_at`: RFC 3339 timestamp of the OSV query.
+/// - `valid_until`: RFC 3339 timestamp of expiry.
+pub(crate) fn render_spdx(
+    results: &[CheckResult],
+    osv_ctx: Option<&OsvQueryContext>,
+    config: &Config,
+) -> Result<String> {
     let doc_uuid = Uuid::new_v4();
     let document_namespace = format!("urn:dep-scan:sbom:{doc_uuid}");
 
@@ -172,7 +220,7 @@ pub(crate) fn render_spdx(results: &[CheckResult]) -> Result<String> {
         })
         .collect();
 
-    let doc = json!({
+    let mut doc = json!({
         "spdxVersion": "SPDX-2.3",
         "SPDXID": "SPDXRef-DOCUMENT",
         "name": "dep-scan-analysis",
@@ -181,12 +229,24 @@ pub(crate) fn render_spdx(results: &[CheckResult]) -> Result<String> {
         "packages": packages
     });
 
+    // REQ-088-02: embed freshness signals in the SPDX document when we have a
+    // fresh OSV query context.
+    if let Some(ctx) = osv_ctx {
+        let queried_at_str = ctx.queried_at.to_rfc3339();
+        let valid_until =
+            ctx.queried_at + Duration::hours(config.freshness.valid_until_hours as i64);
+        let valid_until_str = valid_until.to_rfc3339();
+        doc["dep_scan_osv_queried_at"] = json!(queried_at_str);
+        doc["valid_until"] = json!(valid_until_str);
+    }
+
     Ok(serde_json::to_string_pretty(&doc)?)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::Config;
     use crate::types::VulnerabilityInfo;
 
     fn make_result(
@@ -254,7 +314,8 @@ mod tests {
     #[test]
     fn t084_01_cyclonedx_valid_json_with_bom_format() {
         let results = two_package_results();
-        let output = render_cyclonedx(&results).expect("T-084-01: render must succeed");
+        let output = render_cyclonedx(&results, None, &Config::default())
+            .expect("T-084-01: render must succeed");
         let value: serde_json::Value =
             serde_json::from_str(&output).expect("T-084-01: output must be valid JSON");
         assert_eq!(
@@ -268,7 +329,7 @@ mod tests {
     #[test]
     fn t084_02_cyclonedx_required_top_level_fields() {
         let results = two_package_results();
-        let output = render_cyclonedx(&results).expect("render");
+        let output = render_cyclonedx(&results, None, &Config::default()).expect("render");
         let v: serde_json::Value = serde_json::from_str(&output).expect("valid JSON");
 
         assert_eq!(
@@ -305,7 +366,7 @@ mod tests {
     #[test]
     fn t084_03_metadata_timestamp_is_rfc3339() {
         let results = two_package_results();
-        let output = render_cyclonedx(&results).expect("render");
+        let output = render_cyclonedx(&results, None, &Config::default()).expect("render");
         let v: serde_json::Value = serde_json::from_str(&output).expect("valid JSON");
         let ts = v["metadata"]["timestamp"]
             .as_str()
@@ -318,7 +379,7 @@ mod tests {
     #[test]
     fn t084_04_metadata_tools_names_dep_scan() {
         let results = two_package_results();
-        let output = render_cyclonedx(&results).expect("render");
+        let output = render_cyclonedx(&results, None, &Config::default()).expect("render");
         let v: serde_json::Value = serde_json::from_str(&output).expect("valid JSON");
         let tools = v["metadata"]["tools"]
             .as_array()
@@ -336,7 +397,7 @@ mod tests {
     #[test]
     fn t084_05_components_has_two_entries_with_library_type() {
         let results = two_package_results();
-        let output = render_cyclonedx(&results).expect("render");
+        let output = render_cyclonedx(&results, None, &Config::default()).expect("render");
         let v: serde_json::Value = serde_json::from_str(&output).expect("valid JSON");
         let comps = v["components"]
             .as_array()
@@ -355,7 +416,7 @@ mod tests {
     #[test]
     fn t084_06_component_identity_fields() {
         let results = two_package_results();
-        let output = render_cyclonedx(&results).expect("render");
+        let output = render_cyclonedx(&results, None, &Config::default()).expect("render");
         let v: serde_json::Value = serde_json::from_str(&output).expect("valid JSON");
         let comps = v["components"].as_array().expect("components array");
 
@@ -403,7 +464,7 @@ mod tests {
             make_result("lodash", "4.17.21", "npm", "pass", vec![]),
             make_result("evil-pkg", "1.0.0", "npm", "block", vec![]),
         ];
-        let output = render_cyclonedx(&results).expect("render");
+        let output = render_cyclonedx(&results, None, &Config::default()).expect("render");
         let v: serde_json::Value = serde_json::from_str(&output).expect("valid JSON");
         let comps = v["components"].as_array().expect("components array");
 
@@ -449,7 +510,7 @@ mod tests {
             },
         ];
         let results = vec![make_result("evil-pkg", "1.0.0", "npm", "block", vulns)];
-        let output = render_cyclonedx(&results).expect("render");
+        let output = render_cyclonedx(&results, None, &Config::default()).expect("render");
         let v: serde_json::Value = serde_json::from_str(&output).expect("valid JSON");
 
         let vul_arr = v["vulnerabilities"]
@@ -478,7 +539,8 @@ mod tests {
             make_result("lodash", "4.17.21", "npm", "pass", vec![]),
             make_result("requests", "2.31.0", "pypi", "pass", vec![]),
         ];
-        let output = render_cyclonedx(&results).expect("T-084-09: render must succeed");
+        let output = render_cyclonedx(&results, None, &Config::default())
+            .expect("T-084-09: render must succeed");
         let v: serde_json::Value = serde_json::from_str(&output).expect("T-084-09: valid JSON");
 
         let comps = v["components"].as_array().expect("components");
@@ -500,8 +562,8 @@ mod tests {
     #[test]
     fn t084_10_serial_numbers_are_unique_per_call() {
         let results = two_package_results();
-        let out1 = render_cyclonedx(&results).expect("render 1");
-        let out2 = render_cyclonedx(&results).expect("render 2");
+        let out1 = render_cyclonedx(&results, None, &Config::default()).expect("render 1");
+        let out2 = render_cyclonedx(&results, None, &Config::default()).expect("render 2");
         let v1: serde_json::Value = serde_json::from_str(&out1).expect("valid JSON 1");
         let v2: serde_json::Value = serde_json::from_str(&out2).expect("valid JSON 2");
         let sn1 = v1["serialNumber"].as_str().expect("serialNumber 1");
@@ -518,7 +580,8 @@ mod tests {
     #[test]
     fn t084_11_spdx_valid_json_with_spdx_version() {
         let results = two_package_results();
-        let output = render_spdx(&results).expect("T-084-11: render must succeed");
+        let output =
+            render_spdx(&results, None, &Config::default()).expect("T-084-11: render must succeed");
         let v: serde_json::Value =
             serde_json::from_str(&output).expect("T-084-11: output must be valid JSON");
         let ver = v["spdxVersion"]
@@ -534,7 +597,7 @@ mod tests {
     #[test]
     fn t084_12_spdx_required_top_level_fields() {
         let results = two_package_results();
-        let output = render_spdx(&results).expect("render");
+        let output = render_spdx(&results, None, &Config::default()).expect("render");
         let v: serde_json::Value = serde_json::from_str(&output).expect("valid JSON");
 
         assert_eq!(
@@ -571,7 +634,7 @@ mod tests {
     #[test]
     fn t084_13_packages_entries_with_version_info() {
         let results = two_package_results();
-        let output = render_spdx(&results).expect("render");
+        let output = render_spdx(&results, None, &Config::default()).expect("render");
         let v: serde_json::Value = serde_json::from_str(&output).expect("valid JSON");
         let pkgs = v["packages"]
             .as_array()
@@ -608,7 +671,7 @@ mod tests {
     #[test]
     fn t084_14_spdx_packages_have_purl_external_ref() {
         let results = two_package_results();
-        let output = render_spdx(&results).expect("render");
+        let output = render_spdx(&results, None, &Config::default()).expect("render");
         let v: serde_json::Value = serde_json::from_str(&output).expect("valid JSON");
         let pkgs = v["packages"].as_array().expect("packages array");
 
@@ -641,7 +704,7 @@ mod tests {
             make_result("lodash", "4.17.21", "npm", "pass", vec![]),
             make_result("evil-pkg", "1.0.0", "npm", "block", vec![]),
         ];
-        let output = render_spdx(&results).expect("render");
+        let output = render_spdx(&results, None, &Config::default()).expect("render");
         let v: serde_json::Value = serde_json::from_str(&output).expect("valid JSON");
         let pkgs = v["packages"].as_array().expect("packages");
 
@@ -679,7 +742,8 @@ mod tests {
             make_result("lodash", "4.17.21", "npm", "pass", vec![]),
             make_result("requests", "2.31.0", "pypi", "pass", vec![]),
         ];
-        let output = render_spdx(&results).expect("T-084-16: render must succeed");
+        let output =
+            render_spdx(&results, None, &Config::default()).expect("T-084-16: render must succeed");
         let _: serde_json::Value = serde_json::from_str(&output)
             .expect("T-084-16: all-pass SPDX output must be valid JSON");
     }
@@ -690,7 +754,8 @@ mod tests {
     #[test]
     fn t084_17_cyclonedx_not_stub() {
         let results = two_package_results();
-        let output = render_cyclonedx(&results).expect("T-084-17: render_cyclonedx must succeed");
+        let output = render_cyclonedx(&results, None, &Config::default())
+            .expect("T-084-17: render_cyclonedx must succeed");
         assert!(
             !output.contains("not yet implemented"),
             "T-084-17: CycloneDX output must not contain 'not yet implemented'"
@@ -705,7 +770,8 @@ mod tests {
     #[test]
     fn t084_18_spdx_not_stub() {
         let results = two_package_results();
-        let output = render_spdx(&results).expect("T-084-18: render_spdx must succeed");
+        let output = render_spdx(&results, None, &Config::default())
+            .expect("T-084-18: render_spdx must succeed");
         assert!(
             !output.contains("not yet implemented"),
             "T-084-18: SPDX output must not contain 'not yet implemented'"
@@ -726,4 +792,144 @@ mod tests {
     /// T-084-20: No regressions — cargo test / clippy / fmt all pass.
     /// Verified in the pre-commit gate. This marker satisfies the spec-marker grep.
     const _T_084_20_NO_REGRESSIONS: () = ();
+
+    // ── T-088: freshness fields in CycloneDX and SPDX ────────────────────────
+
+    fn make_osv_ctx(queried_at: chrono::DateTime<chrono::Utc>) -> OsvQueryContext {
+        OsvQueryContext { queried_at }
+    }
+
+    /// T-088-03: render_cyclonedx embeds dep-scan:osv_queried_at in metadata.properties
+    #[test]
+    fn t088_03_cyclonedx_osv_snapshot_in_metadata_properties() {
+        // T-088-03
+        use chrono::TimeZone as _;
+        let queried_at = chrono::Utc.with_ymd_and_hms(2026, 6, 4, 12, 0, 0).unwrap();
+        let ctx = make_osv_ctx(queried_at);
+        let results = two_package_results();
+        let mut cfg = Config::default();
+        cfg.freshness.valid_until_hours = 24;
+
+        let output = render_cyclonedx(&results, Some(&ctx), &cfg).expect("render");
+        let v: serde_json::Value = serde_json::from_str(&output).expect("valid JSON");
+
+        let props = v["metadata"]["properties"]
+            .as_array()
+            .expect("T-088-03: metadata.properties must be an array");
+        let has_queried_at = props
+            .iter()
+            .any(|p| p.get("name").and_then(|n| n.as_str()) == Some("dep-scan:osv_queried_at"));
+        assert!(
+            has_queried_at,
+            "T-088-03: metadata.properties must contain dep-scan:osv_queried_at, got: {props:?}"
+        );
+        // Check the value is the correct RFC 3339 string
+        let entry = props
+            .iter()
+            .find(|p| p.get("name").and_then(|n| n.as_str()) == Some("dep-scan:osv_queried_at"))
+            .unwrap();
+        let val = entry["value"].as_str().expect("value is a string");
+        assert!(
+            val.contains("2026-06-04"),
+            "T-088-03: osv_queried_at value must contain the queried date, got: {val}"
+        );
+    }
+
+    /// T-088-04: render_spdx embeds dep_scan_osv_queried_at at top level
+    #[test]
+    fn t088_04_spdx_osv_snapshot_top_level() {
+        // T-088-04
+        use chrono::TimeZone as _;
+        let queried_at = chrono::Utc.with_ymd_and_hms(2026, 6, 4, 12, 0, 0).unwrap();
+        let ctx = make_osv_ctx(queried_at);
+        let results = two_package_results();
+        let cfg = Config::default();
+
+        let output = render_spdx(&results, Some(&ctx), &cfg).expect("render");
+        let v: serde_json::Value = serde_json::from_str(&output).expect("valid JSON");
+
+        let qs = v["dep_scan_osv_queried_at"]
+            .as_str()
+            .expect("T-088-04: dep_scan_osv_queried_at must be a string in SPDX output");
+        assert!(
+            qs.contains("2026-06-04"),
+            "T-088-04: dep_scan_osv_queried_at must contain the query date, got: {qs}"
+        );
+    }
+
+    /// T-088-08 (partial): valid_until is present in CycloneDX output
+    #[test]
+    fn t088_08_cyclonedx_has_valid_until() {
+        // T-088-08
+        use chrono::TimeZone as _;
+        let queried_at = chrono::Utc.with_ymd_and_hms(2026, 6, 4, 12, 0, 0).unwrap();
+        let ctx = make_osv_ctx(queried_at);
+        let results = two_package_results();
+        let cfg = Config::default(); // valid_until_hours = 24
+
+        let output = render_cyclonedx(&results, Some(&ctx), &cfg).expect("render");
+        let v: serde_json::Value = serde_json::from_str(&output).expect("valid JSON");
+
+        let vu = v["valid_until"]
+            .as_str()
+            .expect("T-088-08: valid_until must be present in CycloneDX output");
+        assert!(
+            vu.contains("2026-06-05"),
+            "T-088-08: valid_until must be 24h after queried_at (2026-06-05), got: {vu}"
+        );
+    }
+
+    /// T-088-08 (partial): valid_until is present in SPDX output
+    #[test]
+    fn t088_08_spdx_has_valid_until() {
+        // T-088-08
+        use chrono::TimeZone as _;
+        let queried_at = chrono::Utc.with_ymd_and_hms(2026, 6, 4, 12, 0, 0).unwrap();
+        let ctx = make_osv_ctx(queried_at);
+        let results = two_package_results();
+        let cfg = Config::default(); // valid_until_hours = 24
+
+        let output = render_spdx(&results, Some(&ctx), &cfg).expect("render");
+        let v: serde_json::Value = serde_json::from_str(&output).expect("valid JSON");
+
+        let vu = v["valid_until"]
+            .as_str()
+            .expect("T-088-08: valid_until must be present in SPDX output");
+        assert!(
+            vu.contains("2026-06-05"),
+            "T-088-08: valid_until must be 24h after queried_at (2026-06-05), got: {vu}"
+        );
+    }
+
+    /// T-088-06 (partial): When osv_ctx is None, no freshness fields appear in CycloneDX
+    #[test]
+    fn t088_06_cyclonedx_no_freshness_when_ctx_none() {
+        // T-088-06
+        let results = two_package_results();
+        let output = render_cyclonedx(&results, None, &Config::default()).expect("render");
+        assert!(
+            !output.contains("osv_queried_at"),
+            "T-088-06: CycloneDX must not contain osv_queried_at when ctx is None, got:\n{output}"
+        );
+        assert!(
+            !output.contains("valid_until"),
+            "T-088-06: CycloneDX must not contain valid_until when ctx is None, got:\n{output}"
+        );
+    }
+
+    /// T-088-06 (partial): When osv_ctx is None, no freshness fields appear in SPDX
+    #[test]
+    fn t088_06_spdx_no_freshness_when_ctx_none() {
+        // T-088-06
+        let results = two_package_results();
+        let output = render_spdx(&results, None, &Config::default()).expect("render");
+        assert!(
+            !output.contains("dep_scan_osv_queried_at"),
+            "T-088-06: SPDX must not contain dep_scan_osv_queried_at when ctx is None"
+        );
+        assert!(
+            !output.contains("valid_until"),
+            "T-088-06: SPDX must not contain valid_until when ctx is None"
+        );
+    }
 }
