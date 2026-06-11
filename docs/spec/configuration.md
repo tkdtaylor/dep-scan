@@ -1,7 +1,7 @@
 # Configuration specification
 
 **Status:** Authoritative — code MUST conform.
-**Last updated:** 2026-05-22 (v1.2.0)
+**Last updated:** 2026-06-11 (v1.2.1 — [signing] section + DEP_SCAN_OFFLINE, task 087)
 
 This document specifies how dep-scan resolves its effective configuration
 at runtime: layering order, environment-variable overrides, and the
@@ -69,7 +69,19 @@ internal_prefixes = ["internal-", "private-", "corp-"]
 
 [popularity]
 min_downloads = 1000
+
+[signing]                 # interchange-output signing identity (task 087)
+offline    = false        # force offline path, skip the network keyless path
+key_path   = ""           # operator-provisioned PEM PKCS#8 Ed25519 private key; empty = none
+fulcio_url = ""           # keyless Fulcio base URL (empty = keyless not provisioned)
+rekor_url  = ""           # keyless Rekor base URL (empty = keyless not provisioned)
+oidc_token = ""           # OIDC identity token presented to Fulcio (empty = keyless not provisioned)
 ```
+
+> `[signing]` has **no embedded-key default** (ADR 007): an empty `key_path`
+> means no offline signing key exists, and a signed `--format` request on the
+> offline path then **fails closed** (see [behaviors B-030](behaviors.md#b-030-signing-identity-resolution-and-fail-closed)).
+> `oidc_token` is a secret — see [Sensitive values](#sensitive-values).
 
 > Note: `dep-scan config init` writes the same keys with the same default
 > values via `toml::to_string_pretty(self)`. The generated file does NOT
@@ -94,8 +106,9 @@ value is set verbatim (no special handling).
 | `DEP_SCAN_GO_SUM_DB_URL` | `registries.go_sum_db_url` | string |
 | `DEP_SCAN_CACHE_PATH` | `cache_path` | string |
 | `DEP_SCAN_OSV_URL` | `osv.osv_url` | string |
+| `DEP_SCAN_OFFLINE` | `signing.offline` | bool (truthy = any value other than `0`/`false`/empty, case-insensitive; forces the offline signing path — task 087) |
 
-The complete list is exactly the 8 entries above. Adding a new env var
+The complete list is exactly the 9 entries above. Adding a new env var
 MUST update this table and the README env-var table in the same PR.
 
 ## Cache path resolution
@@ -125,10 +138,13 @@ config MUST construct a fresh `Config` rather than mutating a shared one.
 
 ## Sensitive values
 
-dep-scan currently has no fields that carry secrets. Registry URLs are
-not secret. The OSV.dev endpoint requires no API key. If a future field
-ever carries a credential, it MUST be redacted in `dep-scan config show`
-output and MUST NOT be logged under `--verbose`.
+Registry URLs are not secret; the OSV.dev endpoint requires no API key.
+The one credential-bearing field is `signing.oidc_token` (task 087) — the
+OIDC identity token presented to Fulcio on the keyless path. It MUST be
+redacted in `dep-scan config show` output and MUST NOT be logged under
+`--verbose`. The operator's private signing key is **not** stored in config;
+`signing.key_path` references a key file out of band (ADR 007), so the
+config never contains the private key bytes.
 
 ## Defaults summary
 

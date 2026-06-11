@@ -185,6 +185,60 @@ impl Default for PopularityConfig {
     }
 }
 
+/// Configuration for interchange-output signing identity (task 087).
+///
+/// dep-scan signs the machine-readable interchange formats (`--format
+/// osv/cyclonedx/spdx/vex`) so a downstream consumer can verify the report's
+/// origin (ADR 006 Q5). Two identities exist:
+///
+/// - **online keyless** (sigstore Fulcio + Rekor) — the default when network
+///   is available;
+/// - **offline operator key** — an operator-provisioned private Ed25519 key
+///   loaded from [`SigningConfig::key_path`].
+///
+/// There is intentionally **no embedded-key default** (ADR 007): an empty
+/// `key_path` means no offline signing key exists, and the offline path then
+/// fails closed rather than emitting unsigned-but-signed-looking output.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct SigningConfig {
+    /// Force offline signing mode, skipping the network keyless path entirely.
+    ///
+    /// Overridden by the `DEP_SCAN_OFFLINE` environment variable.
+    #[serde(default = "default_false")]
+    pub offline: bool,
+
+    /// Path to an operator-provisioned private signing key (PEM-encoded PKCS#8
+    /// Ed25519). Empty string means **no offline signing key is configured**.
+    ///
+    /// The reference is a path today; ADR 007 keeps it pluggable so a
+    /// `pkcs11:` / `awskms:` backend can slot in later without a breaking
+    /// config change.
+    #[serde(default = "default_empty_string")]
+    pub key_path: String,
+
+    /// Fulcio base URL for the online keyless path (no hardcoded default — it
+    /// is configurable for testing and future extensibility). Empty means the
+    /// keyless path is not provisioned, so an online run falls back to the
+    /// offline path (and thus fail-closed unless `key_path` is set).
+    #[serde(default = "default_empty_string")]
+    pub fulcio_url: String,
+
+    /// Rekor base URL for the online keyless path. Empty = keyless not
+    /// provisioned (see `fulcio_url`).
+    #[serde(default = "default_empty_string")]
+    pub rekor_url: String,
+
+    /// OIDC identity token presented to Fulcio for keyless signing. Empty =
+    /// keyless not provisioned. Provided by the operator's CI/workload identity
+    /// out of band; dep-scan does not acquire it.
+    #[serde(default = "default_empty_string")]
+    pub oidc_token: String,
+}
+
+fn default_empty_string() -> String {
+    String::new()
+}
+
 /// Configuration for the dependency confusion detection policy.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct DependencyConfusionConfig {
@@ -239,6 +293,10 @@ pub struct Config {
     /// Popularity/download threshold configuration.
     #[serde(default)]
     pub popularity: PopularityConfig,
+
+    /// Interchange-output signing identity configuration (task 087).
+    #[serde(default)]
+    pub signing: SigningConfig,
 }
 
 fn default_min_package_age_hours() -> u64 {
@@ -255,6 +313,7 @@ impl Default for Config {
             osv: OsvConfig::default(),
             dependency_confusion: DependencyConfusionConfig::default(),
             popularity: PopularityConfig::default(),
+            signing: SigningConfig::default(),
         }
     }
 }
@@ -330,6 +389,14 @@ impl Config {
         if let Ok(val) = std::env::var("DEP_SCAN_OSV_URL") {
             self.osv.osv_url = val;
         }
+        // DEP_SCAN_OFFLINE forces the offline signing path, overriding
+        // `signing.offline` from the config file (task 087). Any value other
+        // than "0", "false", or "" (case-insensitive) is treated as truthy so
+        // `DEP_SCAN_OFFLINE=1` works as documented.
+        if let Ok(val) = std::env::var("DEP_SCAN_OFFLINE") {
+            let v = val.trim().to_ascii_lowercase();
+            self.signing.offline = !matches!(v.as_str(), "" | "0" | "false");
+        }
     }
 
     /// Resolve the effective cache path.
@@ -363,16 +430,21 @@ impl Config {
     }
 }
 
+/// Process-global lock that serializes any test mutating `DEP_SCAN_*`
+/// environment variables. Env vars are process-wide shared state, so tests in
+/// *any* module that set/remove them (here in `config.rs`, and the
+/// `resolve_signer` end-to-end test in `interchange_sign.rs`) must hold this
+/// same lock to avoid cross-test interference. It is `pub(crate)` and
+/// `#[cfg(test)]` so it is visible to sibling test modules but never compiled
+/// into the production binary.
+#[cfg(test)]
+pub(crate) static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::io::Write;
-    use std::sync::Mutex;
     use tempfile::NamedTempFile;
-
-    /// Mutex to serialize tests that call Config::load (which reads env vars).
-    /// This prevents env var mutations in one test from affecting another.
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     /// RAII guard that removes an env var when dropped, even on panic.
     struct EnvGuard {
@@ -603,6 +675,70 @@ osv_url = "https://custom-osv.example.com"
         assert!(
             config.policies.maintainer_first_seen_warning,
             "maintainer_first_seen_warning should be true when set in TOML"
+        );
+    }
+
+    // T-087-14: [signing] section added to Config with correct defaults.
+    #[test]
+    fn t087_14_signing_defaults() {
+        let config = Config::default();
+        assert!(
+            !config.signing.offline,
+            "T-087-14: signing.offline must default to false"
+        );
+        assert_eq!(
+            config.signing.key_path, "",
+            "T-087-14: signing.key_path must default to empty (no embedded key)"
+        );
+    }
+
+    // T-087-14 (cont.): partial config without a [signing] table falls back to
+    // the signing defaults rather than failing to parse.
+    #[test]
+    fn t087_14_signing_absent_table_uses_defaults() {
+        let config = Config::from_toml_str("min_package_age_hours = 24\n").unwrap();
+        assert!(!config.signing.offline);
+        assert_eq!(config.signing.key_path, "");
+    }
+
+    // T-087-13: signing.offline = true parses from TOML.
+    #[test]
+    fn t087_13_signing_offline_from_toml() {
+        let toml_str = "[signing]\noffline = true\nkey_path = \"/tmp/k\"\n";
+        let config = Config::from_toml_str(toml_str).unwrap();
+        assert!(config.signing.offline, "T-087-13: offline = true parsed");
+        assert_eq!(config.signing.key_path, "/tmp/k");
+    }
+
+    // T-087-13 (cont.): DEP_SCAN_OFFLINE env var overrides signing.offline from
+    // the config file (env takes precedence per the config layering convention).
+    #[test]
+    fn t087_13_env_offline_overrides_config_false() {
+        let _lock = ENV_LOCK.lock().unwrap();
+
+        let mut file = NamedTempFile::new().unwrap();
+        writeln!(file, "[signing]\noffline = false").unwrap();
+
+        let _guard = EnvGuard::set("DEP_SCAN_OFFLINE", "1");
+
+        let config = Config::load(Some(file.path())).unwrap();
+        assert!(
+            config.signing.offline,
+            "T-087-13: DEP_SCAN_OFFLINE=1 must override signing.offline = false"
+        );
+    }
+
+    // T-087-13 (cont.): DEP_SCAN_OFFLINE=0 is falsy and does not force offline.
+    #[test]
+    fn t087_13_env_offline_zero_is_falsy() {
+        let _lock = ENV_LOCK.lock().unwrap();
+
+        let _guard = EnvGuard::set("DEP_SCAN_OFFLINE", "0");
+
+        let config = Config::load(None).unwrap();
+        assert!(
+            !config.signing.offline,
+            "T-087-13: DEP_SCAN_OFFLINE=0 is falsy and must not force offline"
         );
     }
 

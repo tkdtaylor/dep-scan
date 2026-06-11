@@ -442,6 +442,51 @@ fn produce_serialized_output(
     }
 }
 
+/// Resolve the production interchange signing identity for the live run
+/// (task 087).
+///
+/// This replaces task 086's ephemeral per-run `StaticEd25519Signer` on the
+/// signed interchange path. The decision is delegated to
+/// [`interchange_sign::resolve_signer`] with a live network probe and a keyless
+/// factory:
+///
+/// - **offline** (`signing.offline` / `DEP_SCAN_OFFLINE`, or the probe fails):
+///   `OperatorKeySigner` if `signing.key_path` is set, else
+///   [`interchange_sign::SignerDecision::NoOfflineKey`] (fail-closed).
+/// - **online**: a `KeylessSigner`, but only when Fulcio/Rekor URLs and an OIDC
+///   token are configured. If keyless is not provisioned, the network probe is
+///   reported as a failure so resolution falls through to the offline path
+///   (and thus fail-closed unless an operator key is configured) — never an
+///   ephemeral, unverifiable key.
+fn resolve_interchange_signer(config: &Config) -> Result<interchange_sign::SignerDecision> {
+    let keyless_provisioned = !config.signing.fulcio_url.trim().is_empty()
+        && !config.signing.rekor_url.trim().is_empty()
+        && !config.signing.oidc_token.trim().is_empty();
+
+    let probe = || -> Result<()> {
+        if keyless_provisioned {
+            Ok(())
+        } else {
+            // Keyless endpoints/token not configured: treat as "no online
+            // keyless identity" so resolution takes the offline path.
+            anyhow::bail!("keyless signing is not provisioned (no Fulcio/Rekor URL or OIDC token)")
+        }
+    };
+
+    let keyless_factory = || -> Box<dyn interchange_sign::InterchangeSigner> {
+        Box::new(interchange_sign::KeylessSigner::new(
+            &config.signing.fulcio_url,
+            &config.signing.rekor_url,
+            &config.signing.oidc_token,
+        ))
+    };
+
+    // A configured-but-unreadable operator key returns Err here, which the
+    // caller surfaces verbatim (distinct from the "no key configured"
+    // NoOfflineKey message) — both fail closed.
+    interchange_sign::resolve_signer(config, probe, keyless_factory)
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn run_check(
     config_path: Option<&Path>,
@@ -1035,10 +1080,50 @@ async fn run_check(
         | OutputFormat::CycloneDx
         | OutputFormat::Spdx
         | OutputFormat::Vex => {
-            // Default signer until task 087 wires the production identity.
-            let signer = interchange_sign::StaticEd25519Signer::generate();
-            let out = produce_serialized_output(&results, &output_format, allow_unsigned, &signer)?;
-            println!("{out}");
+            // Json is never signed, and any interchange format with
+            // --allow-unsigned is emitted raw + marked: in both cases the
+            // signer is never invoked, so no identity needs to be resolved.
+            let needs_signer = !allow_unsigned
+                && interchange_sign::payload_type_for_format(&output_format).is_some();
+
+            if needs_signer {
+                // Resolve the production signing identity (task 087). No more
+                // ephemeral per-run key: online ⇒ sigstore keyless, offline ⇒
+                // operator-provisioned key, offline + no key ⇒ fail closed.
+                match resolve_interchange_signer(&config)? {
+                    interchange_sign::SignerDecision::Signer(signer) => {
+                        let out = produce_serialized_output(
+                            &results,
+                            &output_format,
+                            allow_unsigned,
+                            signer.as_ref(),
+                        )?;
+                        println!("{out}");
+                    }
+                    interchange_sign::SignerDecision::NoOfflineKey => {
+                        // REQ-087-05 / T-087-15: fail closed. No signed-looking
+                        // and no silently-unsigned output is emitted.
+                        eprintln!(
+                            "dep-scan: {}",
+                            interchange_sign::SignerDecision::NO_OFFLINE_KEY_MESSAGE
+                        );
+                        return Ok(2);
+                    }
+                }
+            } else {
+                // Json, or interchange + --allow-unsigned: the dispatcher never
+                // invokes the signer on these paths. Pass a fail-closed
+                // placeholder (never an ephemeral real key) to keep the
+                // 086 dispatcher signature.
+                let placeholder = interchange_sign::FailingSigner;
+                let out = produce_serialized_output(
+                    &results,
+                    &output_format,
+                    allow_unsigned,
+                    &placeholder,
+                )?;
+                println!("{out}");
+            }
         }
     }
 

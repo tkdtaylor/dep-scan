@@ -1,7 +1,7 @@
 # Behaviors
 
 **Project:** dep-scan
-**Last updated:** 2026-06-11 (v1.2.1 — B-029: DSSE signing for interchange output)
+**Last updated:** 2026-06-11 (v1.2.1 — B-030: signing identity resolution + fail-closed, task 087)
 
 What the system does, observably. Each behavior describes a triggering condition, the system's response, and any externally-visible side effects. This is the "you can verify this from outside the process" view.
 
@@ -297,8 +297,36 @@ For each DSSE-signed attestation bundle, the following steps run in order in [`s
   nothing is written to stdout, and the process exits non-zero. There is no
   unsigned fallback unless `--allow-unsigned` was explicitly given.
 - The signing **identity** (sigstore keyless / operator-provisioned offline key)
-  is task 087; task 086 uses a static Ed25519 key as the default signer.
+  is resolved per run — see [B-030](#b-030-signing-identity-resolution-and-fail-closed).
 - Source: [`src/interchange_sign.rs`](../../src/interchange_sign.rs).
+
+### B-030: Signing identity resolution and fail-closed
+
+- **Trigger:** A signed interchange format (`--format osv|cyclonedx|spdx|vex`
+  without `--allow-unsigned`) reaches the output dispatch in `run_check`.
+- **Resolution order** (`interchange_sign::resolve_signer`):
+  1. If `signing.offline == true` (which `DEP_SCAN_OFFLINE` may have forced) →
+     **offline path**.
+  2. Otherwise a lightweight network probe runs: success ⇒ **online keyless**
+     (`KeylessSigner` — Fulcio cert issuance + Rekor log entry, reusing the
+     configurable `signing.fulcio_url`/`signing.rekor_url` and an operator-
+     supplied `signing.oidc_token`); probe failure ⇒ **offline path**. Keyless
+     is only attempted when those three values are configured; otherwise the
+     probe reports offline.
+- **Offline path:** `signing.key_path` set ⇒ `OperatorKeySigner` loads the
+  operator-provisioned **PEM PKCS#8 Ed25519** private key and signs locally with
+  no network. The key-id is the **lowercase hex SHA-256 of the 32 raw public-key
+  bytes** (`interchange_sign::ed25519_keyid`) so a consumer holding the public
+  half can select the right verification key.
+- **Fail closed (REQ-087-05):** offline path with **no** `signing.key_path`
+  configured ⇒ dep-scan exits non-zero with a message naming `signing.key_path`
+  and `--allow-unsigned`, and emits **no** output on stdout — neither a DSSE
+  envelope nor a silently-unsigned payload. `--allow-unsigned` (B-029) is the
+  only way to emit unsigned interchange output.
+- **No embedded private key** ships in the binary or repo (ADR 007); there is no
+  ephemeral per-run default signer on the signed path.
+- Source: [`src/interchange_sign.rs`](../../src/interchange_sign.rs),
+  [`src/main.rs`](../../src/main.rs) (`resolve_interchange_signer`).
 
 ### B-026: Verbose-gated diagnostics
 

@@ -1,7 +1,7 @@
 # Architecture Diagrams
 
 **Project:** dep-scan
-**Last updated:** 2026-05-22 (v1.2.0)
+**Last updated:** 2026-06-11 (v1.2.1 — task 087: keyless interchange-signing runtime outbound)
 
 C4-structured Mermaid diagrams covering the system at three progressively detailed levels (Context → Container → Component), plus runtime sequence flows showing how the pieces collaborate. See [overview.md](overview.md) for prose context, [decisions/](decisions/) for the ADRs referenced here, and [`../spec/architecture.md`](../spec/architecture.md) for the structured element catalog these diagrams render.
 
@@ -39,7 +39,9 @@ C4Context
     Rel(depscan, pkgmgr, "exec on scan pass", "subprocess")
 ```
 
-> **Build-time trust roots are not shown** — sigstore Fulcio + Rekor and the sum.golang.org public key are embedded via `include_bytes!` / `const` and are **not** runtime dependencies. See [ADR 003 § Embedded trust roots](decisions/003-content-hash-cache-integrity.md).
+> **Build-time trust roots are not shown** — the sigstore Fulcio + Rekor *verification* roots and the sum.golang.org public key are embedded via `include_bytes!` / `const` and are **not** runtime dependencies for verification. See [ADR 003 § Embedded trust roots](decisions/003-content-hash-cache-integrity.md).
+>
+> **Keyless interchange signing is a separate runtime outbound** (task 087, [behaviors B-030](../spec/behaviors.md#b-030-signing-identity-resolution-and-fail-closed)): when emitting a signed `--format osv|cyclonedx|spdx|vex` report online, dep-scan calls Fulcio (cert issuance) + Rekor (log entry) over HTTPS using the configurable `signing.fulcio_url` / `signing.rekor_url`. Offline, the `OperatorKeySigner` signs locally from `signing.key_path` with no network. This is the only place dep-scan makes a runtime sigstore *signing* call; verification remains offline against the embedded roots.
 
 ---
 
