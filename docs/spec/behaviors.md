@@ -1,7 +1,7 @@
 # Behaviors
 
 **Project:** dep-scan
-**Last updated:** 2026-06-11 (v1.2.1 — B-030: signing identity resolution + fail-closed, task 087)
+**Last updated:** 2026-06-11 (v1.2.1 — B-031: git dep visibility in scan output, task 093)
 
 What the system does, observably. Each behavior describes a triggering condition, the system's response, and any externally-visible side effects. This is the "you can verify this from outside the process" view.
 
@@ -333,3 +333,14 @@ For each DSSE-signed attestation bundle, the following steps run in order in [`s
 - `parse_tlog_entries` missing-field name emits **only** under `--verbose` (task 061, [F-011](fitness-functions.md#f-011)). Default error stays generic.
 - Outer `Error:` line shows only the outermost message by default; the full anyhow chain is gated behind `--verbose` (task 053, [F-025](fitness-functions.md#f-025)).
 - The install-boundary audit log line is emitted only under `--verbose` (task 055, [F-026](fitness-functions.md#f-026)).
+
+### B-031: Git-sourced dependency visibility in scan output
+
+- **Trigger:** A lockfile entry with `DependencySource::Git` (url + ref) enters the scan loop.
+- **Response:** The scan loop's dedicated git-dep arm produces a `CheckResult` with `result = "warn"`, `version = <ref>` (the commit SHA or branch name), `registry = "git"`, and a `reason` message containing the URL and ref — without contacting any registry client or making network calls.
+- **Verdict contract:** The verdict is always `Warn` for an unscanned git dep. It is **never** `Pass` (fail-closed posture per ADR 003 / ADR 008). A `Pass` verdict requires an actual scan; the VCS fetch capability (task 097) is not yet implemented.
+- **Output formats:** Both `--format native` (human-readable table) and `--format json` include a row/element for each git dep with its `warn` verdict and message. The ref appears in the version column so the output row is human-readable.
+- **Exit code:** Non-zero (exit 1) when at least one git dep is present, consistent with how other `Warn` verdicts behave.
+- **Multiple git deps:** Each git dep produces an individual `Warn` CheckResult.
+- **Registry deps:** Completely unaffected — `DependencySource::Registry` deps continue to route to registry clients as before.
+- Source: [`src/main.rs`](../../src/main.rs) (`run_check` scan loop, `classify_dep_routing`, `DepRouting::GitSkip`).
