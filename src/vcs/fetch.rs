@@ -250,6 +250,7 @@ impl VcsFetcher {
         let max_blob_bytes = self.config.vcs.max_blob_bytes;
         let max_total_bytes = self.config.vcs.max_total_bytes;
         let max_total_files = self.config.vcs.max_total_files;
+        let max_pack_bytes = self.config.vcs.max_pack_bytes;
 
         // REQ-096-07: enforce a hard wall-clock bound on `fetch` returning.
         //
@@ -272,7 +273,8 @@ impl VcsFetcher {
             max_total_files,
         };
         std::thread::spawn(move || {
-            let result = fetch_blocking(&url_owned, &ref_owned, worker_timeout, caps);
+            let result =
+                fetch_blocking(&url_owned, &ref_owned, worker_timeout, max_pack_bytes, caps);
             // Ignore send errors: if the receiver already timed out and went
             // away, we simply drop the result (and its TempDir cleans up).
             let _ = tx.send(result);
@@ -325,6 +327,7 @@ fn fetch_blocking(
     url: &str,
     ref_: &str,
     timeout: Duration,
+    max_pack_bytes: u64,
     caps: MaterialiseCaps,
 ) -> Result<FetchedTree> {
     // The single temp dir owns everything: the ephemeral bare repo lives in
@@ -342,6 +345,19 @@ fn fetch_blocking(
     // hooks / filters / submodule callbacks can ever run (REQ-096-04).
     let repo = fetch_into_bare_repo(url, &repo_dir, timeout)
         .with_context(|| format!("failed to fetch git repository {url}"))?;
+
+    // SEC-006: the per-blob / total-tree caps only bound *materialisation*,
+    // which runs AFTER the whole pack has been streamed to disk by
+    // `fetch_only`.  A malicious server on an allowed host could otherwise fill
+    // the temp filesystem with an arbitrarily large pack bounded only by the
+    // wall-clock timeout.  Measure the on-disk object-store size now — before
+    // any materialisation amplifies it — and fail closed if it exceeds the
+    // pack-byte budget.  This is a *post-fetch* check (the pack is already on
+    // disk when measured), so it bounds disk after the fact; the streaming
+    // download itself remains bounded only by `fetch_timeout_secs`.  See ADR
+    // 008 piece-2 resolution (SEC-006).
+    enforce_pack_size_budget(&repo_dir, max_pack_bytes)
+        .with_context(|| format!("VCS fetch of {url} exceeded the pack-size budget"))?;
 
     // Resolve the requested ref to a tree.
     let tree = resolve_ref_to_tree(&repo, ref_)
@@ -434,6 +450,60 @@ fn fetch_into_bare_repo(url: &str, repo_dir: &Path, timeout: Duration) -> Result
             Err(e)
         }
     }
+}
+
+/// Enforce the SEC-006 pack-size budget, fail-closed.
+///
+/// Sums the on-disk size of the fetched object store (`<repo_dir>/objects`,
+/// which holds the pack `fetch_only` wrote) and returns `Err` if it exceeds
+/// `max_pack_bytes`.  This runs *after* the fetch completes but *before*
+/// materialisation, so a pathologically large pack can never be amplified into
+/// an even larger materialised tree on disk.
+///
+/// The directory walk is read-only and never follows symlinks (it only sums
+/// regular-file lengths reported by `symlink_metadata`), so it cannot itself be
+/// abused to traverse outside the temp repo.
+fn enforce_pack_size_budget(repo_dir: &Path, max_pack_bytes: u64) -> Result<()> {
+    let objects_dir = repo_dir.join("objects");
+    let size = dir_size_no_symlinks(&objects_dir);
+    if size > max_pack_bytes {
+        bail!(
+            "fetched git pack is {size} bytes, exceeding the max pack budget of \
+             {max_pack_bytes} bytes (fail-closed, SEC-006)"
+        );
+    }
+    Ok(())
+}
+
+/// Recursively sum the byte size of regular files under `root`, never following
+/// symlinks.  Missing directories contribute 0 (the object store may be empty
+/// for a newly-initialised/empty remote).
+fn dir_size_no_symlinks(root: &Path) -> u64 {
+    let mut total: u64 = 0;
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            // Use symlink_metadata so a symlink is measured as the link itself
+            // (its small length), never resolved/followed.
+            let Ok(meta) = std::fs::symlink_metadata(&path) else {
+                continue;
+            };
+            let ft = meta.file_type();
+            if ft.is_symlink() {
+                // Count the link entry's own length; do not traverse its target.
+                total = total.saturating_add(meta.len());
+            } else if ft.is_dir() {
+                stack.push(path);
+            } else if ft.is_file() {
+                total = total.saturating_add(meta.len());
+            }
+        }
+    }
+    total
 }
 
 /// Resolve `ref_` to the root tree of the commit it names.
@@ -1962,6 +2032,50 @@ mod tests {
             msg.contains("total bytes"),
             "SEC-003: error must mention the total-byte cap, got: {msg}"
         );
+    }
+
+    // ---- SEC-006: oversized fetched pack fails closed (post-fetch budget) ----
+    #[test]
+    fn sec006_oversized_pack_fails_closed() {
+        if !git_available() {
+            eprintln!("skip SEC-006 pack: git CLI not available");
+            return;
+        }
+        // Commit a blob comfortably larger than the tiny pack budget we set.
+        // Random-ish bytes resist zlib compression so the on-disk pack stays
+        // above the budget.  4 KiB of pseudo-random content vs a 512-byte cap.
+        let mut blob = Vec::with_capacity(4096);
+        let mut x: u32 = 0x1234_5678;
+        for _ in 0..4096 {
+            // xorshift — incompressible enough that the pack stays > 512 bytes.
+            x ^= x << 13;
+            x ^= x >> 17;
+            x ^= x << 5;
+            blob.push((x & 0xff) as u8);
+        }
+        let fx = fixture_or_skip!(build_repo(&[("payload.bin", &blob)]), "SEC-006");
+
+        let mut cfg = default_config();
+        cfg.vcs.max_pack_bytes = 512; // tiny budget the 4 KiB blob's pack exceeds
+        let fetcher = VcsFetcher::from_config(&cfg);
+        let res = fetcher.fetch(&fx.url, &fx.head_sha);
+        let msg = format!(
+            "{:#}",
+            res.expect_err("SEC-006: an oversized pack must fail closed")
+        );
+        assert!(
+            msg.contains("pack"),
+            "SEC-006: error must mention the pack-size budget, got: {msg}"
+        );
+
+        // Sanity: with a generous budget the same fetch succeeds, proving the
+        // failure above is the budget, not an unrelated error.
+        let mut cfg_ok = default_config();
+        cfg_ok.vcs.max_pack_bytes = 100 * 1024 * 1024;
+        let fetcher_ok = VcsFetcher::from_config(&cfg_ok);
+        fetcher_ok
+            .fetch(&fx.url, &fx.head_sha)
+            .expect("SEC-006: a within-budget pack must still fetch");
     }
 
     /// Build a repo whose root tree nests `depth` levels of single-subdirectory

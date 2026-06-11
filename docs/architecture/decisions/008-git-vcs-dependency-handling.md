@@ -296,6 +296,53 @@ could collapse two distinct tree entry names onto one path — currently harmles
 wins inside the sandbox) but worth a normalisation pass if collisions ever become
 security-relevant.
 
+#### Security re-audit residuals (task 096 follow-up)
+
+A re-audit confirmed the critical subprocess-escape (SEC-001/SEC-002) is closed and found
+three further items, resolved as follows:
+
+- **SEC-005-RESIDUAL — host-policy parse-vs-connect divergence (Medium, fixed).** The host
+  allow/deny check is only sound if the host it *polices* is the host gix actually *connects
+  to*. The previous `extract_host` hand-parsed the URL and split the post-scheme remainder on
+  `['/', '?', '#']` before taking the authority. gix does **not** treat `#`/`?` as authority
+  terminators — it splits the authority only at the first `/`, then `rsplit_once('@')`. So
+  `https://github.com#@evil.com/x` and `https://github.com?@evil.com/x` were policed as host
+  `github.com` while gix connected to `evil.com` — an allow-list/deny-list bypass and SSRF
+  vector for any attacker-controlled lockfile URL. **Fix:** `extract_host` now derives the
+  host from gix's *own* parser (`gix::url::parse(url.into())?.host()`, lowercased), so the
+  policed host equals the connecting host **by construction**; the divergence is eliminated
+  rather than patched. Unparseable URLs and URLs gix parses with no host component return
+  `None`, preserving the fail-closed contract in `check_host_policy_for_url`. Parity tests
+  assert `extract_host(url) == gix::url::parse(url).host()` for the `#@`, `?@`, git:// `#@`,
+  and `a@b@host` vectors, plus explicit regressions that each bypass vector now polices the
+  real connecting host (`evil.com` / `evil.internal`), never the decoy `github.com`.
+
+- **SEC-006 — unbounded network pack download (Medium, mitigated by post-fetch budget).** The
+  `max_blob_bytes` / `max_total_bytes` / `max_total_files` caps bound only *materialisation*,
+  which runs **after** `prepare.fetch_only(...)` has already streamed the entire pack to disk.
+  A malicious server on an allowed host could therefore stream an arbitrarily large pack,
+  filling the temp filesystem before any cap applies — bounded only by `fetch_timeout_secs`.
+  gix 0.84's high-level `PrepareFetch` API exposes no clean in-fetch byte/object budget hook
+  (option (a) would require reimplementing the fetch negotiation against the low-level
+  `gix-protocol`/`gix-pack` API — out of scope and high-risk), so we took **option (b)**: a
+  new configurable budget `vcs.max_pack_bytes` (default 1 GiB) is enforced **immediately after
+  `fetch_only` returns and before any materialisation** by summing the on-disk size of the
+  fetched object store (`<repo>/objects`, never following symlinks) and failing closed if it
+  exceeds the budget. This is a *post-fetch* check — the pack is already on disk when measured
+  — so it bounds disk *after the fact* but caps before materialisation can amplify it; the
+  streaming download itself remains bounded only by `fetch_timeout_secs`. The two bounds
+  combine: the timeout caps how long a stream may run, the pack budget caps how much it may
+  leave on disk before any further processing.
+
+- **SEC-007 — detached stuck worker (Low, documented residual).** The hard wall-clock bound in
+  `VcsFetcher::fetch` is enforced by bounding the channel `recv` on the caller thread; if the
+  worker thread is wedged in a syscall gix cannot cooperatively interrupt, `fetch` still
+  returns on time but the worker is **detached** and keeps running until it unwinds (or the
+  process exits). It owns its own `TempDir`, so its scratch space is reclaimed when it finally
+  ends; the residual is a possibly-lingering background thread/socket, not a leak of attacker
+  data into a `Pass` verdict. Acceptable for task 096; revisit if process-lifetime thread
+  accumulation ever becomes observable in practice.
+
 Out of scope for task 096 (handled later): running the *policy pipeline* over the fetched
 tree is task 098 — this task delivers the fetch + sandbox and the fail-closed wiring only, so
 a successfully fetched git dep is materialised but not yet scanned. Cache integration is task

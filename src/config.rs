@@ -360,6 +360,16 @@ pub struct VcsConfig {
     /// exceeded the fetch fails closed.  Default 50_000.
     #[serde(default = "default_vcs_max_total_files")]
     pub max_total_files: u64,
+    /// Maximum size, in bytes, of the git pack fetched from the remote (task 096
+    /// hardening, SEC-006).  The per-blob / total-tree caps only bound
+    /// *materialisation*, which runs **after** the whole pack has already been
+    /// streamed to disk; a malicious server on an allowed host could otherwise
+    /// fill the temp filesystem with an arbitrarily large pack bounded only by
+    /// `fetch_timeout_secs`.  Immediately after the fetch completes — before any
+    /// materialisation — the on-disk pack size is measured and the fetch fails
+    /// closed if it exceeds this budget.  Default 1 GiB.
+    #[serde(default = "default_vcs_max_pack_bytes")]
+    pub max_pack_bytes: u64,
 }
 
 fn default_vcs_fetch_timeout_secs() -> u64 {
@@ -378,6 +388,10 @@ fn default_vcs_max_total_files() -> u64 {
     50_000
 }
 
+fn default_vcs_max_pack_bytes() -> u64 {
+    1024 * 1024 * 1024
+}
+
 impl Default for VcsConfig {
     fn default() -> Self {
         Self {
@@ -387,6 +401,7 @@ impl Default for VcsConfig {
             max_blob_bytes: default_vcs_max_blob_bytes(),
             max_total_bytes: default_vcs_max_total_bytes(),
             max_total_files: default_vcs_max_total_files(),
+            max_pack_bytes: default_vcs_max_pack_bytes(),
         }
     }
 }
@@ -657,6 +672,12 @@ max_total_bytes = 536870912
 # Maximum TOTAL number of files materialised across the whole fetched tree
 # (DoS cap against a huge count of tiny files). Default 50000.
 max_total_files = 50000
+# Maximum size in bytes of the git pack fetched from the remote (SEC-006 DoS cap).
+# The blob/tree caps above only bound materialisation, which runs AFTER the whole
+# pack is on disk; this bounds the pack itself. Checked immediately after fetch,
+# before materialisation; exceeding it fails the fetch closed. Default 1073741824
+# (1 GiB).
+max_pack_bytes = 1073741824
 "#,
             version = dep_scan_version
         );
