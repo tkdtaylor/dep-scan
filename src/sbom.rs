@@ -40,7 +40,7 @@ pub(crate) fn to_purl(registry: RegistryType, name: &str, version: &str) -> Stri
 /// Parse a registry string (as stored in `CheckResult.registry`) back to a
 /// `RegistryType`.  Falls back to `Npm` for unknown strings to avoid panicking
 /// in the render path; a None PURL is never emitted for the caller.
-fn registry_type_from_str(s: &str) -> RegistryType {
+pub(crate) fn registry_type_from_str(s: &str) -> RegistryType {
     match s {
         "npm" => RegistryType::Npm,
         "pypi" => RegistryType::PyPI,

@@ -11,6 +11,7 @@ mod sigstore_verify;
 mod types;
 mod typosquat;
 mod validation;
+mod vex;
 
 use std::path::Path;
 use std::process;
@@ -911,9 +912,8 @@ async fn run_check(
             println!("{spdx}");
         }
         OutputFormat::Vex => {
-            return Err(anyhow::anyhow!(
-                "--format vex: not yet implemented — see tasks 084/085"
-            ));
+            let vex_output = vex::render_vex(&results).context("Failed to render VEX output")?;
+            println!("{vex_output}");
         }
         OutputFormat::Native => {
             // Human-readable table
