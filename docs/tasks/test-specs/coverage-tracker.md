@@ -100,7 +100,7 @@
 | 082 | Recognise crates.io `trustpub_data` (false-positive fix surfaced by 081) | 082-recognise-trustpub-data-in-crates-registry-test-spec.md | 8/8 (T-082-09 validated by allowlist removal; T-082-10 by tooling gate) | 🟡 Verified by: L3: cargo test 7 new T-082 tests pass + clippy/fmt clean |
 | 083 | `--format` enum + OSV-compatible emit (ADR 005 Q1) | 083-format-enum-osv-emit-test-spec.md | 27/27 | ✅ (spec-verifier APPROVE — all 27 assertions; cargo test + clippy/fmt clean) |
 | 084 | Scan-result SBOM: CycloneDX + SPDX of analyzed tree (ADR 005 Q2) | 084-scan-result-sbom-test-spec.md | 20/20 | ✅ (spec-verifier APPROVE — 19 fully verified, T-084-19 VEX-stub smoke-only but impl correct; cargo test + clippy/fmt clean) |
-| 085 | Presence-only VEX emission (ADR 005 Q3) | 085-vex-emission-test-spec.md | 16/16 | 🟡 Verified by: L4: cargo test 745 passed + clippy/fmt clean |
+| 085 | Presence-only VEX emission (ADR 005 Q3) | 085-vex-emission-test-spec.md | 16/16 | ✅ (spec-verifier APPROVE after test-strengthening round — T-085-05 verdict-independence + T-085-14 real dispatch; cargo test + clippy/fmt clean) |
 | 086 | DSSE envelope signing for interchange output (ADR 006 Q4+Q8) | 086-dsse-signing-interchange-test-spec.md | 0/19 | ❌ |
 | 087 | Signing identity: keyless-online + operator-key-offline (ADR 006 Q5, ADR 007) | 087-signing-identity-keyless-offline-test-spec.md | 0/17 | ❌ |
 | 088 | Statement freshness: OSV-snapshot marker + `valid_until` (ADR 006 Q7) | 088-statement-freshness-test-spec.md | 0/19 | ❌ |
