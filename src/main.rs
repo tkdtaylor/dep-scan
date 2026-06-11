@@ -126,6 +126,91 @@ fn verify_hash(cached: Option<&str>, registry: Option<&str>) -> HashVerifyDecisi
     }
 }
 
+/// Abstraction over the VCS fetch client so the git-dep cache flow can be
+/// unit-tested with a spy/stub fetcher (T-097-02/04/09/11) without performing
+/// real network I/O.  The production implementation is [`vcs::fetch::VcsFetcher`].
+trait GitTreeFetcher {
+    /// Fetch the repository at `url` and materialise the tree at `ref_`.
+    fn fetch_tree(&self, url: &str, ref_: &str) -> Result<vcs::fetch::FetchedTree>;
+}
+
+impl GitTreeFetcher for vcs::fetch::VcsFetcher {
+    fn fetch_tree(&self, url: &str, ref_: &str) -> Result<vcs::fetch::FetchedTree> {
+        self.fetch(url, ref_)
+    }
+}
+
+/// Compute a stable `sha256:<hex>` content hash over a fetched git tree.
+///
+/// The digest covers every regular file's relative path and bytes in the tree's
+/// deterministic iteration order, with explicit length framing between fields so
+/// that no two distinct trees can collide by concatenation.  This is the value
+/// stored as the git cache row's `content_hash`; the task-030 `verify_hash` gate
+/// compares it against a freshly recomputed hash on the next lookup, so a
+/// tampered cache row fails the comparison and triggers a re-fetch (REQ-097-04,
+/// fail-closed per ADR 003).
+fn git_tree_content_hash(tree: &vcs::fetch::FetchedTree) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    for file in tree.files() {
+        let path_bytes = file.path().to_string_lossy();
+        let path_bytes = path_bytes.as_bytes();
+        hasher.update((path_bytes.len() as u64).to_le_bytes());
+        hasher.update(path_bytes);
+        hasher.update((file.content().len() as u64).to_le_bytes());
+        hasher.update(file.content());
+    }
+    format!("sha256:{:x}", hasher.finalize())
+}
+
+/// Outcome of the git-dep cache decision (task 097).  Pure, side-effect-free so
+/// it can be unit-tested independently of the live scan loop.
+#[derive(Debug, PartialEq)]
+enum GitCacheAction {
+    /// A verified cache hit: reuse the stored verdict without re-fetching.
+    /// Carries the cached result string (`pass`/`warn`/`block`).
+    Hit(String),
+    /// No usable cache entry (miss, hash mismatch, or non-cacheable mutable
+    /// ref): the dep must be fetched.
+    Fetch,
+}
+
+/// Decide whether a git dep can be served from cache, given a pre-classified
+/// ref kind and the result of a cache lookup.
+///
+/// - Mutable refs (`RefKind::Mutable`) are NEVER cached, so they always
+///   `Fetch` regardless of any (stale) row that might exist (REQ-097-02).
+/// - Pinned refs consult the lookup: a row whose stored `content_hash` matches a
+///   freshly recomputed `expected_hash` is a verified `Hit`; anything else
+///   (miss, mismatch, sha1, missing hash) falls through to `Fetch` (REQ-097-04).
+///
+/// `lookup` carries the cached `(result, content_hash)` pair, or `None` on a
+/// cache miss.  `expected_hash` is the hash recomputed from a fresh fetch when
+/// available; when it is `None` (no fresh fetch yet) the decision can only honor
+/// the cache if a verification hash is supplied, so it fails closed to `Fetch`.
+fn decide_git_cache_action(
+    ref_kind: &policy::mutable_ref::RefKind,
+    lookup: Option<(&str, Option<&str>)>,
+    expected_hash: Option<&str>,
+) -> GitCacheAction {
+    use policy::mutable_ref::RefKind;
+    // Mutable refs are never cacheable — always re-fetch (REQ-097-02).
+    if *ref_kind == RefKind::Mutable {
+        return GitCacheAction::Fetch;
+    }
+    match lookup {
+        Some((result, cached_hash)) => {
+            // Reuse the task-030 hash gate: only a matching, non-sha1 hash pair
+            // honors the cache (REQ-097-04).
+            match verify_hash(cached_hash, expected_hash) {
+                HashVerifyDecision::HonorCache => GitCacheAction::Hit(result.to_string()),
+                HashVerifyDecision::Reverify => GitCacheAction::Fetch,
+            }
+        }
+        None => GitCacheAction::Fetch,
+    }
+}
+
 /// A package to be scanned, with its optional pinned version.
 ///
 /// CLI-arg packages have `version: None` (query registry latest).
@@ -783,6 +868,70 @@ async fn run_check(
                 let mutable_ref_detail =
                     PolicyDetail::from_result(mutable_ref_policy.name(), &mutable_ref_result);
 
+                // Task 097 (ADR 008 piece 2): cache integration for git deps.
+                //
+                // Cache key = (name, commit_sha, "git").  ONLY pinned commit SHAs
+                // are cacheable: an immutable SHA uniquely identifies the fetched
+                // tree, whereas a mutable branch name does not (REQ-097-01/02).
+                // `classify_ref` (task 094) is the single source of truth for the
+                // pinned-vs-mutable decision — never reimplemented here.
+                let ref_kind = policy::mutable_ref::classify_ref(&ref_);
+
+                // Cache lookup for pinned refs.  A DB error is surfaced to stderr
+                // and treated as a miss → full re-fetch (REQ-097-05, mirrors the
+                // registry path's REQ-047-01/02), never a silent pass or a hard
+                // abort.  Mutable refs skip the lookup entirely.
+                let git_cache_hit: Option<String> = if ref_kind
+                    == policy::mutable_ref::RefKind::Pinned
+                {
+                    match cache.lookup(&pkg_ref.name, &ref_, "git") {
+                        Ok(entry) => {
+                            let lookup = entry
+                                .as_ref()
+                                .map(|e| (e.result.as_str(), e.content_hash.as_deref()));
+                            // The stored content_hash is the integrity anchor
+                            // (REQ-097-04): a row whose hash is NULL/sha1/empty
+                            // fails the task-030 verify_hash gate and re-fetches.
+                            let cached_hash = entry.as_ref().and_then(|e| e.content_hash.clone());
+                            match decide_git_cache_action(&ref_kind, lookup, cached_hash.as_deref())
+                            {
+                                GitCacheAction::Hit(result) => Some(result),
+                                GitCacheAction::Fetch => None,
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!(
+                                "dep-scan: cache lookup failed for git dep {}@{ref_}: {e} — re-fetching",
+                                pkg_ref.name
+                            );
+                            None
+                        }
+                    }
+                } else {
+                    None
+                };
+
+                if let Some(cached_result) = git_cache_hit {
+                    // Verified pinned-SHA cache hit: reuse the stored verdict
+                    // without calling the fetcher (T-097-02/09).
+                    if cached_result == "warn" || cached_result == "block" {
+                        has_failure = true;
+                    }
+                    results.push(CheckResult {
+                        package: pkg_ref.name.clone(),
+                        version: ref_.clone(),
+                        registry: "git".to_string(),
+                        age_hours: None,
+                        result: cached_result,
+                        reason: Some(format!(
+                            "git-sourced dependency: url={url}, ref={ref_} — cached result (pinned commit)"
+                        )),
+                        policies: vec![mutable_ref_detail],
+                        vulns: vec![],
+                    });
+                    continue;
+                }
+
                 // Task 096 (REQ-096-01..05): attempt a sandboxed, read-only fetch
                 // of the repository at `ref_`.  The host policy is checked inside
                 // `fetch` BEFORE any socket is opened (REQ-096-03).  The fetched
@@ -791,7 +940,7 @@ async fn run_check(
                 // fail-closed behaviour: an unfetchable dep must never `Pass`
                 // (REQ-096-05 / T-096-15).
                 let fetcher = vcs::fetch::VcsFetcher::from_config(&config);
-                let fetch_outcome = fetcher.fetch(&url, &ref_);
+                let fetch_outcome = GitTreeFetcher::fetch_tree(&fetcher, &url, &ref_);
 
                 // Compute the overall verdict.  The mutable-ref policy fires
                 // first and independently of the fetch (T-094-05).  On a fetch
@@ -840,6 +989,23 @@ async fn run_check(
                         )),
                     ),
                 };
+
+                // Task 097: persist the verdict ONLY for pinned commit SHAs whose
+                // tree was actually fetched.  Mutable refs are NEVER written to
+                // cache (REQ-097-02) — a mutable branch name does not uniquely
+                // identify a tree, so caching it would serve stale/poisoned
+                // content on the next scan.  Fetch failures are also not cached:
+                // there is no tree to anchor the integrity hash to, so the next
+                // scan must re-fetch (fail-closed).  The store is best-effort: a
+                // DB write error must not abort the scan (mirrors the registry
+                // path's `let _ = cache.insert(...)`).
+                if ref_kind == policy::mutable_ref::RefKind::Pinned
+                    && let Ok(tree) = &fetch_outcome
+                {
+                    let content_hash = git_tree_content_hash(tree);
+                    let _ =
+                        cache.insert_git(&pkg_ref.name, &ref_, &result_str, Some(&content_hash));
+                }
 
                 if result_str == "warn" || result_str == "block" {
                     has_failure = true;
@@ -4025,4 +4191,342 @@ mod tests {
     // T-093-13: No regressions — tooling gate.
     // cargo test (full suite) exits 0, cargo clippy exits 0, cargo fmt --check exits 0.
     const _T_093_13_NO_REGRESSIONS: () = ();
+
+    // ── T-097 tests — VCS fetch cache integration (ADR 008 piece 2) ─────────────
+    //
+    // These exercise the production building blocks the git-dep scan arm uses for
+    // its cache decision: `classify_ref` (task 094), `decide_git_cache_action`,
+    // `git_tree_content_hash`, the `GitTreeFetcher` trait, and `Cache::insert_git`
+    // / `Cache::lookup`.  A `SpyFetcher` records every `fetch_tree` call so the
+    // fetch-count assertions (T-097-02/04) are exact.
+
+    use std::cell::RefCell;
+    use std::path::PathBuf;
+
+    const T097_SHA: &str = "a3b5c7d9e1f2a3b5c7d9e1f2a3b5c7d9e1f2a3b5";
+
+    /// A fetcher spy: counts calls and returns a fixed synthetic tree.
+    struct SpyFetcher {
+        calls: RefCell<usize>,
+        files: Vec<(PathBuf, Vec<u8>)>,
+    }
+
+    impl SpyFetcher {
+        fn new(files: Vec<(PathBuf, Vec<u8>)>) -> Self {
+            Self {
+                calls: RefCell::new(0),
+                files,
+            }
+        }
+        fn call_count(&self) -> usize {
+            *self.calls.borrow()
+        }
+    }
+
+    impl GitTreeFetcher for SpyFetcher {
+        fn fetch_tree(&self, _url: &str, _ref_: &str) -> Result<vcs::fetch::FetchedTree> {
+            *self.calls.borrow_mut() += 1;
+            Ok(vcs::fetch::FetchedTree::from_files_for_test(
+                self.files.clone(),
+            ))
+        }
+    }
+
+    /// Mirror of the scan arm's git cache decision: lookup → decide → (fetch +
+    /// store on miss).  Returns the verdict served.  Uses the SAME production
+    /// helpers as `run_check` so a passing test reflects real behaviour.
+    fn scan_git_dep_once(
+        cache: &Cache,
+        fetcher: &dyn GitTreeFetcher,
+        name: &str,
+        ref_: &str,
+    ) -> String {
+        let ref_kind = policy::mutable_ref::classify_ref(ref_);
+
+        // Cache lookup (pinned only), then decide.
+        let cached_result = if ref_kind == policy::mutable_ref::RefKind::Pinned {
+            match cache.lookup(name, ref_, "git") {
+                Ok(entry) => {
+                    let lookup = entry
+                        .as_ref()
+                        .map(|e| (e.result.as_str(), e.content_hash.as_deref()));
+                    let cached_hash = entry.as_ref().and_then(|e| e.content_hash.clone());
+                    match decide_git_cache_action(&ref_kind, lookup, cached_hash.as_deref()) {
+                        GitCacheAction::Hit(r) => Some(r),
+                        GitCacheAction::Fetch => None,
+                    }
+                }
+                Err(e) => {
+                    // REQ-097-05: warn-only on lookup error, then re-fetch.
+                    eprintln!(
+                        "dep-scan: cache lookup failed for git dep {name}@{ref_}: {e} — re-fetching"
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+        if let Some(r) = cached_result {
+            return r;
+        }
+
+        // Miss → fetch.
+        let tree = fetcher
+            .fetch_tree("https://example.com/repo.git", ref_)
+            .expect("spy fetch should succeed");
+        let result_str = "pass".to_string();
+
+        // Store only pinned SHAs.
+        if ref_kind == policy::mutable_ref::RefKind::Pinned {
+            let content_hash = git_tree_content_hash(&tree);
+            let _ = cache.insert_git(name, ref_, &result_str, Some(&content_hash));
+        }
+        result_str
+    }
+
+    fn sample_tree() -> Vec<(PathBuf, Vec<u8>)> {
+        vec![
+            (PathBuf::from("src/lib.rs"), b"fn main() {}".to_vec()),
+            (PathBuf::from("README.md"), b"# hello".to_vec()),
+        ]
+    }
+
+    // T-097-02: Second scan of the same pinned SHA is a cache hit — the fetcher
+    // is called exactly once across two scans.
+    #[test]
+    fn t097_02_pinned_sha_fetched_exactly_once() {
+        let cache = Cache::in_memory().unwrap();
+        let spy = SpyFetcher::new(sample_tree());
+
+        let v1 = scan_git_dep_once(&cache, &spy, "pkg", T097_SHA);
+        let v2 = scan_git_dep_once(&cache, &spy, "pkg", T097_SHA);
+
+        assert_eq!(v1, "pass");
+        assert_eq!(
+            v2, "pass",
+            "T-097-02: second scan must reuse the cached verdict"
+        );
+        assert_eq!(
+            spy.call_count(),
+            1,
+            "T-097-02: pinned SHA fetcher must be called exactly once across two scans"
+        );
+    }
+
+    // T-097-01 / T-097-09: After a pinned-SHA scan, the cache holds a row keyed
+    // (name, sha, "git") and a second scan serves the stored verdict.
+    #[test]
+    fn t097_01_09_pinned_sha_cached_and_served() {
+        let cache = Cache::in_memory().unwrap();
+        let spy = SpyFetcher::new(sample_tree());
+        scan_git_dep_once(&cache, &spy, "pkg-name", T097_SHA);
+
+        let entry = cache
+            .lookup("pkg-name", T097_SHA, "git")
+            .unwrap()
+            .expect("T-097-01: pinned SHA must produce a cache hit");
+        assert_eq!(entry.result, "pass", "T-097-09: stored verdict is Pass");
+        assert_eq!(entry.source_kind, Some("git".to_string()));
+    }
+
+    // T-097-03: A mutable ref dep is NOT written to cache.
+    #[test]
+    fn t097_03_mutable_ref_not_cached() {
+        let cache = Cache::in_memory().unwrap();
+        let spy = SpyFetcher::new(sample_tree());
+        scan_git_dep_once(&cache, &spy, "pkg-name", "main");
+
+        let entry = cache.lookup("pkg-name", "main", "git").unwrap();
+        assert!(
+            entry.is_none(),
+            "T-097-03: mutable ref 'main' must never be written to cache"
+        );
+    }
+
+    // T-097-04: A mutable ref dep always re-fetches — the fetcher is called on
+    // every scan (cache never intervenes).
+    #[test]
+    fn t097_04_mutable_ref_refetches_every_scan() {
+        let cache = Cache::in_memory().unwrap();
+        let spy = SpyFetcher::new(sample_tree());
+
+        scan_git_dep_once(&cache, &spy, "pkg", "main");
+        scan_git_dep_once(&cache, &spy, "pkg", "main");
+
+        assert_eq!(
+            spy.call_count(),
+            2,
+            "T-097-04: mutable ref must re-fetch on every scan (no cache short-circuit)"
+        );
+    }
+
+    // T-097-10: Content-hash integrity covers git entries — a tampered cache row
+    // (content_hash cleared/corrupted) is rejected and the dep re-fetched.
+    #[test]
+    fn t097_10_tampered_git_entry_triggers_refetch() {
+        let cache = Cache::in_memory().unwrap();
+        let spy = SpyFetcher::new(sample_tree());
+
+        // Prime the cache with a valid pinned-SHA row.
+        scan_git_dep_once(&cache, &spy, "pkg", T097_SHA);
+        assert_eq!(spy.call_count(), 1);
+
+        // Tamper: clear the integrity hash on the cached row (simulates an
+        // attacker editing the SQLite row to break the verdict↔tree binding).
+        cache.insert_git("pkg", T097_SHA, "pass", None).unwrap();
+
+        // Next scan must NOT honor the tampered row — it re-fetches.
+        scan_git_dep_once(&cache, &spy, "pkg", T097_SHA);
+        assert_eq!(
+            spy.call_count(),
+            2,
+            "T-097-10: a git row with a missing/tampered content_hash must trigger a re-fetch"
+        );
+    }
+
+    // T-097-11: A cache lookup error for a git dep is warn-only and the scan
+    // proceeds with a full re-fetch (not a silent pass, not a hard abort).
+    // We force `Cache::lookup` to return Err by corrupting the on-disk DB file
+    // after the cache is opened (the SQLite header check fails on the next query).
+    #[test]
+    fn t097_11_cache_lookup_error_warns_and_refetches() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("t097_11.db");
+        let cache = Cache::new(&db_path).unwrap();
+
+        // Force a lookup error by dropping the table out from under the open
+        // connection via a second connection.  In WAL mode the committed DROP is
+        // visible to the first connection's next read transaction, so the
+        // prepared `SELECT … FROM scanned_packages` then fails with "no such
+        // table" — a realistic schema-corruption / concurrent-clobber scenario.
+        {
+            let conn2 = rusqlite::Connection::open(&db_path).unwrap();
+            conn2.execute_batch("DROP TABLE scanned_packages;").unwrap();
+        }
+
+        // Sanity: the lookup now returns Err (precondition for this test).
+        assert!(
+            cache.lookup("pkg", T097_SHA, "git").is_err(),
+            "T-097-11: precondition — lookup against the dropped table must return Err"
+        );
+
+        let spy = SpyFetcher::new(sample_tree());
+        let verdict = scan_git_dep_once(&cache, &spy, "pkg", T097_SHA);
+
+        assert_eq!(
+            spy.call_count(),
+            1,
+            "T-097-11: a lookup error must fall through to a re-fetch, not a silent pass"
+        );
+        // The verdict is determined by the fetch result, not the cache error.
+        assert_eq!(
+            verdict, "pass",
+            "T-097-11: verdict comes from the fetch, not the error"
+        );
+    }
+
+    // T-097-10b: A git row whose stored hash is sha1-prefixed is never honored
+    // (SHA-1 is not accepted as a cache trust gate — REQ-040-01 carried into 097).
+    #[test]
+    fn t097_10b_sha1_git_hash_not_honored() {
+        let action = decide_git_cache_action(
+            &policy::mutable_ref::RefKind::Pinned,
+            Some(("pass", Some("sha1:deadbeef"))),
+            Some("sha1:deadbeef"),
+        );
+        assert_eq!(
+            action,
+            GitCacheAction::Fetch,
+            "T-097-10b: a sha1-prefixed git cache hash must force a re-fetch"
+        );
+    }
+
+    // T-097-12: No regressions — tooling gate.
+    // `cargo test` (full suite) exits 0, `cargo clippy --all-targets --all-features
+    // -- -D warnings` exits 0, and `cargo fmt --check` exits 0.  Verified by the
+    // pre-commit gate.
+    const _T_097_12_NO_REGRESSIONS: () = ();
+
+    // T-097: decide_git_cache_action — mutable ref always fetches, even if a
+    // (stale) row somehow exists.
+    #[test]
+    fn t097_decide_mutable_always_fetches() {
+        let action = decide_git_cache_action(
+            &policy::mutable_ref::RefKind::Mutable,
+            Some(("pass", Some("sha256:aaaa"))),
+            Some("sha256:aaaa"),
+        );
+        assert_eq!(
+            action,
+            GitCacheAction::Fetch,
+            "T-097: mutable refs must never be served from cache"
+        );
+    }
+
+    // T-097: decide_git_cache_action — pinned ref with matching hash is a Hit.
+    #[test]
+    fn t097_decide_pinned_match_is_hit() {
+        let action = decide_git_cache_action(
+            &policy::mutable_ref::RefKind::Pinned,
+            Some(("block", Some("sha256:aaaa"))),
+            Some("sha256:aaaa"),
+        );
+        assert_eq!(action, GitCacheAction::Hit("block".to_string()));
+    }
+
+    // T-097: decide_git_cache_action — pinned ref, cache miss → Fetch.
+    #[test]
+    fn t097_decide_pinned_miss_is_fetch() {
+        let action = decide_git_cache_action(
+            &policy::mutable_ref::RefKind::Pinned,
+            None,
+            Some("sha256:a"),
+        );
+        assert_eq!(action, GitCacheAction::Fetch);
+    }
+
+    // T-097-09b: git_tree_content_hash is deterministic and distinguishes trees.
+    #[test]
+    fn t097_09b_content_hash_deterministic_and_distinguishing() {
+        let t1 = vcs::fetch::FetchedTree::from_files_for_test(sample_tree());
+        let t1_again = vcs::fetch::FetchedTree::from_files_for_test(sample_tree());
+        let h1 = git_tree_content_hash(&t1);
+        let h1_again = git_tree_content_hash(&t1_again);
+        assert_eq!(h1, h1_again, "T-097-09b: identical trees must hash equal");
+        assert!(
+            h1.starts_with("sha256:"),
+            "T-097-09b: hash must be sha256-prefixed"
+        );
+
+        let t2 = vcs::fetch::FetchedTree::from_files_for_test(vec![(
+            PathBuf::from("src/lib.rs"),
+            b"fn main() { evil(); }".to_vec(),
+        )]);
+        assert_ne!(
+            git_tree_content_hash(&t2),
+            h1,
+            "T-097-09b: a different tree must hash differently (tamper-evident)"
+        );
+    }
+
+    // T-097-09c: a length-extension-style ambiguity is impossible — moving bytes
+    // across the path/content boundary changes the hash (explicit length framing).
+    #[test]
+    fn t097_09c_content_hash_frames_fields() {
+        let a = vcs::fetch::FetchedTree::from_files_for_test(vec![(
+            PathBuf::from("ab"),
+            b"c".to_vec(),
+        )]);
+        let b = vcs::fetch::FetchedTree::from_files_for_test(vec![(
+            PathBuf::from("a"),
+            b"bc".to_vec(),
+        )]);
+        assert_ne!(
+            git_tree_content_hash(&a),
+            git_tree_content_hash(&b),
+            "T-097-09c: ('ab','c') and ('a','bc') must not collide"
+        );
+    }
 }

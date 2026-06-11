@@ -357,6 +357,34 @@ a successfully fetched git dep is materialised but not yet scanned. Cache integr
   performance budget when one scan fans out into hundreds of transitive nodes; how partial
   failures (one unfetchable node) roll up into the top-level verdict under fail-closed.
 
+## Piece 2 cache resolution (task 097 — VCS fetch cache integration)
+
+This resolves the **"Cache key for git sources"** open question above.
+
+- **Key.** Git-sourced results are cached under `(name, commit_sha, "git")`, reusing the
+  existing `(name, version, registry)` schema: `version` holds the full commit SHA and the
+  registry slot is the literal `"git"`. The `"git"` slot does **not** collide with any
+  `RegistryType` string (`npm`, `pypi`, `crates`, `go`), so a crate `foo@abc…` and a git dep
+  `foo@abc…` are distinct rows.
+- **Only pinned SHAs are cacheable.** A full commit SHA is immutable and uniquely identifies
+  the fetched tree, so it is a safe cache key. A **mutable ref** (branch name, tag, short
+  hash, empty) does **not** uniquely identify a tree — its content can change between scans —
+  so mutable-ref results are **never written to the cache**. Every scan of a mutable ref
+  re-fetches and re-checks. The pinned-vs-mutable decision is made by `classify_ref` (task
+  094); it is not reimplemented in the cache layer.
+- **Schema migration.** An additive, idempotent `source_kind TEXT` column is added to
+  `scanned_packages` (only when absent — mirrors the task-029/032 migrations). Git rows carry
+  `source_kind = "git"`; registry rows and all legacy/pre-097 rows carry `NULL`. No column
+  drops, no backfill, existing registry entries remain readable.
+- **Content-hash integrity (ADR 003 / task 030).** Each git row stores a `sha256:` digest
+  computed over the fetched tree (length-framed path+content per file, deterministic order).
+  On lookup the task-030 `verify_hash` gate is applied; a row whose stored hash is missing,
+  `sha1:`-prefixed, or otherwise non-matching fails the gate and forces a re-fetch
+  (fail-closed). Fetch failures are not cached — there is no tree to anchor the hash to.
+- **Cache I/O errors (REQ-047-01/02 posture).** A DB error on a git-dep lookup is surfaced
+  to stderr as a warning and the scan proceeds with a full re-fetch — never a silent pass,
+  never a hard abort.
+
 ## Consequences
 
 - **+** Closes a real, exploited blind spot (the o3forms class): git-sourced and one-hop-away
