@@ -430,16 +430,21 @@ impl Config {
     }
 }
 
+/// Process-global lock that serializes any test mutating `DEP_SCAN_*`
+/// environment variables. Env vars are process-wide shared state, so tests in
+/// *any* module that set/remove them (here in `config.rs`, and the
+/// `resolve_signer` end-to-end test in `interchange_sign.rs`) must hold this
+/// same lock to avoid cross-test interference. It is `pub(crate)` and
+/// `#[cfg(test)]` so it is visible to sibling test modules but never compiled
+/// into the production binary.
+#[cfg(test)]
+pub(crate) static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::io::Write;
-    use std::sync::Mutex;
     use tempfile::NamedTempFile;
-
-    /// Mutex to serialize tests that call Config::load (which reads env vars).
-    /// This prevents env var mutations in one test from affecting another.
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     /// RAII guard that removes an env var when dropped, even on panic.
     struct EnvGuard {

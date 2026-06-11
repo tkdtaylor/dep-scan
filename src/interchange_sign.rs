@@ -923,8 +923,7 @@ mod tests {
     // T-087-04 (part): no build-time embedded private key — there is no API to
     // construct an OperatorKeySigner without supplying a key. (The "key_path
     // unset ⇒ no signer" half is covered by t_087_15_* via resolve_signer.)
-    // This test asserts the signer is purely a function of supplied key bytes
-    // and performs no I/O beyond the file read (no network is reachable here).
+    // This test asserts the signer is purely a function of supplied key bytes.
     #[test]
     fn t_087_04_operator_key_is_pure_local() {
         let (pem, _vk) = gen_ed25519_pem();
@@ -933,6 +932,64 @@ mod tests {
         let signer = OperatorKeySigner::from_pkcs8_pem(&pem).expect("parse in-memory key");
         let (sig, _keyid) = signer.sign(b"payload").expect("sign offline");
         assert_eq!(sig.len(), 64);
+    }
+
+    // T-087-04: OperatorKeySigner makes ZERO outbound network connections during
+    // construction *and* signing. We stand up a wiremock server with a catch-all
+    // stub mounted `.expect(0)` (same wiremock pattern as the keyless tests
+    // above), then load an OperatorKeySigner from a tempfile PEM and sign. After
+    // signing we assert the server received zero requests. The `.expect(0)` is
+    // verified on MockServer drop too, so this test FAILS if OperatorKeySigner
+    // ever issues an HTTP call — proving the offline signer is truly offline.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn t_087_04_operator_key_makes_zero_network_calls() {
+        use wiremock::matchers::any;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        // Catch-all: any method, any path. If OperatorKeySigner ever reaches out,
+        // it is overwhelmingly likely to hit this stub; expect(0) then trips on
+        // drop, and the explicit received_requests() assertion below trips first.
+        Mock::given(any())
+            .respond_with(ResponseTemplate::new(200))
+            .expect(0)
+            .mount(&server)
+            .await;
+
+        let (pem, _vk) = gen_ed25519_pem();
+        let keyfile = write_key_tempfile(&pem);
+
+        // Construction from the on-disk key, and signing, both run on a blocking
+        // thread (sign() is synchronous) so nothing about the async runtime masks
+        // an outbound call.
+        let kf_path = keyfile.path().to_path_buf();
+        let sig = tokio::task::spawn_blocking(move || {
+            let signer = OperatorKeySigner::from_key_path(&kf_path).expect("load operator key");
+            let (sig, _keyid) = signer.sign(b"test payload").expect("sign offline");
+            sig
+        })
+        .await
+        .expect("join");
+        assert_eq!(
+            sig.len(),
+            64,
+            "T-087-04: Ed25519 signature produced offline"
+        );
+
+        // Explicit zero-request assertion: this fails loudly if any HTTP request
+        // reached the mock during construction or signing.
+        let requests = server
+            .received_requests()
+            .await
+            .expect("wiremock records requests when running");
+        assert!(
+            requests.is_empty(),
+            "T-087-04: OperatorKeySigner must make ZERO network calls, but the mock \
+             received {} request(s): {:?}",
+            requests.len(),
+            requests
+        );
+        // MockServer drop also verifies the expect(0) expectation.
     }
 
     // T-087-05: unreadable / malformed key path returns Err.
@@ -1130,34 +1187,96 @@ mod tests {
         );
     }
 
-    // T-087-12: signing.offline forces the offline path regardless of probe.
-    // (The DEP_SCAN_OFFLINE env layering itself is tested in config.rs;
-    // resolve_signer keys off config.signing.offline, which the env sets.)
+    // T-087-12: the DEP_SCAN_OFFLINE=1 env var forces the offline path,
+    // end-to-end through the real production load path: env var → Config::load
+    // (which applies env overrides) → resolve_signer. Setting the real env var
+    // and loading through Config::load is what production does; nothing here
+    // hand-sets config.signing.offline. With the network probe reporting ONLINE,
+    // the only thing that can force the offline OperatorKeySigner is the env var
+    // having flipped signing.offline. If that chain ever broke, this test would
+    // fall through to the keyless factory and fail.
+    //
+    // DEP_SCAN_OFFLINE is process-global; this test shares config.rs's ENV_LOCK
+    // so it serializes against the other DEP_SCAN_OFFLINE-mutating tests, and a
+    // drop guard removes the var afterward so no sibling test sees it.
     #[test]
-    fn t_087_12_offline_flag_forces_offline_path() {
+    fn t_087_12_env_var_forces_offline_path_end_to_end() {
+        // RAII guard: restore DEP_SCAN_OFFLINE to its prior state on drop, even
+        // on panic, so no other test is affected.
+        struct EnvGuard {
+            prev: Option<String>,
+        }
+        impl Drop for EnvGuard {
+            fn drop(&mut self) {
+                unsafe {
+                    match &self.prev {
+                        Some(v) => std::env::set_var("DEP_SCAN_OFFLINE", v),
+                        None => std::env::remove_var("DEP_SCAN_OFFLINE"),
+                    }
+                }
+            }
+        }
+
+        let _lock = crate::config::ENV_LOCK.lock().unwrap();
+        let _guard = EnvGuard {
+            prev: std::env::var("DEP_SCAN_OFFLINE").ok(),
+        };
+
         let (pem, _vk) = gen_ed25519_pem();
         let keyfile = write_key_tempfile(&pem);
-        let mut config = Config::default();
-        config.signing.offline = true; // as DEP_SCAN_OFFLINE=1 would set
-        config.signing.key_path = keyfile.path().to_string_lossy().into_owned();
+
+        // A config file that explicitly says offline = false, so the ONLY thing
+        // that can flip it is the env override applied by Config::load.
+        let mut cfg_file = tempfile::NamedTempFile::new().expect("cfg tempfile");
+        {
+            use std::io::Write as _;
+            writeln!(
+                cfg_file,
+                "[signing]\noffline = false\nkey_path = {:?}",
+                keyfile.path().to_string_lossy()
+            )
+            .expect("write config");
+            cfg_file.flush().expect("flush config");
+        }
+
+        // Set the real env var, then load through the real production path.
+        unsafe {
+            std::env::set_var("DEP_SCAN_OFFLINE", "1");
+        }
+        let config = Config::load(Some(cfg_file.path())).expect("load config");
+        assert!(
+            config.signing.offline,
+            "T-087-12: DEP_SCAN_OFFLINE=1 must flip config.signing.offline via Config::load"
+        );
 
         let keyless_called = std::cell::Cell::new(false);
         let decision = resolve_signer(
             &config,
-            || Ok(()), // probe says ONLINE, but offline flag must win
+            || Ok(()), // probe says ONLINE — only the env-forced offline flag can win
             || {
                 keyless_called.set(true);
                 Box::new(FailingSigner)
             },
         )
         .expect("resolve");
-        assert!(
-            matches!(decision, SignerDecision::Signer(_)),
-            "T-087-12: offline + key_path set yields OperatorKeySigner"
-        );
+
+        match decision {
+            SignerDecision::Signer(s) => {
+                // The offline OperatorKeySigner signs locally (64-byte Ed25519).
+                let (sig, _) = s.sign(b"x").expect("operator sign");
+                assert_eq!(
+                    sig.len(),
+                    64,
+                    "T-087-12: env-forced offline path must yield the OperatorKeySigner"
+                );
+            }
+            SignerDecision::NoOfflineKey => {
+                panic!("T-087-12: expected an OperatorKeySigner, got NoOfflineKey")
+            }
+        }
         assert!(
             !keyless_called.get(),
-            "T-087-12: offline flag must force offline even when the probe succeeds"
+            "T-087-12: env-forced offline path must NOT call the keyless factory"
         );
     }
 
