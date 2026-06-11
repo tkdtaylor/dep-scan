@@ -26,6 +26,12 @@ impl Policy for AgePolicy {
     }
 
     fn evaluate(&self, ctx: &ScanContext) -> PolicyResult {
+        // REQ-098-03: a git-sourced dependency has no registry publish timestamp,
+        // so the age check does not apply — Pass rather than emit a spurious
+        // "no published date" Warn (T-098-14).
+        if ctx.git_source.is_some() {
+            return PolicyResult::Pass;
+        }
         let Some(published_at) = ctx.metadata.published_at else {
             return PolicyResult::Warn(format!(
                 "Package '{}' has no published date — cannot verify age",

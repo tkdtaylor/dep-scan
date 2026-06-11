@@ -74,6 +74,13 @@ impl Policy for TyposquattingPolicy {
     }
 
     fn evaluate(&self, ctx: &ScanContext) -> PolicyResult {
+        // REQ-098-03: a git-sourced dependency has no registry name to compare
+        // against the popular-package lists — Pass rather than flag a coincidental
+        // edit-distance hit on the local dep name (T-098-15).
+        if ctx.git_source.is_some() {
+            return PolicyResult::Pass;
+        }
+
         let name = &ctx.metadata.name;
 
         // 1. If name IS in popular list, pass (it is the real package)

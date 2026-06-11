@@ -37,6 +37,14 @@ impl Policy for DependencyConfusionPolicy {
     }
 
     fn evaluate(&self, ctx: &ScanContext) -> PolicyResult {
+        // REQ-098-03: dependency-confusion compares a registry name against
+        // internal namespace prefixes. A git-sourced dependency is pinned to a
+        // specific repository, not resolved by name from a public registry, so the
+        // confusion attack does not apply — Pass.
+        if ctx.git_source.is_some() {
+            return PolicyResult::Pass;
+        }
+
         let name = &ctx.metadata.name;
 
         // When internal_prefixes is empty the entire check is disabled.

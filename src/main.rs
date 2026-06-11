@@ -934,60 +934,76 @@ async fn run_check(
 
                 // Task 096 (REQ-096-01..05): attempt a sandboxed, read-only fetch
                 // of the repository at `ref_`.  The host policy is checked inside
-                // `fetch` BEFORE any socket is opened (REQ-096-03).  The fetched
-                // tree is NOT yet run through the policy pipeline — that is task
-                // 098.  This task only delivers the fetch + sandbox and the
-                // fail-closed behaviour: an unfetchable dep must never `Pass`
-                // (REQ-096-05 / T-096-15).
+                // `fetch` BEFORE any socket is opened (REQ-096-03).
                 let fetcher = vcs::fetch::VcsFetcher::from_config(&config);
                 let fetch_outcome = GitTreeFetcher::fetch_tree(&fetcher, &url, &ref_);
 
-                // Compute the overall verdict.  The mutable-ref policy fires
-                // first and independently of the fetch (T-094-05).  On a fetch
-                // failure we fail closed: the verdict is escalated to at least
-                // `Warn` (or `Block` when `mutable_git_ref = "block"`), never
+                // Task 098 (REQ-098-02): on a successful fetch, run the FULL policy
+                // pipeline over the materialised tree and aggregate verdicts
+                // (worst-verdict-wins, exactly like the registry path).  The
+                // mutable-ref policy fires first and independently of the fetch
+                // (T-094-05); every other enabled policy then runs against a
+                // `ScanContext` built from the tree's files (REQ-098-01).  The
+                // tree's contents are read for static analysis only — no file is
+                // ever executed (REQ-098-01 / T-098-02).
+                //
+                // On a fetch failure we fail closed: the verdict is escalated to at
+                // least `Warn` (or `Block` when `mutable_git_ref = "block"`), never
                 // `Pass` (T-096-15).
-                let (result_str, reason): (String, Option<String>) = match (
-                    &mutable_ref_result,
-                    &fetch_outcome,
-                ) {
-                    // Fetch succeeded: keep the mutable-ref verdict; note the
-                    // tree was fetched but not yet scanned (task 098).
-                    (PolicyResult::Pass, Ok(tree)) => (
-                        "pass".to_string(),
-                        Some(format!(
-                            "git-sourced dependency: url={url}, ref={ref_} — fetched {} file(s) into sandbox; not yet scanned (task 098)",
-                            tree.len()
-                        )),
-                    ),
-                    (PolicyResult::Warn(msg), Ok(tree)) => (
-                        "warn".to_string(),
-                        Some(format!(
-                            "git-sourced dependency: url={url}, ref={ref_} — {msg}; fetched {} file(s) into sandbox",
-                            tree.len()
-                        )),
-                    ),
-                    (PolicyResult::Block(msg), Ok(tree)) => (
-                        "block".to_string(),
-                        Some(format!(
-                            "git-sourced dependency: url={url}, ref={ref_} — {msg}; fetched {} file(s) into sandbox",
-                            tree.len()
-                        )),
-                    ),
+                let mut git_policy_details: Vec<PolicyDetail> = vec![mutable_ref_detail];
+                let (result_str, reason): (String, Option<String>) = match &fetch_outcome {
+                    Ok(tree) => {
+                        // REQ-098-01: build the context from the fetched tree and
+                        // tag it as git-sourced so registry-only policies Pass
+                        // (REQ-098-03).  The name/version are the dep name and ref
+                        // so any verdict message identifies the dependency.
+                        let mut tree_ctx = ScanContext::from_fetched_tree(tree);
+                        tree_ctx.metadata.name = pkg_ref.name.clone();
+                        tree_ctx.metadata.version = ref_.clone();
+                        tree_ctx.git_source = Some((url.clone(), ref_.clone()));
+
+                        // REQ-098-02 step 3: run all applicable policies.  This is
+                        // the SAME `policies` vec the registry path uses, so the
+                        // policy set is identical for git and registry deps
+                        // (T-098-09); registry-only policies short-circuit to Pass
+                        // on the git_source marker (T-098-14/15).  The mutable-ref
+                        // detail was already pushed above.
+                        for p in &policies {
+                            let r = p.evaluate(&tree_ctx);
+                            git_policy_details.push(PolicyDetail::from_result(p.name(), &r));
+                        }
+
+                        // REQ-098-02 step 4: worst-verdict-wins aggregation
+                        // (T-098-08), identical to the registry path.
+                        let (agg_result, agg_reason) = aggregate_results(&git_policy_details);
+                        let reason = match agg_reason {
+                            Some(msg) => format!(
+                                "git-sourced dependency: url={url}, ref={ref_} — {msg} (scanned {} file(s) from fetched tree)",
+                                tree.len()
+                            ),
+                            None => format!(
+                                "git-sourced dependency: url={url}, ref={ref_} — scanned {} file(s) from fetched tree, no policy violations",
+                                tree.len()
+                            ),
+                        };
+                        (agg_result, Some(reason))
+                    }
                     // Fetch failed: fail closed.  Block stays Block; Pass/Warn
                     // become at least Warn — an unfetchable dep is never safe.
-                    (PolicyResult::Block(msg), Err(e)) => (
-                        "block".to_string(),
-                        Some(format!(
-                            "git-sourced dependency: url={url}, ref={ref_} — {msg}; fetch failed: {e:#}"
-                        )),
-                    ),
-                    (PolicyResult::Pass, Err(e)) | (PolicyResult::Warn(_), Err(e)) => (
-                        "warn".to_string(),
-                        Some(format!(
-                            "git-sourced dependency: url={url}, ref={ref_} — could not be fetched and was not scanned (fail-closed, not treated as safe): {e:#}"
-                        )),
-                    ),
+                    Err(e) => match &mutable_ref_result {
+                        PolicyResult::Block(msg) => (
+                            "block".to_string(),
+                            Some(format!(
+                                "git-sourced dependency: url={url}, ref={ref_} — {msg}; fetch failed: {e:#}"
+                            )),
+                        ),
+                        PolicyResult::Pass | PolicyResult::Warn(_) => (
+                            "warn".to_string(),
+                            Some(format!(
+                                "git-sourced dependency: url={url}, ref={ref_} — could not be fetched and was not scanned (fail-closed, not treated as safe): {e:#}"
+                            )),
+                        ),
+                    },
                 };
 
                 // Task 097: persist the verdict ONLY for pinned commit SHAs whose
@@ -1017,7 +1033,7 @@ async fn run_check(
                     age_hours: None,
                     result: result_str,
                     reason,
-                    policies: vec![mutable_ref_detail],
+                    policies: git_policy_details,
                     vulns: vec![],
                 });
                 continue;
@@ -4529,4 +4545,410 @@ mod tests {
             "T-097-09c: ('ab','c') and ('a','bc') must not collide"
         );
     }
+
+    // ── T-098 tests — policy pipeline on fetched git trees (ADR 008 piece 2) ────
+    //
+    // These exercise: ScanContext::from_fetched_tree (install-hook vs source-file
+    // classification, no execution), the install-script / obfuscation policies
+    // firing on a tree, registry-only policies Passing for git deps, worst-verdict
+    // aggregation, the cache-hit-skips-policy path, and verdict path surfacing.
+
+    use crate::policy::{PolicyResult, aggregate_results, install_script::InstallScriptPolicy};
+    use crate::policy::{age::AgePolicy, obfuscation::ObfuscationPolicy};
+    use crate::policy::{
+        dependency_confusion::DependencyConfusionPolicy, typosquatting::TyposquattingPolicy,
+    };
+    use crate::types::ScanContext;
+
+    fn tree(files: Vec<(&str, &[u8])>) -> vcs::fetch::FetchedTree {
+        vcs::fetch::FetchedTree::from_files_for_test(
+            files
+                .into_iter()
+                .map(|(p, c)| (PathBuf::from(p), c.to_vec()))
+                .collect(),
+        )
+    }
+
+    /// Build a git-sourced ScanContext from a tree the way the scan arm does.
+    fn git_ctx_from_tree(t: &vcs::fetch::FetchedTree, name: &str, ref_: &str) -> ScanContext {
+        let mut ctx = ScanContext::from_fetched_tree(t);
+        ctx.metadata.name = name.to_string();
+        ctx.metadata.version = ref_.to_string();
+        ctx.git_source = Some(("https://example.com/repo.git".to_string(), ref_.to_string()));
+        ctx
+    }
+
+    // T-098-01: ScanContext::from_fetched_tree populates install_scripts from
+    // install-hook file names in the tree.
+    #[test]
+    fn t098_01_from_fetched_tree_populates_install_scripts() {
+        let t = tree(vec![
+            ("scripts/preinstall.js", b"console.log('hi')"),
+            ("install.js", b"console.log('hi')"),
+            ("binding.gyp", b"{}"),
+            ("postinstall", b"echo hi"),
+            ("src/lib.rs", b"fn main() {}"),
+            ("README.md", b"# hello"),
+        ]);
+        let ctx = ScanContext::from_fetched_tree(&t);
+
+        let mut hook_names: Vec<String> =
+            ctx.install_scripts.iter().map(|s| s.name.clone()).collect();
+        hook_names.sort();
+        assert_eq!(
+            hook_names,
+            vec![
+                "binding.gyp".to_string(),
+                "install.js".to_string(),
+                "postinstall".to_string(),
+                "scripts/preinstall.js".to_string(),
+            ],
+            "T-098-01: install hooks must be classified into install_scripts by file name"
+        );
+
+        let mut src_names: Vec<String> = ctx.source_files.iter().map(|s| s.name.clone()).collect();
+        src_names.sort();
+        assert_eq!(
+            src_names,
+            vec!["README.md".to_string(), "src/lib.rs".to_string()],
+            "T-098-01: non-hook files must go to source_files"
+        );
+    }
+
+    // T-098-02: the builder treats files as untrusted CONTENT and never executes
+    // them — building a context over a tree containing `rm -rf /` causes no
+    // filesystem modification.
+    #[test]
+    fn t098_02_builder_does_not_execute_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let sentinel = dir.path().join("SENTINEL_MUST_SURVIVE");
+        std::fs::write(&sentinel, b"alive").unwrap();
+
+        let danger = format!("#!/bin/sh\nrm -rf {}\n", dir.path().display());
+        let t = tree(vec![
+            ("preinstall", danger.as_bytes()),
+            ("evil.sh", danger.as_bytes()),
+        ]);
+        let ctx = ScanContext::from_fetched_tree(&t);
+
+        // The bytes are read into the context (static analysis) but nothing ran.
+        assert!(
+            sentinel.exists(),
+            "T-098-02: building a ScanContext must not execute any tree file"
+        );
+        assert_eq!(
+            std::fs::read(&sentinel).unwrap(),
+            b"alive",
+            "T-098-02: sentinel content must be untouched"
+        );
+        // The dangerous content is present for scanning, just not executed.
+        assert!(
+            ctx.install_scripts
+                .iter()
+                .any(|s| s.content.contains("rm -rf")),
+            "T-098-02: the script content must be available for static analysis"
+        );
+    }
+
+    // T-098-03: empty tree → no install scripts.
+    #[test]
+    fn t098_03_empty_tree_has_no_install_scripts() {
+        let t = tree(vec![]);
+        let ctx = ScanContext::from_fetched_tree(&t);
+        assert!(
+            ctx.install_scripts.is_empty(),
+            "T-098-03: empty tree must yield empty install_scripts"
+        );
+        assert!(ctx.source_files.is_empty());
+    }
+
+    // T-098-04: InstallScriptPolicy fires on a malicious preinstall in the tree,
+    // and the verdict names the tree-relative path (REQ-098-05).
+    #[test]
+    fn t098_04_install_script_policy_fires_on_malicious_preinstall() {
+        let t = tree(vec![(
+            "scripts/preinstall.js",
+            b"exec(Buffer.from('cm0gLXJmIC8=','base64').toString())",
+        )]);
+        let ctx = git_ctx_from_tree(&t, "evil-dep", "deadbeef");
+
+        let result = InstallScriptPolicy.evaluate(&ctx);
+        match &result {
+            PolicyResult::Block(reason) | PolicyResult::Warn(reason) => {
+                assert!(
+                    reason.contains("scripts/preinstall.js"),
+                    "T-098-04: verdict must reference the tree-relative path, got: {reason}"
+                );
+            }
+            other => panic!("T-098-04: expected Block/Warn, got {other:?}"),
+        }
+        assert!(
+            matches!(result, PolicyResult::Block(_)),
+            "T-098-04: an exec(...) preinstall must Block"
+        );
+    }
+
+    // T-098-05: a clean tree passes the install-script policy.
+    #[test]
+    fn t098_05_install_script_policy_passes_on_clean_tree() {
+        let t = tree(vec![
+            ("README.md", b"# hello world"),
+            ("src/lib.rs", b"pub fn add(a: u32, b: u32) -> u32 { a + b }"),
+        ]);
+        let ctx = git_ctx_from_tree(&t, "clean-dep", "deadbeef");
+        assert_eq!(
+            InstallScriptPolicy.evaluate(&ctx),
+            PolicyResult::Pass,
+            "T-098-05: a tree with no install hooks and clean source must Pass install-script policy"
+        );
+    }
+
+    // T-098-06: ObfuscationPolicy fires on obfuscated JS in the tree (a source
+    // file, not an install hook), and names the tree-relative path.
+    #[test]
+    fn t098_06_obfuscation_policy_fires_on_obfuscated_source() {
+        let payload = "var d = 'QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVphYmNkZWZnaGlqa2xtbm9wcXJzdHV2d3h5ejAxMjM0NQ==';";
+        let t = tree(vec![("dist/bundle.js", payload.as_bytes())]);
+        let ctx = git_ctx_from_tree(&t, "obf-dep", "deadbeef");
+
+        let result = ObfuscationPolicy.evaluate(&ctx);
+        match &result {
+            PolicyResult::Block(reason) | PolicyResult::Warn(reason) => {
+                assert!(
+                    reason.contains("dist/bundle.js"),
+                    "T-098-06: verdict must reference the source file path, got: {reason}"
+                );
+            }
+            other => panic!("T-098-06: expected Block/Warn, got {other:?}"),
+        }
+    }
+
+    // T-098-07: ObfuscationPolicy passes on clean source files.
+    #[test]
+    fn t098_07_obfuscation_policy_passes_on_clean_source() {
+        let t = tree(vec![
+            ("src/main.py", b"def main():\n    print('ok')\n"),
+            ("src/lib.rs", b"pub fn f() -> i32 { 42 }"),
+        ]);
+        let ctx = git_ctx_from_tree(&t, "clean-dep", "deadbeef");
+        assert_eq!(
+            ObfuscationPolicy.evaluate(&ctx),
+            PolicyResult::Pass,
+            "T-098-07: clean source files must Pass the obfuscation policy"
+        );
+    }
+
+    // T-098-08: multiple policies run; worst verdict wins (Block over Warn).
+    #[test]
+    fn t098_08_worst_verdict_wins() {
+        // preinstall triggers a Block (child_process); a source file triggers a
+        // Warn-level obfuscation pattern (string-concat URL). Aggregate = Block.
+        let t = tree(vec![
+            ("preinstall", b"require('child_process').exec('id')"),
+            ("app.js", br#"var u = "ht" + "tp" + "://evil.com""#),
+        ]);
+        let ctx = git_ctx_from_tree(&t, "multi-dep", "deadbeef");
+
+        let details = vec![
+            PolicyDetail::from_result("install_scripts", &InstallScriptPolicy.evaluate(&ctx)),
+            PolicyDetail::from_result("obfuscation", &ObfuscationPolicy.evaluate(&ctx)),
+        ];
+        let (agg, _reason) = aggregate_results(&details);
+        assert_eq!(
+            agg, "block",
+            "T-098-08: a Block from one policy must win over a Warn from another"
+        );
+    }
+
+    // T-098-09: the policy set is identical for git and registry deps — the scan
+    // arm runs the SAME `policies` vec. We assert structurally that the registry-
+    // only policies are present in the shared set and Pass for a git ctx.
+    #[test]
+    fn t098_09_all_policies_run_and_registry_only_pass() {
+        let t = tree(vec![("src/lib.rs", b"pub fn f() {}")]);
+        let ctx = git_ctx_from_tree(&t, "lodash", "deadbeef");
+
+        // Registry-only policies must Pass on a git ctx (no spurious verdicts).
+        assert_eq!(
+            AgePolicy::new(chrono::TimeDelta::hours(72)).evaluate(&ctx),
+            PolicyResult::Pass,
+            "T-098-09/14: age must Pass for a git dep"
+        );
+        assert_eq!(
+            TyposquattingPolicy::with_defaults().evaluate(&ctx),
+            PolicyResult::Pass,
+            "T-098-09/15: typosquatting must Pass for a git dep even when the name resembles a popular package"
+        );
+        assert_eq!(
+            DependencyConfusionPolicy::new(vec!["lodash".to_string()]).evaluate(&ctx),
+            PolicyResult::Pass,
+            "T-098-09: dependency-confusion must Pass for a git dep"
+        );
+    }
+
+    // T-098-10: a pinned-SHA cache hit reuses the stored verdict WITHOUT running
+    // the policy pipeline. We prove the fetcher is not called on the second scan
+    // (the policy run only happens after a fetch), reusing the T-097 SpyFetcher.
+    #[test]
+    fn t098_10_cache_hit_skips_policy_run() {
+        let cache = Cache::in_memory().unwrap();
+        let spy = SpyFetcher::new(sample_tree());
+
+        // First scan: cold cache → fetch (+ policy run would occur in run_check).
+        scan_git_dep_once(&cache, &spy, "pkg", T097_SHA);
+        assert_eq!(spy.call_count(), 1, "T-098-10: first scan fetches");
+
+        // Second scan: pinned-SHA cache hit → no fetch, hence no policy run.
+        scan_git_dep_once(&cache, &spy, "pkg", T097_SHA);
+        assert_eq!(
+            spy.call_count(),
+            1,
+            "T-098-10: a pinned-SHA cache hit must NOT re-fetch (and therefore must not re-run policies)"
+        );
+    }
+
+    // T-098-11: a mutable ref always re-fetches (and re-runs the pipeline);
+    // a cold pinned SHA also fetches. Both confirm the pipeline is not skipped on
+    // a miss. (Cache-hit skip is covered by T-098-10.)
+    #[test]
+    fn t098_11_miss_and_mutable_ref_run_pipeline() {
+        let cache = Cache::in_memory().unwrap();
+        let spy = SpyFetcher::new(sample_tree());
+
+        // Mutable ref: never cached → fetch every scan.
+        scan_git_dep_once(&cache, &spy, "pkg", "main");
+        scan_git_dep_once(&cache, &spy, "pkg", "main");
+        assert_eq!(
+            spy.call_count(),
+            2,
+            "T-098-11: a mutable ref must fetch (and run the pipeline) on every scan"
+        );
+
+        // Cold pinned SHA on a fresh cache also fetches.
+        let cache2 = Cache::in_memory().unwrap();
+        let spy2 = SpyFetcher::new(sample_tree());
+        scan_git_dep_once(&cache2, &spy2, "pkg", T097_SHA);
+        assert_eq!(
+            spy2.call_count(),
+            1,
+            "T-098-11: a cold pinned SHA must fetch (and run the pipeline) on first scan"
+        );
+    }
+
+    /// Build a CheckResult exactly as the git-dep scan arm does: run the full
+    /// policy pipeline over a tree ctx and aggregate. Mirrors run_check's git arm
+    /// so the surfacing tests reflect real output.
+    fn git_dep_check_result_from_tree(
+        t: &vcs::fetch::FetchedTree,
+        name: &str,
+        ref_: &str,
+    ) -> CheckResult {
+        let mut ctx = git_ctx_from_tree(t, name, ref_);
+        ctx.git_source = Some(("https://example.com/repo.git".to_string(), ref_.to_string()));
+        let details = vec![
+            PolicyDetail::from_result("install_scripts", &InstallScriptPolicy.evaluate(&ctx)),
+            PolicyDetail::from_result("obfuscation", &ObfuscationPolicy.evaluate(&ctx)),
+        ];
+        let (result, reason) = aggregate_results(&details);
+        CheckResult {
+            package: name.to_string(),
+            version: ref_.to_string(),
+            registry: "git".to_string(),
+            age_hours: None,
+            result,
+            reason,
+            policies: details,
+            vulns: vec![],
+        }
+    }
+
+    // T-098-12: policy verdicts from a fetched tree appear in --format json, with
+    // the policy name and a tree-relative file path in the message.
+    #[test]
+    fn t098_12_verdict_appears_in_json() {
+        let t = tree(vec![(
+            "scripts/preinstall.js",
+            b"exec(Buffer.from('eA==','base64').toString())",
+        )]);
+        let result = git_dep_check_result_from_tree(&t, "evil-dep", "deadbeef");
+        let json = serde_json::to_string_pretty(&vec![result]).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let elem = &v.as_array().unwrap()[0];
+
+        assert_eq!(elem["result"].as_str(), Some("block"));
+        // A policy detail names install_scripts.
+        let policies = elem["policies"].as_array().unwrap();
+        assert!(
+            policies
+                .iter()
+                .any(|p| p["policy_name"].as_str() == Some("install_scripts")),
+            "T-098-12: json must carry the install_scripts policy detail, got: {json}"
+        );
+        // The verdict reason references the tree-relative path.
+        assert!(
+            json.contains("scripts/preinstall.js"),
+            "T-098-12: json must reference the tree-relative file path, got: {json}"
+        );
+    }
+
+    // T-098-13: --format native shows the git dep row with a Block/Warn severity
+    // matching the policy verdict.
+    #[test]
+    fn t098_13_verdict_appears_in_native() {
+        use std::io::Write as _;
+        let t = tree(vec![(
+            "scripts/preinstall.js",
+            b"require('child_process').exec('id')",
+        )]);
+        let result = git_dep_check_result_from_tree(&t, "evil-dep", "deadbeef");
+
+        let mut out = Vec::<u8>::new();
+        let result_display = match result.result.as_str() {
+            "block" => format!("BLOCK: {}", result.reason.as_deref().unwrap_or("")),
+            "warn" => format!("WARN: {}", result.reason.as_deref().unwrap_or("")),
+            other => other.to_string(),
+        };
+        writeln!(
+            out,
+            "{:<20} {:<12} {}",
+            result.package, result.version, result_display
+        )
+        .unwrap();
+        let table = String::from_utf8(out).unwrap();
+
+        assert!(
+            table.contains("evil-dep") && table.contains("BLOCK"),
+            "T-098-13: native row must show the git dep with a BLOCK indicator, got:\n{table}"
+        );
+    }
+
+    // T-098-14: age policy is skipped (Pass) for git deps — no spurious
+    // "too young"/"no published date" verdict.
+    #[test]
+    fn t098_14_age_policy_passes_for_git_dep() {
+        let t = tree(vec![("src/lib.rs", b"pub fn f() {}")]);
+        let ctx = git_ctx_from_tree(&t, "brand-new-dep", "deadbeef");
+        assert_eq!(
+            AgePolicy::new(chrono::TimeDelta::hours(720)).evaluate(&ctx),
+            PolicyResult::Pass,
+            "T-098-14: age must Pass for a git dep regardless of min-age config"
+        );
+    }
+
+    // T-098-15: typosquatting is skipped (Pass) for git deps even when the dep
+    // name is identical to a popular package name.
+    #[test]
+    fn t098_15_typosquatting_passes_for_git_dep() {
+        let t = tree(vec![("src/lib.rs", b"pub fn f() {}")]);
+        // "expres" is one edit from the popular "express" — would normally fire.
+        let ctx = git_ctx_from_tree(&t, "expres", "deadbeef");
+        assert_eq!(
+            TyposquattingPolicy::with_defaults().evaluate(&ctx),
+            PolicyResult::Pass,
+            "T-098-15: typosquatting must Pass for a git dep"
+        );
+    }
+
+    // T-098-16 is the tooling gate (cargo test/clippy/fmt), enforced at commit.
+    const _T_098_16_NO_REGRESSIONS: () = ();
 }

@@ -23,6 +23,14 @@ impl Policy for MaintainerChangePolicy {
     }
 
     fn evaluate(&self, ctx: &ScanContext) -> PolicyResult {
+        // REQ-098-03: maintainer-change tracks registry maintainer identity over
+        // time. A git-sourced dependency carries no registry maintainer set, so
+        // the check does not apply — Pass rather than emit a spurious first-seen
+        // Warn off an empty maintainer list with zero downloads.
+        if ctx.git_source.is_some() {
+            return PolicyResult::Pass;
+        }
+
         let current = &ctx.metadata.maintainers;
 
         match &ctx.previous_maintainers {
@@ -114,6 +122,7 @@ mod tests {
             metadata: meta,
             vulnerabilities: Vec::new(),
             install_scripts: Vec::new(),
+            source_files: Vec::new(),
             previous_maintainers: previous,
             git_source: None,
             npm_attestations: None,

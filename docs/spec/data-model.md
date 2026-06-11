@@ -151,7 +151,9 @@ pub struct ScanContext {
     pub metadata: PackageMetadata,
     pub vulnerabilities: Vec<VulnerabilityInfo>,
     pub install_scripts: Vec<InstallScript>,
+    pub source_files: Vec<InstallScript>,
     pub previous_maintainers: Option<Vec<String>>,
+    pub git_source: Option<(String, String)>,
     pub npm_attestations: Option<Vec<AttestationBundle>>,
     pub npm_attestation_fetch_error: Option<String>,
     pub pypi_attestation: Option<Option<AttestationBundle>>,
@@ -165,6 +167,8 @@ pub struct ScanContext {
 - **`provenance_identity`:** populated by `main.rs` after a successful P-09 / P-10 / P-11 run, then persisted to the cache row.
 - **`npm_attestations: Some(vec![])`:** the endpoint returned 404 — distinct from `None` (not queried).
 - **`pypi_attestation: Some(None)`:** queried but no provenance attached to the file.
+- **`source_files`:** non-install-hook files of a fetched git tree (`name` = tree-relative path), populated by `ScanContext::from_fetched_tree` (task 098). Empty for registry deps. The `obfuscation` policy scans these in addition to `install_scripts`.
+- **`git_source: Some((url, ref))`:** marks the context as git-sourced (tasks 094/098). Registry-only policies (`age`, `typosquatting`, `dependency_confusion`, `maintainer_change`) return `Pass` when this is set; `mutable_ref` keys its verdict on the `ref`.
 
 ### `PolicyResult` — policy → aggregator
 
