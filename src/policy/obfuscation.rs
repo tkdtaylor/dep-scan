@@ -209,6 +209,7 @@ mod tests {
             vulnerabilities: vec![],
             install_scripts: scripts,
             previous_maintainers: None,
+            git_source: None,
             npm_attestations: None,
             npm_attestation_fetch_error: None,
             pypi_attestation: None,

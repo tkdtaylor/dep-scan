@@ -41,6 +41,12 @@ pub struct ScanContext {
     pub install_scripts: Vec<InstallScript>,
     /// Previous maintainers, if maintainer history is available.
     pub previous_maintainers: Option<Vec<String>>,
+    /// Git source information for git-sourced dependencies (task 094).
+    ///
+    /// `None` for registry-sourced dependencies (the mutable-ref policy
+    /// returns `Pass` immediately when this field is `None`).
+    /// `Some((url, ref_))` for git-sourced dependencies.
+    pub git_source: Option<(String, String)>,
     /// Pre-fetched npm provenance attestation bundles (task 032).
     ///
     /// `None` means the attestation endpoint was not queried (e.g. non-npm package
@@ -85,6 +91,7 @@ impl ScanContext {
             vulnerabilities: Vec::new(),
             install_scripts: Vec::new(),
             previous_maintainers: None,
+            git_source: None,
             npm_attestations: None,
             npm_attestation_fetch_error: None,
             pypi_attestation: None,
@@ -283,6 +290,7 @@ mod tests {
                 content: "echo hello".to_string(),
             }],
             previous_maintainers: Some(vec!["old-maintainer".to_string()]),
+            git_source: None,
             npm_attestations: None,
             npm_attestation_fetch_error: None,
             pypi_attestation: None,
