@@ -29,6 +29,8 @@ impl DependencySource {
     }
 
     /// Return the git ref (branch/tag/commit) if this is a git-sourced dependency, else `None`.
+    /// Used by task 093 (git-dep routing); suppressed until then.
+    #[allow(dead_code)]
     pub fn git_ref(&self) -> Option<&str> {
         match self {
             DependencySource::Git { ref_, .. } => Some(ref_),
@@ -37,6 +39,8 @@ impl DependencySource {
     }
 
     /// Return the git URL if this is a git-sourced dependency, else `None`.
+    /// Used by task 093 (git-dep routing); suppressed until then.
+    #[allow(dead_code)]
     pub fn git_url(&self) -> Option<&str> {
         match self {
             DependencySource::Git { url, .. } => Some(url),
