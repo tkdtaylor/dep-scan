@@ -9,6 +9,7 @@ pub mod obfuscation;
 pub mod popularity;
 pub mod pypi_provenance;
 pub mod typosquatting;
+pub mod vcs_host;
 pub mod vulnerability;
 
 use serde::Serialize;
