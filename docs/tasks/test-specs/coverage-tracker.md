@@ -103,7 +103,7 @@
 | 085 | Presence-only VEX emission (ADR 005 Q3) | 085-vex-emission-test-spec.md | 16/16 | ✅ (spec-verifier APPROVE after test-strengthening round — T-085-05 verdict-independence + T-085-14 real dispatch; cargo test + clippy/fmt clean) |
 | 086 | DSSE envelope signing for interchange output (ADR 006 Q4+Q8) | 086-dsse-signing-interchange-test-spec.md | 19/19 | ✅ (spec-verifier APPROVE — PAE byte-exact, payloadType bound, fail-closed; live default signer is ephemeral pending task 087 identity resolution) |
 | 087 | Signing identity: keyless-online + operator-key-offline (ADR 006 Q5, ADR 007) | 087-signing-identity-keyless-offline-test-spec.md | 17/17 | ✅ (spec-verifier APPROVE after test-strengthening — T-087-04 zero-network + T-087-12 DEP_SCAN_OFFLINE end-to-end; ephemeral signer replaced by resolve_signer, fail-closed verified; cargo test/clippy/fmt/audit clean; signing ADR renumbered to 010) |
-| 088 | Statement freshness: OSV-snapshot marker + `valid_until` (ADR 006 Q7) | 088-statement-freshness-test-spec.md | 19/19 | 🟡 |
+| 088 | Statement freshness: OSV-snapshot marker + `valid_until` (ADR 006 Q7) | 088-statement-freshness-test-spec.md | 19/19 | ✅ (spec-verifier APPROVE after T-088-15 made a real native-no-freshness assertion; T-088-14 no-OCSP/CRL accepted as structural guarantee; cargo test/clippy/fmt clean) |
 | 089 | Public-key export for consumers (ADR 007 point 3) | 089-pubkey-export-test-spec.md | 0/19 | ❌ |
 | 090 | Dependency source model (`DependencySource` enum) (ADR 008 piece 1 — data model) | 090-dependency-source-model-test-spec.md | 0/15 | ❌ |
 | 091 | npm lockfile git URL parser (ADR 008 piece 1 — npm) | 091-npm-git-url-parser-test-spec.md | 0/19 | ❌ |
