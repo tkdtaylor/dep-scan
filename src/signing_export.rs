@@ -25,6 +25,22 @@ use anyhow::{Result, anyhow};
 use crate::config::Config;
 use crate::interchange_sign::ed25519_keyid;
 
+/// Extract the PEM label from the first `-----BEGIN <LABEL>-----` line, if present.
+///
+/// Returns `Some("PRIVATE KEY")` for a PKCS#8 private key, `Some("CERTIFICATE")`
+/// for a certificate, etc.  Returns `None` if no `-----BEGIN` line is found.
+fn extract_pem_label(pem: &str) -> Option<&str> {
+    for line in pem.lines() {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix("-----BEGIN ")
+            && let Some(label) = rest.strip_suffix("-----")
+        {
+            return Some(label);
+        }
+    }
+    None
+}
+
 /// Export the operator's Ed25519 public key to `out` in PEM SPKI format.
 ///
 /// Output format:
@@ -52,15 +68,38 @@ pub fn export_pubkey(config: &Config, out: &mut dyn Write) -> Result<()> {
 
     let key_path = std::path::Path::new(key_path_str);
 
-    // REQ-089-02 step 2: read the file.
-    let pem = std::fs::read_to_string(key_path)
+    // REQ-089-02 step 2: read the file as raw bytes so we can give a clear
+    // error when the file is not valid UTF-8 (e.g. garbage / binary content)
+    // rather than the generic I/O "stream did not contain valid UTF-8" message.
+    let raw_bytes = std::fs::read(key_path)
         .map_err(|e| anyhow!("failed to read signing key at {}: {e}", key_path.display()))?;
+    let pem = std::str::from_utf8(&raw_bytes).map_err(|_| {
+        anyhow!(
+            "file at {} is not a valid PEM PKCS#8 Ed25519 private key \
+             (file contains non-UTF-8 bytes; expected a PEM-encoded PKCS#8 key)",
+            key_path.display()
+        )
+    })?;
+
+    // REQ-089-02 step 2b: detect the PEM label before attempting PKCS#8 parse
+    // so we can produce a precise "unexpected PEM type" error rather than a
+    // generic parse failure.  A lightweight header scan suffices — no new dep.
+    if let Some(label) = extract_pem_label(pem)
+        && label != "PRIVATE KEY"
+    {
+        return Err(anyhow!(
+            "file at {} contains an unexpected PEM type: \
+             found '-----BEGIN {label}-----' but expected '-----BEGIN PRIVATE KEY-----' \
+             (a PEM-encoded PKCS#8 Ed25519 private key)",
+            key_path.display()
+        ));
+    }
 
     // REQ-089-02 step 3: parse as PEM PKCS#8 Ed25519 private key.
     use ed25519_dalek::pkcs8::DecodePrivateKey as _;
-    let signing_key = ed25519_dalek::SigningKey::from_pkcs8_pem(&pem).map_err(|e| {
+    let signing_key = ed25519_dalek::SigningKey::from_pkcs8_pem(pem).map_err(|e| {
         anyhow!(
-            "failed to parse PEM PKCS#8 Ed25519 signing key at {}: {e}",
+            "failed to parse signing key at {} as a PEM PKCS#8 Ed25519 private key: {e}",
             key_path.display()
         )
     })?;
@@ -402,6 +441,17 @@ mod tests {
             result.is_err(),
             "T-089-11: export_pubkey must return Err for garbage key bytes"
         );
+        let msg = format!("{}", result.unwrap_err());
+        // Message must include the file path so the operator can find the file.
+        assert!(
+            msg.contains(f.path().to_string_lossy().as_ref()),
+            "T-089-11: error message must contain the key file path, got: {msg}"
+        );
+        // Message must indicate the file is not a valid PEM PKCS#8 key.
+        assert!(
+            msg.contains("PEM") || msg.contains("PKCS#8") || msg.contains("valid"),
+            "T-089-11: error message must indicate the file is not a valid PEM PKCS#8 key, got: {msg}"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -438,6 +488,17 @@ mod tests {
         assert!(
             result.is_err(),
             "T-089-13: export_pubkey must return Err for a certificate PEM (not a private key)"
+        );
+        let msg = format!("{}", result.unwrap_err());
+        // Message must name the unexpected PEM type so the operator knows what was found.
+        assert!(
+            msg.contains("CERTIFICATE"),
+            "T-089-13: error message must mention the unexpected PEM type 'CERTIFICATE', got: {msg}"
+        );
+        // Message must also indicate what was expected.
+        assert!(
+            msg.contains("PRIVATE KEY") || msg.contains("unexpected PEM type"),
+            "T-089-13: error message must indicate the expected PEM type or label 'PRIVATE KEY', got: {msg}"
         );
     }
 
