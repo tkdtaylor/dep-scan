@@ -42,10 +42,12 @@ ed25519-dalek = { version = "2.2.0", features = ["rand_core"] }
 tempfile = "3"
 # Task 084 — CycloneDX/SPDX SBOM generation: UUIDv4 for serialNumber / documentNamespace.
 uuid = { version = "1", features = ["v4"] }
+# Task 086 — Ed25519 key generation for the default interchange signer (OsRng).
+# Promoted from dev-dependency: the test-key signer is used on the live
+# `run_check` interchange path until task 087 wires the production identity.
+rand_core = { version = "0.6", features = ["getrandom"] }
 
 [dev-dependencies]
-# Ed25519 key generation for tests (uses OsRng from the rand crate ecosystem)
-rand_core = { version = "0.6", features = ["getrandom"] }
 wiremock = "0.6"
 assert_cmd = "2"
 predicates = "3"

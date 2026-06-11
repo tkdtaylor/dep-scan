@@ -1,6 +1,7 @@
 mod cache;
 mod cli;
 mod config;
+mod interchange_sign;
 mod lockfile;
 mod osv;
 mod policy;
@@ -298,6 +299,7 @@ async fn run(cli: Cli) -> Result<i32> {
             json,
             lockfile,
             lockfile_type,
+            allow_unsigned,
         } => {
             let effective_format = resolve_format(format, json);
             run_check(
@@ -308,6 +310,7 @@ async fn run(cli: Cli) -> Result<i32> {
                 effective_format,
                 lockfile,
                 lockfile_type,
+                allow_unsigned,
             )
             .await
         }
@@ -317,6 +320,7 @@ async fn run(cli: Cli) -> Result<i32> {
             format,
             json,
             force,
+            allow_unsigned,
         } => {
             let effective_format = resolve_format(format, json);
             run_install(
@@ -326,6 +330,7 @@ async fn run(cli: Cli) -> Result<i32> {
                 registry,
                 effective_format,
                 force,
+                allow_unsigned,
             )
             .await
         }
@@ -390,6 +395,54 @@ pub(crate) fn render_results(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+/// Produce the serialized stdout string for the non-`Native` output formats.
+///
+/// This is the pure render→(sign|mark-unsigned) dispatch used by `run_check`,
+/// extracted so tests can exercise it without network calls and so the signing
+/// decision is provable by inspection (REQ-086-03, REQ-086-05, REQ-086-06):
+///
+/// - `Json`            → raw `render_results` output, **never signed** (zero
+///   signing cost — the signer is not touched on this path; T-086-14, T-086-16).
+/// - interchange formats (`Osv` / `CycloneDx` / `Spdx` / `Vex`):
+///   - default                → rendered payload wrapped in a DSSE envelope,
+///     one signing operation over the whole result set (T-086-09..12, T-086-15).
+///   - with `allow_unsigned`  → rendered payload emitted raw with an explicit
+///     unsigned marker; the signer is **not** invoked (T-086-18).
+///
+/// `Native` must never reach this function (it is printed inline as a table);
+/// passing it returns an error rather than silently emitting an empty string.
+///
+/// Returning `Err` (e.g. a signer failure) means the caller writes nothing to
+/// stdout — interchange signing is fail-closed (REQ-086-05).
+fn produce_serialized_output(
+    results: &[CheckResult],
+    output_format: &OutputFormat,
+    allow_unsigned: bool,
+    signer: &dyn interchange_sign::InterchangeSigner,
+) -> Result<String> {
+    match output_format {
+        OutputFormat::Native => {
+            anyhow::bail!("Native format is rendered inline, not via produce_serialized_output")
+        }
+        // Bespoke JSON array — never signed (ADR 006 Q8). The signer argument
+        // is intentionally untouched on this path: zero signing cost for the
+        // primary local-developer scan.
+        OutputFormat::Json => render_results(results, output_format),
+        OutputFormat::Osv | OutputFormat::CycloneDx | OutputFormat::Spdx | OutputFormat::Vex => {
+            let rendered = render_results(results, output_format)?;
+            if allow_unsigned {
+                interchange_sign::mark_unsigned(rendered.as_bytes())
+            } else {
+                let payload_type = interchange_sign::payload_type_for_format(output_format)
+                    .expect("interchange formats always have a payload type");
+                interchange_sign::sign_interchange(rendered.as_bytes(), payload_type, signer)
+            }
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn run_check(
     config_path: Option<&Path>,
     verbose: bool,
@@ -398,6 +451,7 @@ async fn run_check(
     output_format: OutputFormat,
     lockfile_path: Option<std::path::PathBuf>,
     lockfile_type_str: Option<String>,
+    allow_unsigned: bool,
 ) -> Result<i32> {
     let config = Config::load(config_path)?;
 
@@ -970,10 +1024,21 @@ async fn run_check(
                 }
             }
         }
-        _ => {
-            // All other formats are handled by the pure render_results dispatcher.
-            let rendered = render_results(&results, &output_format)?;
-            println!("{rendered}");
+        // Json + interchange formats (osv/cyclonedx/spdx/vex) are produced by
+        // the pure dispatcher below.  Json is rendered raw (never signed);
+        // interchange formats are wrapped in a DSSE envelope (one signing
+        // operation per run) unless `--allow-unsigned` is set.  Building the
+        // output BEFORE writing anything to stdout means a signing failure
+        // returns Err and nothing is printed (REQ-086-05 / T-086-17).
+        OutputFormat::Json
+        | OutputFormat::Osv
+        | OutputFormat::CycloneDx
+        | OutputFormat::Spdx
+        | OutputFormat::Vex => {
+            // Default signer until task 087 wires the production identity.
+            let signer = interchange_sign::StaticEd25519Signer::generate();
+            let out = produce_serialized_output(&results, &output_format, allow_unsigned, &signer)?;
+            println!("{out}");
         }
     }
 
@@ -1073,6 +1138,7 @@ fn build_pip_requirements(packages: &[PkgTriple]) -> Result<String, String> {
     Ok(lines.join("\n") + "\n")
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_install(
     config_path: Option<&Path>,
     verbose: bool,
@@ -1080,6 +1146,7 @@ async fn run_install(
     registry_flag: String,
     output_format: OutputFormat,
     force: bool,
+    allow_unsigned: bool,
 ) -> Result<i32> {
     // 0. Validate package names before any scan or subprocess invocation.
     //    A token starting with '-' could redirect the underlying package manager
@@ -1100,6 +1167,7 @@ async fn run_install(
         output_format,
         None, // no lockfile
         None, // no lockfile type
+        allow_unsigned,
     )
     .await?;
 
@@ -2520,6 +2588,251 @@ mod tests {
         assert!(
             !output.contains("not yet implemented"),
             "T-083-22/T-085-14: VEX output must not contain 'not yet implemented'"
+        );
+    }
+
+    // =====================================================================
+    // Task 086 — DSSE signing for interchange output (dispatch-level tests)
+    //
+    // These exercise `produce_serialized_output`, the exact pure dispatch that
+    // `run_check` calls for the non-Native formats, so the signing behaviour is
+    // verified without network calls (T-086-09..16).
+    // =====================================================================
+
+    /// Assert that the dispatch output for `format` (default signing) is a DSSE
+    /// envelope object: root has `payload`, `payloadType`, `signatures`.
+    fn assert_is_dsse_envelope(format: OutputFormat, marker: &str) {
+        let results = vec![make_check_result(
+            "lodash",
+            "4.17.21",
+            "npm",
+            "pass",
+            vec![],
+        )];
+        let signer = interchange_sign::StaticEd25519Signer::generate();
+        let out = produce_serialized_output(&results, &format, false, &signer)
+            .unwrap_or_else(|e| panic!("{marker}: signing dispatch must succeed: {e}"));
+        let v: serde_json::Value =
+            serde_json::from_str(&out).unwrap_or_else(|e| panic!("{marker}: must be JSON: {e}"));
+        assert!(
+            v.is_object(),
+            "{marker}: DSSE envelope must be a JSON object"
+        );
+        assert!(v["payload"].is_string(), "{marker}: must have payload");
+        assert!(
+            v["payloadType"].is_string(),
+            "{marker}: must have payloadType"
+        );
+        assert!(
+            v["signatures"].as_array().is_some_and(|a| a.len() == 1),
+            "{marker}: must have exactly one signature"
+        );
+    }
+
+    // T-086-09: `--format osv` output is wrapped in a DSSE envelope.
+    #[test]
+    fn t086_09_osv_wrapped_in_dsse_envelope() {
+        assert_is_dsse_envelope(OutputFormat::Osv, "T-086-09");
+    }
+
+    // T-086-10: `--format cyclonedx` output is wrapped in a DSSE envelope.
+    #[test]
+    fn t086_10_cyclonedx_wrapped_in_dsse_envelope() {
+        assert_is_dsse_envelope(OutputFormat::CycloneDx, "T-086-10");
+    }
+
+    // T-086-11: `--format spdx` output is wrapped in a DSSE envelope.
+    #[test]
+    fn t086_11_spdx_wrapped_in_dsse_envelope() {
+        assert_is_dsse_envelope(OutputFormat::Spdx, "T-086-11");
+    }
+
+    // T-086-12: `--format vex` output is wrapped in a DSSE envelope.
+    #[test]
+    fn t086_12_vex_wrapped_in_dsse_envelope() {
+        assert_is_dsse_envelope(OutputFormat::Vex, "T-086-12");
+    }
+
+    // T-086-13: `--format native` is never produced via this dispatch (it is a
+    // human table printed inline) and never reaches the signing path. Calling
+    // the dispatch with Native is an explicit error, not an empty/unsigned
+    // string.
+    #[test]
+    fn t086_13_native_not_signed() {
+        let results = vec![make_check_result(
+            "lodash",
+            "4.17.21",
+            "npm",
+            "pass",
+            vec![],
+        )];
+        let signer = interchange_sign::StaticEd25519Signer::generate();
+        let out = produce_serialized_output(&results, &OutputFormat::Native, false, &signer);
+        assert!(
+            out.is_err(),
+            "T-086-13: Native must not be serialized/signed via the interchange dispatch"
+        );
+    }
+
+    // T-086-14: `--format json` is a plain JSON array, never a DSSE envelope.
+    #[test]
+    fn t086_14_json_not_an_envelope() {
+        let results = vec![make_check_result(
+            "lodash",
+            "4.17.21",
+            "npm",
+            "pass",
+            vec![],
+        )];
+        let signer = interchange_sign::StaticEd25519Signer::generate();
+        let out = produce_serialized_output(&results, &OutputFormat::Json, false, &signer)
+            .expect("T-086-14: Json dispatch must succeed");
+        let v: serde_json::Value = serde_json::from_str(&out).expect("T-086-14: must be JSON");
+        assert!(
+            v.is_array(),
+            "T-086-14: --format json must be a JSON array, not a DSSE envelope object"
+        );
+        assert!(
+            v.get("payload").is_none() && v.get("signatures").is_none(),
+            "T-086-14: --format json must not be wrapped in a DSSE envelope"
+        );
+    }
+
+    // T-086-15: Signing is one operation per run, not per package. A 50-result
+    // set yields a single-signature envelope over one payload.
+    #[test]
+    fn t086_15_one_signature_for_large_result_set() {
+        use base64::Engine as _;
+        let mut results = Vec::new();
+        for i in 0..50 {
+            results.push(make_check_result(
+                &format!("pkg-{i}"),
+                "1.0.0",
+                "npm",
+                "pass",
+                vec![],
+            ));
+        }
+        let signer = interchange_sign::StaticEd25519Signer::generate();
+        let out = produce_serialized_output(&results, &OutputFormat::Osv, false, &signer)
+            .expect("T-086-15: dispatch must succeed");
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(
+            v["signatures"].as_array().unwrap().len(),
+            1,
+            "T-086-15: 50 results must be wrapped in exactly one signed envelope"
+        );
+        // The single payload must itself contain all 50 results.
+        let payload = base64::engine::general_purpose::STANDARD
+            .decode(v["payload"].as_str().unwrap())
+            .unwrap();
+        let osv: serde_json::Value = serde_json::from_slice(&payload).unwrap();
+        assert_eq!(
+            osv["results"].as_array().unwrap().len(),
+            50,
+            "T-086-15: all 50 results live in the single signed payload"
+        );
+    }
+
+    // T-086-16: `json` incurs zero signing overhead — the signer is never
+    // invoked on that path. A `FailingSigner` (which errors on every sign call)
+    // still produces successful Json output, proving sign() was never reached.
+    #[test]
+    fn t086_16_json_incurs_no_signing_overhead() {
+        let results = vec![make_check_result(
+            "lodash",
+            "4.17.21",
+            "npm",
+            "pass",
+            vec![],
+        )];
+        let failing = interchange_sign::FailingSigner;
+        // If Json touched the signer, this would be Err; it must be Ok.
+        let out = produce_serialized_output(&results, &OutputFormat::Json, false, &failing)
+            .expect("T-086-16: Json must not invoke the signer (no signing cost)");
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert!(v.is_array(), "T-086-16: Json output unaffected by signer");
+
+        // Contrast: an interchange format with the same failing signer DOES
+        // fail — confirming the signer is wired on the interchange path only.
+        let osv = produce_serialized_output(&results, &OutputFormat::Osv, false, &failing);
+        assert!(
+            osv.is_err(),
+            "T-086-16: interchange path must invoke the signer (fails with FailingSigner)"
+        );
+    }
+
+    // T-086-17 (dispatch level): a signing failure on an interchange format
+    // returns Err — the caller writes nothing to stdout (fail-closed).
+    #[test]
+    fn t086_17_signing_failure_is_fatal_at_dispatch() {
+        let results = vec![make_check_result(
+            "lodash",
+            "4.17.21",
+            "npm",
+            "pass",
+            vec![],
+        )];
+        let failing = interchange_sign::FailingSigner;
+        let out = produce_serialized_output(&results, &OutputFormat::Vex, false, &failing);
+        assert!(
+            out.is_err(),
+            "T-086-17: a signer failure must propagate as Err with no output produced"
+        );
+    }
+
+    // T-086-18 (dispatch level): `--allow-unsigned` emits the raw interchange
+    // payload with an unsigned marker and never invokes the signer.
+    #[test]
+    fn t086_18_allow_unsigned_emits_raw_marked_payload() {
+        let results = vec![make_check_result(
+            "lodash",
+            "4.17.21",
+            "npm",
+            "pass",
+            vec![],
+        )];
+        // A FailingSigner proves the signer is never invoked on this path.
+        let failing = interchange_sign::FailingSigner;
+        let out = produce_serialized_output(&results, &OutputFormat::Osv, true, &failing)
+            .expect("T-086-18: --allow-unsigned must succeed without invoking the signer");
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        // Not a DSSE envelope.
+        assert!(
+            v.get("payload").is_none() && v.get("signatures").is_none(),
+            "T-086-18: unsigned output must not be a DSSE envelope"
+        );
+        // Carries the raw OSV content (schema_version) and an unsigned marker.
+        assert!(
+            v.get("results").is_some(),
+            "T-086-18: raw OSV payload content must be present"
+        );
+        assert_eq!(
+            v[interchange_sign::UNSIGNED_MARKER_KEY].as_bool(),
+            Some(true),
+            "T-086-18: explicit unsigned marker must be present"
+        );
+    }
+
+    // T-086-16 (cont.): `--allow-unsigned` never affects the `json` path —
+    // json output is identical with and without the flag.
+    #[test]
+    fn t086_allow_unsigned_does_not_affect_json() {
+        let results = vec![make_check_result(
+            "lodash",
+            "4.17.21",
+            "npm",
+            "pass",
+            vec![],
+        )];
+        let signer = interchange_sign::StaticEd25519Signer::generate();
+        let signed_off = produce_serialized_output(&results, &OutputFormat::Json, false, &signer)
+            .expect("json without flag");
+        let signed_on = produce_serialized_output(&results, &OutputFormat::Json, true, &signer)
+            .expect("json with flag");
+        assert_eq!(
+            signed_off, signed_on,
+            "json output must be identical regardless of --allow-unsigned"
         );
     }
 

@@ -1,7 +1,7 @@
 # Interfaces
 
 **Project:** dep-scan
-**Last updated:** 2026-06-11 (v1.2.1 — task 083: --format enum + OSV emit)
+**Last updated:** 2026-06-11 (v1.2.1 — task 086: DSSE signing for interchange output + --allow-unsigned)
 
 The system's contact surface — everything that calls into the system, everything the system calls out to, and the public traits within the system. Each interface is a stable contract: changes here are breaking changes.
 
@@ -33,30 +33,34 @@ dep-scan [GLOBAL OPTIONS] <SUBCOMMAND> [SUBCOMMAND OPTIONS]
 ```
 dep-scan check <PACKAGE>... [--registry <NAME>] [--format <FORMAT>]
                             [--lockfile <PATH>] [--lockfile-type <TYPE>]
+                            [--allow-unsigned]
 ```
 
 | Argument / flag | Type | Required | Effect |
 |-----------------|------|----------|--------|
 | `<PACKAGE>...` | string list | yes (unless `--lockfile`) | Package-name tokens. MUST reject any starting with `-` (B-001, F-001). |
 | `--registry <NAME>` | string | for bare names | `npm` \| `pypi` \| `crates` \| `crates.io` \| `go` \| `gomod` — case-insensitive |
-| `--format <FORMAT>` | enum | no (default `native`) | Output format: `native` \| `json` \| `osv` \| `cyclonedx` \| `spdx` \| `vex`. `cyclonedx`/`spdx`/`vex` are accepted by the parser but not yet implemented (tasks 084/085). Mutually exclusive with `--json`. |
+| `--format <FORMAT>` | enum | no (default `native`) | Output format: `native` \| `json` \| `osv` \| `cyclonedx` \| `spdx` \| `vex`. The interchange formats (`osv`/`cyclonedx`/`spdx`/`vex`) are wrapped in a signed DSSE envelope by default (B-029); `native`/`json` are never signed. Mutually exclusive with `--json`. |
 | `--json` | bool | no | **Deprecated alias** for `--format json`. Kept for backward compatibility; use `--format json` instead. Mutually exclusive with `--format`. |
 | `--lockfile <PATH>` | path | no | Scan every entry in the lockfile |
 | `--lockfile-type <TYPE>` | string | no | Override format detection: `npm` \| `pypi` \| `crates` \| `go` |
+| `--allow-unsigned` | bool | no | Emit interchange output (`osv`/`cyclonedx`/`spdx`/`vex`) **unsigned** — the raw payload with an explicit `"_dep_scan_unsigned": true` marker instead of a DSSE envelope. Never affects `native`/`json` (B-029). |
 
 ### Subcommand: `install`
 
 ```
 dep-scan install <PACKAGE>... --registry <NAME> [--format <FORMAT>] [--force]
+                              [--allow-unsigned]
 ```
 
 | Argument / flag | Type | Required | Effect |
 |-----------------|------|----------|--------|
 | `<PACKAGE>...` | string list | yes | Same `-`-prefix rejection as `check` (B-001) |
 | `--registry <NAME>` | string | **yes** | Same vocabulary as `check`. Unlike `check`, required |
-| `--format <FORMAT>` | enum | no (default `native`) | Same format vocabulary as `check`. |
+| `--format <FORMAT>` | enum | no (default `native`) | Same format vocabulary as `check`. Interchange formats are DSSE-signed by default (B-029). |
 | `--json` | bool | no | **Deprecated alias** for `--format json`. Mutually exclusive with `--format`. |
 | `--force` | bool | no | Proceed despite `warn`/`block`. **MUST NOT** bypass content-hash verification (F-002) |
+| `--allow-unsigned` | bool | no | Same effect as on `check`: emit interchange output unsigned with the `"_dep_scan_unsigned"` marker. Never affects `native`/`json` (B-029). |
 
 ### Subcommand: `config`
 
