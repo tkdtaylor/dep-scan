@@ -3362,10 +3362,38 @@ mod tests {
     const _T_088_14_NO_OCSP_CRL_CALLS: () = ();
 
     /// T-088-15: --format native output does not contain freshness fields.
-    /// Verified by the structure of run_check: the Native branch is printed inline
-    /// as a table and never passes through render_results or produce_serialized_output.
-    /// This marker satisfies the spec-marker grep.
-    const _T_088_15_NATIVE_NO_FRESHNESS: () = ();
+    /// Even when an OsvQueryContext is present, the Native render path must not
+    /// leak freshness fields into its output. render_results returns an empty
+    /// string for Native (inline table rendering happens in run_check), so any
+    /// freshness leakage here would be a regression we can catch.
+    #[test]
+    fn t088_15_native_format_no_freshness_fields() {
+        // T-088-15
+        use chrono::TimeZone as _;
+        let queried_at = chrono::Utc.with_ymd_and_hms(2026, 6, 4, 12, 0, 0).unwrap();
+        let ctx = make_osv_ctx_at(queried_at);
+        let results = vec![make_check_result(
+            "lodash",
+            "4.17.21",
+            "npm",
+            "pass",
+            vec![],
+        )];
+        let cfg = Config::default();
+
+        // Even when an OsvQueryContext is present, Native must produce no freshness fields.
+        let out = render_results(&results, &OutputFormat::Native, Some(&ctx), &cfg)
+            .expect("T-088-15: Native dispatch must succeed");
+
+        assert!(
+            !out.contains("valid_until"),
+            "T-088-15: --format native must not contain valid_until, got: {out:.100}"
+        );
+        assert!(
+            !out.contains("osv_snapshot"),
+            "T-088-15: --format native must not contain osv_snapshot, got: {out:.100}"
+        );
+    }
 
     /// T-088-16: --format json output does not contain freshness fields.
     #[test]
