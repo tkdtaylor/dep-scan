@@ -159,14 +159,89 @@ client follows. The transitive epic is last and gated on its own open questions.
 
 ## Open questions
 
-- **VCS fetch mechanism.** Pure-Rust git (e.g. a `gix`-family crate) vs. optional shell-out
-  to a system `git` when present. The single-binary constraint argues for pure-Rust as the
-  default; an optional accelerated path is acceptable only as graceful degradation.
-- **Sandbox boundary for the fetch.** What isolation is sufficient to guarantee "no code
+- **VCS fetch mechanism.** ~~Pure-Rust git (e.g. a `gix`-family crate) vs. optional shell-out
+  to a system `git` when present.~~ **RESOLVED (task 096) — see "Piece 2 resolution" below.**
+- **Sandbox boundary for the fetch.** ~~What isolation is sufficient to guarantee "no code
   execution" across platforms (git hooks, submodule recursion, symlink escapes, path
-  traversal in archive/tree extraction)? This is the security crux of piece 3.
+  traversal in archive/tree extraction)?~~ **RESOLVED (task 096) — see "Piece 2 resolution".**
 - **Host trust policy shape.** Allow-list, deny-list, or both; default posture; how it
   composes with enterprise mirrors. Must stay configuration-driven (no hardcoded hosts).
+  *(Largely settled by task 095: both lists, deny-wins, open default posture, case-insensitive,
+  config-driven. Task 096 adds: `file://` and bare local paths bypass the host lists because
+  they open no network socket.)*
+
+## Piece 2 resolution (task 096 — sandboxed VCS fetch client)
+
+Both open questions that govern piece 2 are resolved here, since piece 2 is the highest-risk
+component and its implementation cannot proceed without fixing them.
+
+### Fetch mechanism: pure-Rust gitoxide (`gix`), no shell-out
+
+The default and only fetch path uses the pure-Rust `gix` (gitoxide) crate, satisfying the
+single-binary constraint (ADR 001): the fetch works with **no system `git` on `PATH`**
+(verified by T-096-19, which strips `PATH` and still fetches via gix's pure-Rust `git://`
+transport). HTTPS fetches reuse the existing `reqwest` + `rustls` stack
+(`blocking-http-transport-reqwest-rust-tls`), adding no new TLS backend. The optional
+shell-out acceleration is **omitted**: it would add a second code path, a second sandbox to
+audit, and a correctness-parity burden, for no benefit on the dominant HTTPS path.
+
+`gix` feature set is minimal and deliberately excludes worktree checkout/mutation
+(`worktree-mutation`), submodule features, the curl transport, and the ssh transport.
+
+Caveat noted for the implementer: gix's `file://` transport shells out to `git-upload-pack`;
+the pure-Rust transports are HTTPS (reqwest) and `git://` (TCP daemon protocol). dep-scan
+fetches real dependencies over HTTPS, so the pure-Rust guarantee holds for production use.
+
+### Sandbox boundary: fetch-to-objects, materialise-ourselves
+
+We **never invoke the `git` CLI** and **never check out a git working tree**. The fetch
+pulls the pack into an *ephemeral bare repository* in a temp dir; we then resolve the
+requested ref to a commit, peel to its root tree, and walk the tree **at the object level**,
+reading blobs from the object database and materialising files into an isolated subdir
+*ourselves*. Because no checkout ever runs:
+
+- **Git hooks never execute** (T-096-06). There is no `git` process and no checkout step, so
+  pre-receive/post-checkout/post-merge/etc. are structurally unreachable.
+- **Submodules are never recursed** (T-096-07). Gitlink (`Commit`) tree entries are recorded
+  as a `SubmoduleNotRecursed` diagnostic and skipped; `.gitmodules` is treated as ordinary
+  data. No submodule fetch/init occurs.
+- **Symlinks are never followed** (T-096-08). `Link` tree entries are recorded as a
+  `SymlinkNotFollowed` diagnostic; their target string is never resolved or read, and no
+  symlink is created on disk (so it cannot be traversed later).
+- **Path traversal is rejected** (T-096-09). Every tree-entry name is validated as a single
+  safe path component; `..`, `.`, empty names, names containing `/` or `\`, and NUL bytes
+  produce `Err` (the whole fetch fails closed). A defence-in-depth check re-validates the
+  full relative path and confirms the canonicalised write target stays under the fetch root.
+- **Absolute paths are rejected** (T-096-10). A leading separator or a Windows drive-letter
+  prefix (`C:`) is rejected. Note: a real git tree entry name cannot contain `/` (git
+  plumbing rejects it), so the only absolute-looking single-component name an adversary can
+  smuggle into a *real* tree is the drive-prefix form, which the validator catches; the
+  leading-slash case is covered by the path-component validator unit test.
+- **OOM protection** (T-096-12). A blob whose object header reports a size larger than
+  `vcs.max_blob_bytes` (default 50 MiB) is skipped with a `BlobTooLarge` diagnostic
+  *without being decoded into memory* — the size is read from the object header first.
+- **Timeout / fail-closed** (T-096-05/13/14/15). The fetch runs on a worker thread bounded by
+  `vcs.fetch_timeout_secs` (default 30): an internal watchdog trips gix's cooperative
+  interrupt flag, and the caller additionally bounds the channel receive so `fetch` returns
+  within the budget plus a small grace even if gix is stuck in an uninterruptible syscall.
+  Any network/DNS/timeout/ref-not-found error returns `Err`, which the scan loop turns into a
+  `Warn` (or `Block` when `mutable_git_ref = "block"`) — an unfetchable dep is **never**
+  `Pass`.
+
+**Platform notes.** Path-traversal and absolute-path validation normalise on both `/` and
+`\` separators and treat a leading drive-letter or UNC-style prefix as absolute, so a tree
+authored on Windows cannot escape the fetch root on a Unix host or vice versa. Symlinks are
+never materialised on any platform, so the long-standing Windows symlink/junction and case-
+insensitivity hazards do not apply to our materialised tree. The one platform-specific gap
+to revisit when piece 4 (transitive) lands: case-insensitive/Unicode-normalised filesystems
+could collapse two distinct tree entry names onto one path — currently harmless (last writer
+wins inside the sandbox) but worth a normalisation pass if collisions ever become
+security-relevant.
+
+Out of scope for task 096 (handled later): running the *policy pipeline* over the fetched
+tree is task 098 — this task delivers the fetch + sandbox and the fail-closed wiring only, so
+a successfully fetched git dep is materialised but not yet scanned. Cache integration is task
+097; transitive resolution is task 099.
 - **Cache key for git sources.** The current cache is keyed `(name, version, registry)`.
   Immutable commit SHAs key cleanly; mutable refs and "no registry" git sources do not. Does
   the key become `(name, commit_sha, source)`? Are mutable-ref results cacheable at all?
