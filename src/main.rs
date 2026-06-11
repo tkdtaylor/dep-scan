@@ -152,6 +152,10 @@ impl PackageRef {
     /// and `version` is set to `None`.  This covers bare names and range
     /// constraints in `requirements.txt` (e.g. `flask>=2.0`), which the
     /// lockfile parser stores as an empty string.
+    ///
+    /// T-090-14: This function signature is unchanged after the `registry` → `source`
+    /// field rename on `LockfileDependency`.  It still accepts `(name, version)` and
+    /// all existing callers continue to compile.
     fn from_lockfile_dep(name: String, version: String) -> Self {
         let ver = if version.is_empty() {
             None
@@ -528,6 +532,44 @@ fn resolve_interchange_signer(config: &Config) -> Result<interchange_sign::Signe
     interchange_sign::resolve_signer(config, probe, keyless_factory)
 }
 
+/// The routing decision for a single lockfile dependency based on its source.
+///
+/// Returned by [`classify_dep_routing`] and consumed by the scan loop in
+/// `run_check`.  Extracted as a pure helper so that the routing logic can be
+/// unit-tested independently of any network calls (T-090-13).
+#[derive(Debug, PartialEq)]
+pub(crate) enum DepRouting {
+    /// The dep comes from a package registry; dispatch to the given registry client.
+    Registry(RegistryType),
+    /// The dep comes from a git repository; warn-and-skip (task 093 will add real routing).
+    GitSkip { url: String, ref_: String },
+}
+
+/// Decide how to route a lockfile dependency based on its [`DependencySource`].
+///
+/// This is a pure function — no I/O, no network calls.  The scan loop calls
+/// this helper for every dep and acts on the returned [`DepRouting`]:
+/// - [`DepRouting::Registry`]: dispatch to the named registry client.
+/// - [`DepRouting::GitSkip`]: emit a `dep-scan: skipping …` warning to stderr
+///   and `continue` (T-090-13 / REQ-090-04).
+///
+/// The `opt_source` argument is `Option<&DependencySource>` because CLI-arg
+/// packages have no lockfile source (`None`), and they are always treated as
+/// registry deps using the `fallback` registry type.
+pub(crate) fn classify_dep_routing(
+    opt_source: Option<&lockfile::DependencySource>,
+    fallback: RegistryType,
+) -> DepRouting {
+    match opt_source {
+        None => DepRouting::Registry(fallback),
+        Some(lockfile::DependencySource::Registry { registry }) => DepRouting::Registry(*registry),
+        Some(lockfile::DependencySource::Git { url, ref_ }) => DepRouting::GitSkip {
+            url: url.clone(),
+            ref_: ref_.clone(),
+        },
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn run_check(
     config_path: Option<&Path>,
@@ -577,8 +619,13 @@ async fn run_check(
     // or PackageRef { version: None } for bare names / range constraints.
     // This is the fix for the security bug described in task 078: previously the version
     // was silently discarded and all packages queried "latest".
-    let mut all_packages: Vec<PackageRef> =
-        packages.into_iter().map(PackageRef::from_cli).collect();
+    // Packages to scan, each paired with an optional lockfile source (None for CLI-arg
+    // packages, which are always registry-bound).  The source is used in the scan loop
+    // to safely skip git-sourced deps (REQ-090-04) until task 093 adds real routing.
+    let mut all_packages: Vec<(PackageRef, Option<lockfile::DependencySource>)> = packages
+        .into_iter()
+        .map(|name| (PackageRef::from_cli(name), None))
+        .collect();
     let mut lockfile_registry = None;
     if let Some(ref lf_path) = lockfile_path {
         let format = lockfile_type_str
@@ -587,10 +634,11 @@ async fn run_check(
             .transpose()?;
         let deps = lockfile::parse(lf_path, format)?;
         if !deps.is_empty() {
-            lockfile_registry = Some(deps[0].registry);
+            lockfile_registry = deps[0].source.registry_type();
         }
         for dep in deps {
-            all_packages.push(PackageRef::from_lockfile_dep(dep.name, dep.version));
+            let pkg_ref = PackageRef::from_lockfile_dep(dep.name, dep.version);
+            all_packages.push((pkg_ref, Some(dep.source)));
         }
     }
 
@@ -693,7 +741,24 @@ async fn run_check(
     // the OSV policy is disabled (T-088-06 — no false freshness claim).
     let mut osv_query_context: Option<OsvQueryContext> = None;
 
-    for pkg_ref in &all_packages {
+    for (pkg_ref, dep_source) in &all_packages {
+        // REQ-090-04: Git-sourced deps must not panic or be silently dropped.
+        // Until task 093 adds real git-dep routing, emit a warning and skip.
+        // The routing decision is delegated to the pure `classify_dep_routing`
+        // helper so the branch can be unit-tested without network calls (T-090-13).
+        match classify_dep_routing(dep_source.as_ref(), reg_type) {
+            DepRouting::GitSkip { url, ref_ } => {
+                eprintln!(
+                    "dep-scan: skipping git-sourced dependency '{}' (url={url}, ref={ref_}) — git dep scanning not yet implemented",
+                    pkg_ref.name
+                );
+                continue;
+            }
+            DepRouting::Registry(_) => {
+                // Fall through to the registry scan path below.
+            }
+        }
+
         let pkg_name = &pkg_ref.name;
         let pkg_version = pkg_ref.version.as_deref();
 
@@ -713,6 +778,11 @@ async fn run_check(
         // that version to get_metadata so the registry returns metadata for the
         // exact pinned bytes — not whatever the registry currently serves as
         // "latest".  CLI-arg packages pass None to get latest (task 078).
+        //
+        // T-090-13: Registry-sourced deps still route to registry clients here;
+        // the routing logic is functionally identical to pre-090 — only the
+        // variable names changed (dep.registry → dep.source.registry_type()).
+        // T-090-15: See pre-commit gate (cargo test / clippy / fmt / build).
         let fetch_result = match reg_type {
             RegistryType::Npm => {
                 let client = NpmRegistry::new(config.registries.npm_url.clone());
@@ -3448,4 +3518,100 @@ mod tests {
 
     /// T-088-19: No regressions — tooling gate.
     const _T_088_19_NO_REGRESSIONS: () = ();
+
+    // ── T-090-13 tests — classify_dep_routing helper ─────────────────────────
+    //
+    // These tests prove that the pure routing helper (used by the scan loop)
+    // correctly distinguishes Registry and Git sources — with real assertions,
+    // not just a code comment.
+
+    /// T-090-13-a: A Registry{Npm} source routes to DepRouting::Registry(Npm).
+    #[test]
+    fn t090_13_a_registry_npm_routes_to_registry_npm() {
+        // T-090-13
+        let source = lockfile::DependencySource::Registry {
+            registry: RegistryType::Npm,
+        };
+        let routing = classify_dep_routing(Some(&source), RegistryType::Npm);
+        assert_eq!(
+            routing,
+            DepRouting::Registry(RegistryType::Npm),
+            "T-090-13-a: Registry{{Npm}} source must route to DepRouting::Registry(Npm)"
+        );
+    }
+
+    /// T-090-13-b: A Registry{Crates} source routes to DepRouting::Registry(Crates).
+    /// Confirms the mapping holds for all registry types, not just Npm.
+    #[test]
+    fn t090_13_b_registry_crates_routes_to_registry_crates() {
+        // T-090-13
+        let source = lockfile::DependencySource::Registry {
+            registry: RegistryType::Crates,
+        };
+        let routing = classify_dep_routing(Some(&source), RegistryType::Npm);
+        assert_eq!(
+            routing,
+            DepRouting::Registry(RegistryType::Crates),
+            "T-090-13-b: Registry{{Crates}} source must route to DepRouting::Registry(Crates)"
+        );
+    }
+
+    /// T-090-13-c: A Git source routes to DepRouting::GitSkip, carrying url and ref_.
+    /// Proves the git branch is neither dropped, returned as Pass, nor panicking.
+    #[test]
+    fn t090_13_c_git_source_routes_to_git_skip_with_url_and_ref() {
+        // T-090-13
+        let source = lockfile::DependencySource::Git {
+            url: "https://github.com/evil/repo".to_string(),
+            ref_: "main".to_string(),
+        };
+        let routing = classify_dep_routing(Some(&source), RegistryType::Npm);
+        match routing {
+            DepRouting::GitSkip { url, ref_ } => {
+                assert_eq!(
+                    url, "https://github.com/evil/repo",
+                    "T-090-13-c: GitSkip must carry the original url"
+                );
+                assert_eq!(
+                    ref_, "main",
+                    "T-090-13-c: GitSkip must carry the original ref_"
+                );
+            }
+            DepRouting::Registry(_) => {
+                panic!("T-090-13-c: Git source must not route to DepRouting::Registry");
+            }
+        }
+    }
+
+    /// T-090-13-d: Git source does NOT yield DepRouting::Registry — proving it
+    /// cannot silently be sent to a registry client.
+    #[test]
+    fn t090_13_d_git_source_is_not_registry_routing() {
+        // T-090-13
+        let source = lockfile::DependencySource::Git {
+            url: "https://github.com/user/repo".to_string(),
+            ref_: "abc123".to_string(),
+        };
+        let routing = classify_dep_routing(Some(&source), RegistryType::Npm);
+        assert!(
+            matches!(routing, DepRouting::GitSkip { .. }),
+            "T-090-13-d: Git source must yield GitSkip, not Registry — got: {routing:?}"
+        );
+        assert!(
+            !matches!(routing, DepRouting::Registry(_)),
+            "T-090-13-d: Git source must not yield Registry routing"
+        );
+    }
+
+    /// T-090-13-e: None source (CLI-arg package) routes to the fallback registry.
+    #[test]
+    fn t090_13_e_none_source_routes_to_fallback_registry() {
+        // T-090-13
+        let routing = classify_dep_routing(None, RegistryType::PyPI);
+        assert_eq!(
+            routing,
+            DepRouting::Registry(RegistryType::PyPI),
+            "T-090-13-e: None source (CLI-arg) must route to the fallback registry"
+        );
+    }
 }
