@@ -69,6 +69,7 @@ dep-scan is a **single statically-linked Rust binary**. No service decomposition
 | **OSV client** | [`src/osv.rs`](../../src/osv.rs) | Vulnerability lookups against OSV.dev |
 | **Typosquat detector** | [`src/typosquat.rs`](../../src/typosquat.rs) | Edit-distance + popular-package lists; 256-char length bound (F-020) |
 | **Policy layer** | [`src/policy/`](../../src/policy/) | 11 policies implementing `Policy::evaluate(&ScanContext) -> PolicyResult` |
+| **VCS fetch client** | [`src/vcs/fetch.rs`](../../src/vcs/fetch.rs) | Sandboxed, read-only git fetch (ADR 008, task 096). Pure-Rust gitoxide fetch-to-objects + materialise-ourselves; no `git` CLI, no checkout, no hooks/submodules/symlink-follow. First fetch of untrusted third-party source — highest-risk trust boundary. Host policy lives in [`src/policy/vcs_host.rs`](../../src/policy/vcs_host.rs) (task 095). |
 | **Cache layer** | [`src/cache.rs`](../../src/cache.rs) | SQLite-backed cache with content-hash decision matrix (F-002, F-007, F-008) |
 | **Sigstore verifier** | [`src/sigstore_verify.rs`](../../src/sigstore_verify.rs) | Fulcio chain walk + DSSE + Rekor inclusion proof + timestamp window; used by P-09, P-10 |
 | **Signed-note parser/verifier** | [`src/signed_note.rs`](../../src/signed_note.rs) | RFC sumdb-style envelope; shared by P-11 (sumdb) and the Rekor checkpoint |

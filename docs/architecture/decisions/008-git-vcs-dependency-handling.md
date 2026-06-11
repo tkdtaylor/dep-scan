@@ -159,14 +159,194 @@ client follows. The transitive epic is last and gated on its own open questions.
 
 ## Open questions
 
-- **VCS fetch mechanism.** Pure-Rust git (e.g. a `gix`-family crate) vs. optional shell-out
-  to a system `git` when present. The single-binary constraint argues for pure-Rust as the
-  default; an optional accelerated path is acceptable only as graceful degradation.
-- **Sandbox boundary for the fetch.** What isolation is sufficient to guarantee "no code
+- **VCS fetch mechanism.** ~~Pure-Rust git (e.g. a `gix`-family crate) vs. optional shell-out
+  to a system `git` when present.~~ **RESOLVED (task 096) — see "Piece 2 resolution" below.**
+- **Sandbox boundary for the fetch.** ~~What isolation is sufficient to guarantee "no code
   execution" across platforms (git hooks, submodule recursion, symlink escapes, path
-  traversal in archive/tree extraction)? This is the security crux of piece 3.
+  traversal in archive/tree extraction)?~~ **RESOLVED (task 096) — see "Piece 2 resolution".**
 - **Host trust policy shape.** Allow-list, deny-list, or both; default posture; how it
   composes with enterprise mirrors. Must stay configuration-driven (no hardcoded hosts).
+  *(Largely settled by task 095: both lists, deny-wins, open default posture, case-insensitive,
+  config-driven. Task 096 hardening: there is NO scheme bypass of the host policy. `file://`,
+  `ssh://`, bare local paths, and any non-`https`/`git` scheme are rejected fail-closed by the
+  scheme allow-list before the host check; the host policy applies to the permitted https/git
+  schemes. The earlier note that `file://` bypasses the host lists was the SEC-002 bypass and
+  has been removed.)*
+
+## Piece 2 resolution (task 096 — sandboxed VCS fetch client)
+
+Both open questions that govern piece 2 are resolved here, since piece 2 is the highest-risk
+component and its implementation cannot proceed without fixing them.
+
+### Fetch mechanism: pure-Rust gitoxide (`gix`), no shell-out
+
+The default and only fetch path uses the pure-Rust `gix` (gitoxide) crate, satisfying the
+single-binary constraint (ADR 001): the fetch works with **no system `git` on `PATH`**
+(verified by T-096-19, which strips `PATH` and still fetches via gix's pure-Rust `git://`
+transport). HTTPS fetches reuse the existing `reqwest` + `rustls` stack
+(`blocking-http-transport-reqwest-rust-tls`), adding no new TLS backend. The optional
+shell-out acceleration is **omitted**: it would add a second code path, a second sandbox to
+audit, and a correctness-parity burden, for no benefit on the dominant HTTPS path.
+
+`gix` feature set is minimal and deliberately excludes worktree checkout/mutation
+(`worktree-mutation`), submodule features, and the curl transport.
+
+#### Correction (security review): the ssh/file transports are NOT excluded by features
+
+An earlier draft of this section claimed the `ssh` and `file` transports were compiled out
+by the `gix` feature selection. **That claim was false.** `gix-transport` compiles the
+`file` **and** `ssh` transports in *unconditionally* — they are not behind any feature we
+can turn off — and **both spawn a subprocess**:
+
+- `file://` (and bare local paths) spawns `git-upload-pack`;
+- `ssh://` (and scp-style `user@host:path`) spawns the local `ssh` binary.
+
+Either subprocess can execute attacker-influenced code, which directly breaks the sandbox's
+central guarantee (*pure-Rust gix ⇒ no subprocess, no code execution*) for any URL an
+attacker-controlled lockfile can emit.
+
+#### Real defense: a fail-closed scheme allow-list at the fetch boundary (SEC-001/SEC-002)
+
+`VcsFetcher::fetch` enforces a **scheme allow-list as its very first action**, before any
+host-policy check, any gix connection, any socket, or any worker thread. Only the two
+transports gix services **entirely in-process** are permitted:
+
+- `https://` — the bundled `reqwest`/`rustls` HTTP transport (no subprocess);
+- `git://`   — the pure-Rust TCP daemon protocol (no subprocess).
+
+**Every** other input fails closed with an `Err` naming the disallowed scheme: `file://`,
+`ssh://`, `git+ssh://`, `ext::`, `http://` (cleartext — rejected to keep the allow-list to
+exactly the two audited in-process transports), scp-style `user@host:path`, bare local
+paths, and anything unrecognised. Because the gate runs before any connection is prepared,
+a rejected scheme opens **no socket and spawns no process**. The `Err` propagates to the
+scan loop, which fails closed (Warn, or Block under `mutable_git_ref = "block"`) — never
+Pass. Consequently, **no allowed transport (https/git) ever spawns a child process**, so the
+"no subprocess / no code execution" guarantee holds for every fetch that is permitted to run.
+
+The previous design exempted `file://` (and bare local paths) from the host-policy check on
+the rationale that they "open no network socket." That exemption was itself the bypass
+(SEC-002): it let an attacker-controlled local-scheme URL skip policy entirely. There is now
+**no scheme exemption** from the host check — unknown/local schemes fail closed at the
+allow-list gate, and the host policy still applies to the allowed https/git schemes.
+
+#### DoS caps on tree materialisation (SEC-003/SEC-004)
+
+In addition to the per-blob cap (`vcs.max_blob_bytes`, default 50 MiB), the materialiser
+enforces three aggregate budgets so an adversarial tree of individually-under-cap objects
+cannot exhaust disk, inodes, or the stack — each fails closed with a diagnostic:
+
+- **Total materialised bytes** — `vcs.max_total_bytes`, default 512 MiB.
+- **Total materialised file count** — `vcs.max_total_files`, default 50 000.
+- **Tree recursion depth** — constant `MAX_TREE_DEPTH = 100` (comfortably exceeds any real
+  repo layout while bounding stack usage); a tree nested past this limit fails closed before
+  it can overflow the stack.
+
+The byte and count budgets are configurable on `[vcs]`; the depth limit is a constant.
+
+### Sandbox boundary: fetch-to-objects, materialise-ourselves
+
+We **never invoke the `git` CLI** and **never check out a git working tree**. The fetch
+pulls the pack into an *ephemeral bare repository* in a temp dir; we then resolve the
+requested ref to a commit, peel to its root tree, and walk the tree **at the object level**,
+reading blobs from the object database and materialising files into an isolated subdir
+*ourselves*. Because no checkout ever runs:
+
+- **Git hooks never execute** (T-096-06). There is no `git` process and no checkout step, so
+  pre-receive/post-checkout/post-merge/etc. are structurally unreachable.
+- **Submodules are never recursed** (T-096-07). Gitlink (`Commit`) tree entries are recorded
+  as a `SubmoduleNotRecursed` diagnostic and skipped; `.gitmodules` is treated as ordinary
+  data. No submodule fetch/init occurs.
+- **Symlinks are never followed** (T-096-08). `Link` tree entries are recorded as a
+  `SymlinkNotFollowed` diagnostic; their target string is never resolved or read, and no
+  symlink is created on disk (so it cannot be traversed later).
+- **Path traversal is rejected** (T-096-09). Every tree-entry name is validated as a single
+  safe path component; `..`, `.`, empty names, names containing `/` or `\`, and NUL bytes
+  produce `Err` (the whole fetch fails closed). A defence-in-depth check re-validates the
+  full relative path and confirms the canonicalised write target stays under the fetch root.
+- **Absolute paths are rejected** (T-096-10). A leading separator or a Windows drive-letter
+  prefix (`C:`) is rejected. Note: a real git tree entry name cannot contain `/` (git
+  plumbing rejects it), so the only absolute-looking single-component name an adversary can
+  smuggle into a *real* tree is the drive-prefix form, which the validator catches; the
+  leading-slash case is covered by the path-component validator unit test.
+- **OOM / DoS protection** (T-096-12, SEC-003/SEC-004). A blob whose object header reports a
+  size larger than `vcs.max_blob_bytes` (default 50 MiB) is skipped with a `BlobTooLarge`
+  diagnostic *without being decoded into memory* — the size is read from the object header
+  first. Aggregate caps (total bytes `vcs.max_total_bytes` 512 MiB, total file count
+  `vcs.max_total_files` 50 000, and recursion depth `MAX_TREE_DEPTH` 100) fail the fetch
+  closed before disk/inode/stack exhaustion. See the DoS-caps subsection above.
+- **Timeout / fail-closed** (T-096-05/13/14/15). The fetch runs on a worker thread bounded by
+  `vcs.fetch_timeout_secs` (default 30): an internal watchdog trips gix's cooperative
+  interrupt flag, and the caller additionally bounds the channel receive so `fetch` returns
+  within the budget plus a small grace even if gix is stuck in an uninterruptible syscall.
+  Any network/DNS/timeout/ref-not-found error returns `Err`, which the scan loop turns into a
+  `Warn` (or `Block` when `mutable_git_ref = "block"`) — an unfetchable dep is **never**
+  `Pass`. **No subprocess-orphan concern (SEC-002):** because the only permitted transports
+  are https (reqwest) and `git://` (TCP), an allowed fetch spawns no child process at all, so
+  there is no child that could be left detached when the timeout fires. The subprocess-spawning
+  transports (`file://`, `ssh://`) never reach the fetch — they are rejected at the scheme
+  allow-list before any connection is prepared.
+
+**Platform notes.** Path-traversal and absolute-path validation normalise on both `/` and
+`\` separators and treat a leading drive-letter or UNC-style prefix as absolute, so a tree
+authored on Windows cannot escape the fetch root on a Unix host or vice versa. Symlinks are
+never materialised on any platform, so the long-standing Windows symlink/junction and case-
+insensitivity hazards do not apply to our materialised tree. The one platform-specific gap
+to revisit when piece 4 (transitive) lands: case-insensitive/Unicode-normalised filesystems
+could collapse two distinct tree entry names onto one path — currently harmless (last writer
+wins inside the sandbox) but worth a normalisation pass if collisions ever become
+security-relevant.
+
+#### Security re-audit residuals (task 096 follow-up)
+
+A re-audit confirmed the critical subprocess-escape (SEC-001/SEC-002) is closed and found
+three further items, resolved as follows:
+
+- **SEC-005-RESIDUAL — host-policy parse-vs-connect divergence (Medium, fixed).** The host
+  allow/deny check is only sound if the host it *polices* is the host gix actually *connects
+  to*. The previous `extract_host` hand-parsed the URL and split the post-scheme remainder on
+  `['/', '?', '#']` before taking the authority. gix does **not** treat `#`/`?` as authority
+  terminators — it splits the authority only at the first `/`, then `rsplit_once('@')`. So
+  `https://github.com#@evil.com/x` and `https://github.com?@evil.com/x` were policed as host
+  `github.com` while gix connected to `evil.com` — an allow-list/deny-list bypass and SSRF
+  vector for any attacker-controlled lockfile URL. **Fix:** `extract_host` now derives the
+  host from gix's *own* parser (`gix::url::parse(url.into())?.host()`, lowercased), so the
+  policed host equals the connecting host **by construction**; the divergence is eliminated
+  rather than patched. Unparseable URLs and URLs gix parses with no host component return
+  `None`, preserving the fail-closed contract in `check_host_policy_for_url`. Parity tests
+  assert `extract_host(url) == gix::url::parse(url).host()` for the `#@`, `?@`, git:// `#@`,
+  and `a@b@host` vectors, plus explicit regressions that each bypass vector now polices the
+  real connecting host (`evil.com` / `evil.internal`), never the decoy `github.com`.
+
+- **SEC-006 — unbounded network pack download (Medium, mitigated by post-fetch budget).** The
+  `max_blob_bytes` / `max_total_bytes` / `max_total_files` caps bound only *materialisation*,
+  which runs **after** `prepare.fetch_only(...)` has already streamed the entire pack to disk.
+  A malicious server on an allowed host could therefore stream an arbitrarily large pack,
+  filling the temp filesystem before any cap applies — bounded only by `fetch_timeout_secs`.
+  gix 0.84's high-level `PrepareFetch` API exposes no clean in-fetch byte/object budget hook
+  (option (a) would require reimplementing the fetch negotiation against the low-level
+  `gix-protocol`/`gix-pack` API — out of scope and high-risk), so we took **option (b)**: a
+  new configurable budget `vcs.max_pack_bytes` (default 1 GiB) is enforced **immediately after
+  `fetch_only` returns and before any materialisation** by summing the on-disk size of the
+  fetched object store (`<repo>/objects`, never following symlinks) and failing closed if it
+  exceeds the budget. This is a *post-fetch* check — the pack is already on disk when measured
+  — so it bounds disk *after the fact* but caps before materialisation can amplify it; the
+  streaming download itself remains bounded only by `fetch_timeout_secs`. The two bounds
+  combine: the timeout caps how long a stream may run, the pack budget caps how much it may
+  leave on disk before any further processing.
+
+- **SEC-007 — detached stuck worker (Low, documented residual).** The hard wall-clock bound in
+  `VcsFetcher::fetch` is enforced by bounding the channel `recv` on the caller thread; if the
+  worker thread is wedged in a syscall gix cannot cooperatively interrupt, `fetch` still
+  returns on time but the worker is **detached** and keeps running until it unwinds (or the
+  process exits). It owns its own `TempDir`, so its scratch space is reclaimed when it finally
+  ends; the residual is a possibly-lingering background thread/socket, not a leak of attacker
+  data into a `Pass` verdict. Acceptable for task 096; revisit if process-lifetime thread
+  accumulation ever becomes observable in practice.
+
+Out of scope for task 096 (handled later): running the *policy pipeline* over the fetched
+tree is task 098 — this task delivers the fetch + sandbox and the fail-closed wiring only, so
+a successfully fetched git dep is materialised but not yet scanned. Cache integration is task
+097; transitive resolution is task 099.
 - **Cache key for git sources.** The current cache is keyed `(name, version, registry)`.
   Immutable commit SHAs key cleanly; mutable refs and "no registry" git sources do not. Does
   the key become `(name, commit_sha, source)`? Are mutable-ref results cacheable at all?

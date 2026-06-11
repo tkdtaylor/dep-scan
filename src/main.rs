@@ -13,6 +13,7 @@ mod sigstore_verify;
 mod types;
 mod typosquat;
 mod validation;
+mod vcs;
 mod vex;
 
 use std::path::Path;
@@ -782,29 +783,60 @@ async fn run_check(
                 let mutable_ref_detail =
                     PolicyDetail::from_result(mutable_ref_policy.name(), &mutable_ref_result);
 
-                // The overall result for a git dep is the mutable-ref verdict.
-                // If the policy is off → Pass (no warning for this dep).
-                // Additionally, we always surface the "git-sourced dependency" context.
-                let (result_str, reason) = match &mutable_ref_result {
-                    PolicyResult::Pass => {
-                        // Pinned SHA or policy off — still note it's a git dep.
-                        (
-                            "pass".to_string(),
-                            Some(format!(
-                                "git-sourced dependency: url={url}, ref={ref_} — not fetched or scanned"
-                            )),
-                        )
-                    }
-                    PolicyResult::Warn(msg) => (
-                        "warn".to_string(),
+                // Task 096 (REQ-096-01..05): attempt a sandboxed, read-only fetch
+                // of the repository at `ref_`.  The host policy is checked inside
+                // `fetch` BEFORE any socket is opened (REQ-096-03).  The fetched
+                // tree is NOT yet run through the policy pipeline — that is task
+                // 098.  This task only delivers the fetch + sandbox and the
+                // fail-closed behaviour: an unfetchable dep must never `Pass`
+                // (REQ-096-05 / T-096-15).
+                let fetcher = vcs::fetch::VcsFetcher::from_config(&config);
+                let fetch_outcome = fetcher.fetch(&url, &ref_);
+
+                // Compute the overall verdict.  The mutable-ref policy fires
+                // first and independently of the fetch (T-094-05).  On a fetch
+                // failure we fail closed: the verdict is escalated to at least
+                // `Warn` (or `Block` when `mutable_git_ref = "block"`), never
+                // `Pass` (T-096-15).
+                let (result_str, reason): (String, Option<String>) = match (
+                    &mutable_ref_result,
+                    &fetch_outcome,
+                ) {
+                    // Fetch succeeded: keep the mutable-ref verdict; note the
+                    // tree was fetched but not yet scanned (task 098).
+                    (PolicyResult::Pass, Ok(tree)) => (
+                        "pass".to_string(),
                         Some(format!(
-                            "git-sourced dependency: url={url}, ref={ref_} — {msg}"
+                            "git-sourced dependency: url={url}, ref={ref_} — fetched {} file(s) into sandbox; not yet scanned (task 098)",
+                            tree.len()
                         )),
                     ),
-                    PolicyResult::Block(msg) => (
+                    (PolicyResult::Warn(msg), Ok(tree)) => (
+                        "warn".to_string(),
+                        Some(format!(
+                            "git-sourced dependency: url={url}, ref={ref_} — {msg}; fetched {} file(s) into sandbox",
+                            tree.len()
+                        )),
+                    ),
+                    (PolicyResult::Block(msg), Ok(tree)) => (
                         "block".to_string(),
                         Some(format!(
-                            "git-sourced dependency: url={url}, ref={ref_} — {msg}"
+                            "git-sourced dependency: url={url}, ref={ref_} — {msg}; fetched {} file(s) into sandbox",
+                            tree.len()
+                        )),
+                    ),
+                    // Fetch failed: fail closed.  Block stays Block; Pass/Warn
+                    // become at least Warn — an unfetchable dep is never safe.
+                    (PolicyResult::Block(msg), Err(e)) => (
+                        "block".to_string(),
+                        Some(format!(
+                            "git-sourced dependency: url={url}, ref={ref_} — {msg}; fetch failed: {e:#}"
+                        )),
+                    ),
+                    (PolicyResult::Pass, Err(e)) | (PolicyResult::Warn(_), Err(e)) => (
+                        "warn".to_string(),
+                        Some(format!(
+                            "git-sourced dependency: url={url}, ref={ref_} — could not be fetched and was not scanned (fail-closed, not treated as safe): {e:#}"
                         )),
                     ),
                 };

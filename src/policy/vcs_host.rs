@@ -7,14 +7,27 @@ use anyhow::{Result, bail};
 
 use crate::config::Config;
 
-/// Extract the bare hostname from a VCS URL.
+/// Extract the bare hostname a git fetch of `url` would actually connect to.
 ///
-/// Handles common schemes (https://, ssh://, git://) as well as SCP-style
-/// git URLs (`user@host:path`).  The returned string has any `user@` prefix
-/// and `:port` suffix stripped, leaving only the hostname.
+/// **SEC-005 invariant.** The host returned here is derived from gix's *own*
+/// URL parser (`gix::url::parse`) — the exact same parse gix uses to decide
+/// which host to open a socket to.  The policed host is therefore equal **by
+/// construction** to the connecting host, so there is no way for the policy to
+/// be evaluated against one host (e.g. `github.com`) while gix connects to
+/// another (e.g. `evil.com`).  The previous hand-rolled parser split the
+/// authority on `['/', '?', '#']`, but gix does **not** treat `#`/`?` as
+/// authority terminators — it splits the authority only at the first `/` and
+/// then `rsplit_once('@')`.  That divergence let URLs like
+/// `https://github.com#@evil.com/x` be policed as `github.com` while gix
+/// connected to `evil.com` (an SSRF / allow-list bypass).  Deriving the host
+/// from gix eliminates the divergence entirely.
 ///
-/// Returns `None` for URLs that cannot be parsed or that contain no
-/// recognisable host component — callers must treat `None` as fail-closed.
+/// The returned string is the bare hostname (any `user@` userinfo and `:port`
+/// stripped exactly as gix sees them), lowercased.
+///
+/// Returns `None` for URLs that gix cannot parse, or that gix parses but for
+/// which it reports no host component — callers must treat `None` as
+/// fail-closed (see [`check_host_policy_for_url`]).
 ///
 /// # Examples
 ///
@@ -28,108 +41,15 @@ pub fn extract_host(url: &str) -> Option<String> {
         return None;
     }
 
-    // Try to parse as a scheme-based URL (https://, ssh://, git://, etc.)
-    if let Some(without_scheme) = strip_scheme(url) {
-        // `without_scheme` is everything after "scheme://"
-        // Extract the authority (host[:port]) — ends at '/', '?', '#', or end-of-string.
-        let authority = without_scheme
-            .split(['/', '?', '#'])
-            .next()
-            .unwrap_or(without_scheme);
-
-        if authority.is_empty() {
-            return None;
-        }
-
-        // Strip user@ prefix if present.
-        let host_and_port = if let Some(at_pos) = authority.rfind('@') {
-            &authority[at_pos + 1..]
-        } else {
-            authority
-        };
-
-        // Strip :port suffix if present, but be careful not to strip an IPv6
-        // address bracket (we don't support IPv6 in this task — fail-closed).
-        let host = strip_port(host_and_port)?;
-
-        if host.is_empty() {
-            return None;
-        }
-
-        return Some(host.to_ascii_lowercase());
-    }
-
-    // Not a scheme-based URL.
-    // Check for SCP-style: user@host:path  (no double-slash after colon)
-    // Example: git@github.com:user/repo.git
-    // The colon must not be followed by '//' (that would be a scheme we already handled).
-    if let Some(colon_pos) = url.find(':') {
-        let after_colon = &url[colon_pos + 1..];
-        if !after_colon.starts_with("//") {
-            // Looks like SCP-style.
-            let before_colon = &url[..colon_pos];
-            // Require something before the colon (the host, possibly with user@).
-            if before_colon.is_empty() {
-                return None;
-            }
-            let host_part = if let Some(at_pos) = before_colon.rfind('@') {
-                &before_colon[at_pos + 1..]
-            } else {
-                before_colon
-            };
-            if host_part.is_empty() {
-                return None;
-            }
-            return Some(host_part.to_ascii_lowercase());
-        }
-    }
-
-    // Cannot parse as any recognisable URL form.
-    None
-}
-
-/// Strip a URL scheme prefix (`scheme://`) and return everything after it.
-///
-/// Returns `None` if the URL does not contain `://`.
-fn strip_scheme(url: &str) -> Option<&str> {
-    let pos = url.find("://")?;
-    // Validate the scheme: must consist of ASCII alphanumeric or '+', '-', '.'
-    // characters (per RFC 3986 §3.1). If the "scheme" contains invalid chars
-    // such as spaces, reject it.
-    let scheme = &url[..pos];
-    if scheme.is_empty()
-        || !scheme
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '-' || c == '.')
-    {
+    // Derive the host from gix's own parser so the policed host is, by
+    // construction, the host gix will connect to (SEC-005).  Any parse error
+    // or a parsed URL with no host component fails closed (None).
+    let parsed = gix::url::parse(url.into()).ok()?;
+    let host = parsed.host()?;
+    if host.is_empty() {
         return None;
     }
-    Some(&url[pos + 3..])
-}
-
-/// Strip a trailing `:port` suffix from a host string.
-///
-/// Returns the host without the port as a `&str`.  Returns `None` if the
-/// remaining host would be empty.  Does not attempt to validate the port
-/// number — any string after the last `:` is treated as a port token so that
-/// non-numeric values (e.g. malformed input) are still stripped, leaving the
-/// host.
-///
-/// IPv6 addresses in brackets (`[::1]`) are intentionally unsupported:
-/// passing one returns `None` (fail-closed).
-fn strip_port(host_and_port: &str) -> Option<&str> {
-    // Reject IPv6 bracket notation — fail-closed per task spec.
-    if host_and_port.starts_with('[') {
-        return None;
-    }
-
-    if let Some(colon_pos) = host_and_port.rfind(':') {
-        let host = &host_and_port[..colon_pos];
-        if host.is_empty() { None } else { Some(host) }
-    } else {
-        // No colon at all: the whole string is the host.
-        Some(host_and_port)
-    }
+    Some(host.to_ascii_lowercase())
 }
 
 /// Check whether a bare hostname is permitted by the VCS host policy in
@@ -209,6 +129,7 @@ mod tests {
             vcs: VcsConfig {
                 allowed_hosts: allowed.into_iter().map(|s| s.to_string()).collect(),
                 denied_hosts: denied.into_iter().map(|s| s.to_string()).collect(),
+                ..VcsConfig::default()
             },
             ..Config::default()
         }
@@ -371,6 +292,61 @@ mod tests {
         assert!(
             result.is_err(),
             "T-095-19: empty URL must be Err (fail-closed)"
+        );
+    }
+
+    // SEC-005-RESIDUAL: the host dep-scan polices MUST equal the host gix
+    // actually connects to.  These vectors are the bypass the residual audit
+    // found: gix does NOT treat `#`/`?` as authority terminators, so it splits
+    // the authority only at the first `/` then `rsplit_once('@')`.  The old
+    // hand-rolled parser split on `['/', '?', '#']` first and policed the wrong
+    // host (`github.com`) while gix connected to `evil.com`.  Now that
+    // `extract_host` derives the host from gix's own parse, both must agree by
+    // construction — for each vector we assert `extract_host(url)` equals
+    // `gix::url::parse(url).host()`.
+    #[test]
+    fn sec005_policed_host_matches_gix_parse_tricky_userinfo() {
+        let vectors = [
+            // `#@evil.com` — gix ignores `#` as a terminator; connects to evil.com.
+            "https://github.com#@evil.com/x",
+            // `?@evil.com` — gix ignores `?` as a terminator; connects to evil.com.
+            "https://github.com?@evil.com/x",
+            // git:// variant of the `#@` bypass; connects to evil.internal.
+            "git://github.com#@evil.internal/x",
+            // `a@b@host` — userinfo `a@b`, host `host` (rsplit_once('@')).
+            "https://a@b@host.example.com/x",
+        ];
+        for url in vectors {
+            let ours = extract_host(url)
+                .unwrap_or_else(|| panic!("SEC-005: our parser must extract a host for {url:?}"));
+            let gix_url = gix::url::parse(url.into())
+                .unwrap_or_else(|e| panic!("SEC-005: gix must parse {url:?}: {e}"));
+            let gix_host = gix_url
+                .host()
+                .unwrap_or_else(|| panic!("SEC-005: gix must report a host for {url:?}"))
+                .to_ascii_lowercase();
+            assert_eq!(
+                ours, gix_host,
+                "SEC-005: policed host {ours:?} must equal gix's connecting host {gix_host:?} for {url:?}"
+            );
+        }
+
+        // Explicit regression assertions: the policed host is the host gix
+        // CONNECTS to, never the decoy `github.com` the old parser reported.
+        assert_eq!(
+            extract_host("https://github.com#@evil.com/x").as_deref(),
+            Some("evil.com"),
+            "SEC-005: `#@evil.com` must police evil.com, not github.com"
+        );
+        assert_eq!(
+            extract_host("https://github.com?@evil.com/x").as_deref(),
+            Some("evil.com"),
+            "SEC-005: `?@evil.com` must police evil.com, not github.com"
+        );
+        assert_eq!(
+            extract_host("git://github.com#@evil.internal/x").as_deref(),
+            Some("evil.internal"),
+            "SEC-005: git:// `#@evil.internal` must police evil.internal, not github.com"
         );
     }
 }

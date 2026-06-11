@@ -117,6 +117,14 @@ internal_prefixes = []
 
 [popularity]
 min_downloads = 0
+
+[vcs]
+# Task 096 wired a sandboxed VCS fetch into the git-dep scan arm.  Deny the
+# fixture host so the fetch is rejected before any socket opens (REQ-096-03),
+# keeping these tests fully offline.  An unfetchable dep then fails closed to a
+# Warn verdict (REQ-096-05 / T-096-15) — never Pass — even for a pinned SHA.
+denied_hosts = ["github.com"]
+fetch_timeout_secs = 3
 "#
     )
     .expect("write temp config");
@@ -285,10 +293,14 @@ async fn t094_22_no_network_calls_for_mutable_ref_policy() {
     );
 }
 
-// Bonus: Verify that a pinned ref (40-hex SHA) produces a "pass" result
-// (T-094-12 from the integration side).
+// T-096-15 (integration): a git dep that CANNOT be fetched is never treated as
+// a Pass — even when the ref is a pinned 40-hex SHA (which the mutable-ref
+// policy alone would Pass).  Task 096 wired a sandboxed fetch into the git-dep
+// arm; with the fixture host denied (offline), the fetch fails closed and the
+// verdict is escalated to Warn.  This supersedes the pre-096 behaviour where a
+// pinned SHA produced Pass without any fetch attempt.
 #[tokio::test]
-async fn t094_pinned_ref_passes_in_json_output() {
+async fn t096_15_unfetchable_pinned_ref_fails_closed_to_warn() {
     let mock_server = MockServer::start().await;
 
     let tmp = TempDir::new().unwrap();
@@ -313,11 +325,11 @@ async fn t094_pinned_ref_passes_in_json_output() {
         .output()
         .expect("dep-scan must run");
 
-    // Pinned ref: exit code must be 0 (pass).
+    // T-096-15: unfetchable dep is NOT a Pass → non-zero exit (warn).
     let status = output.status.code().unwrap_or(-1);
     assert_eq!(
-        status, 0,
-        "T-094-12 integration: exit code must be 0 for a pinned SHA ref, got {status}"
+        status, 1,
+        "T-096-15: an unfetchable pinned-SHA git dep must fail closed (exit 1 / warn), got {status}"
     );
 
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -327,17 +339,23 @@ async fn t094_pinned_ref_passes_in_json_output() {
     assert_eq!(arr.len(), 1, "exactly one result");
     assert_eq!(
         arr[0]["result"].as_str(),
-        Some("pass"),
-        "pinned ref must produce 'pass', got: {:?}",
+        Some("warn"),
+        "T-096-15: unfetchable pinned ref must produce 'warn' (never 'pass'), got: {:?}",
         arr[0]["result"]
     );
+    let reason = arr[0]["reason"].as_str().unwrap_or("");
+    assert!(
+        reason.contains("could not be fetched") || reason.to_lowercase().contains("fail"),
+        "T-096-15: reason must explain the fail-closed fetch failure, got: {reason:?}"
+    );
 
-    // Zero network calls for pinned refs too.
+    // Still zero REGISTRY network calls — the git dep never hits the registry,
+    // and the VCS fetch is rejected by host policy before any socket opens.
     let received = mock_server.received_requests().await.unwrap_or_default();
     assert_eq!(
         received.len(),
         0,
-        "zero network calls expected for git dep with pinned SHA, got {}",
+        "T-096-15: zero registry calls expected for a git dep, got {}",
         received.len()
     );
 }

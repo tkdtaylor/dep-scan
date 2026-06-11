@@ -76,7 +76,21 @@ key_path   = ""           # operator-provisioned PEM PKCS#8 Ed25519 private key;
 fulcio_url = ""           # keyless Fulcio base URL (empty = keyless not provisioned)
 rekor_url  = ""           # keyless Rekor base URL (empty = keyless not provisioned)
 oidc_token = ""           # OIDC identity token presented to Fulcio (empty = keyless not provisioned)
+
+[vcs]                     # git/VCS dependency handling (ADR 008, tasks 095/096)
+allowed_hosts     = []    # if non-empty, ONLY these hosts may be fetched (task 095)
+denied_hosts      = []    # always rejected; deny wins over allow (task 095)
+fetch_timeout_secs = 30   # hard wall-clock budget for a single VCS fetch (task 096)
+max_blob_bytes    = 52428800  # 50 MiB; larger blobs are skipped, not read into memory (task 096)
 ```
+
+> `[vcs]` host lists govern **network egress only**: `file://` URLs and bare
+> local paths open no socket and bypass the lists. Host matching is
+> case-insensitive; empty lists mean "any host" (open posture). A fetch that is
+> blocked, fails, times out, or names a missing ref returns an error that the
+> scan loop treats as **fail-closed** (`Warn`, or `Block` when
+> `mutable_git_ref = "block"`) — never `Pass`
+> (see [behaviors B-096](behaviors.md#b-096-sandboxed-vcs-fetch)).
 
 > `[signing]` has **no embedded-key default** (ADR 007): an empty `key_path`
 > means no offline signing key exists, and a signed `--format` request on the

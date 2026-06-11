@@ -50,6 +50,21 @@ uuid = { version = "1", features = ["v4"] }
 # Promoted from dev-dependency: the test-key signer is used on the live
 # `run_check` interchange path until task 087 wires the production identity.
 rand_core = { version = "0.6", features = ["getrandom"] }
+# Task 096 — sandboxed VCS fetch client (ADR 008 piece 2).
+# Pure-Rust git (gitoxide) so the default fetch path works with NO system `git`
+# on PATH (ADR 001 single-binary constraint).  Minimal feature set:
+#   - sha1: object hashing (required; lives in gix's default set, so it must be
+#           re-added explicitly after default-features = false or gix-hash fails
+#           to compile — its Kind enum variants are cfg-gated on the hash feature).
+#   - blocking-network-client + blocking-http-transport-reqwest-rust-tls:
+#           HTTPS fetch over the existing reqwest+rustls stack (no OpenSSL, no
+#           new TLS backend).
+#   - max-performance-safe: pure-Rust zlib (zlib-rs), no C zlib-ng.
+# Deliberately NOT enabled: worktree checkout/mutation (would run smudge/clean
+# filters), any submodule feature, curl transport, ssh transport.  We fetch into
+# an ephemeral object store and materialise blobs ourselves with our own
+# path-traversal / symlink / absolute-path sandbox checks (REQ-096-04).
+gix = { version = "0.84.0", default-features = false, features = ["sha1", "max-performance-safe", "blocking-network-client", "blocking-http-transport-reqwest-rust-tls"] }
 
 [dev-dependencies]
 wiremock = "0.6"

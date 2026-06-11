@@ -324,7 +324,7 @@ impl Default for DependencyConfusionConfig {
 /// 1. If `denied_hosts` is non-empty and contains the host → **reject**.
 /// 2. If `allowed_hosts` is non-empty and does **not** contain the host → **reject**.
 /// 3. Otherwise → **permit**.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct VcsConfig {
     /// Hosts that are explicitly allowed.  An empty list means any host is
@@ -336,6 +336,74 @@ pub struct VcsConfig {
     /// Case-insensitive matching.
     #[serde(default)]
     pub denied_hosts: Vec<String>,
+    /// Maximum wall-clock time, in seconds, a single VCS fetch may take before
+    /// it is aborted with an error (task 096, REQ-096-07).  A fetch that exceeds
+    /// this budget fails closed (the dep is treated as unfetchable, never
+    /// `Pass`).  Default 30.
+    #[serde(default = "default_vcs_fetch_timeout_secs")]
+    pub fetch_timeout_secs: u64,
+    /// Maximum size, in bytes, of a single blob materialised from a fetched
+    /// tree (task 096, REQ-096-08).  Blobs larger than this are skipped with a
+    /// diagnostic warning and never read into memory, preventing OOM on
+    /// adversarially large fetched files.  Default 50 MiB.
+    #[serde(default = "default_vcs_max_blob_bytes")]
+    pub max_blob_bytes: u64,
+    /// Maximum total bytes that may be materialised across the *entire* fetched
+    /// tree (task 096 hardening, SEC-003).  A tree may carry many under-cap
+    /// blobs whose sum still exhausts disk; once this budget is exceeded the
+    /// fetch fails closed.  Default 512 MiB.
+    #[serde(default = "default_vcs_max_total_bytes")]
+    pub max_total_bytes: u64,
+    /// Maximum total number of files (blobs) that may be materialised across the
+    /// entire fetched tree (task 096 hardening, SEC-004).  Bounds an
+    /// adversarial tree that carries an enormous count of tiny files.  Once
+    /// exceeded the fetch fails closed.  Default 50_000.
+    #[serde(default = "default_vcs_max_total_files")]
+    pub max_total_files: u64,
+    /// Maximum size, in bytes, of the git pack fetched from the remote (task 096
+    /// hardening, SEC-006).  The per-blob / total-tree caps only bound
+    /// *materialisation*, which runs **after** the whole pack has already been
+    /// streamed to disk; a malicious server on an allowed host could otherwise
+    /// fill the temp filesystem with an arbitrarily large pack bounded only by
+    /// `fetch_timeout_secs`.  Immediately after the fetch completes — before any
+    /// materialisation — the on-disk pack size is measured and the fetch fails
+    /// closed if it exceeds this budget.  Default 1 GiB.
+    #[serde(default = "default_vcs_max_pack_bytes")]
+    pub max_pack_bytes: u64,
+}
+
+fn default_vcs_fetch_timeout_secs() -> u64 {
+    30
+}
+
+fn default_vcs_max_blob_bytes() -> u64 {
+    50 * 1024 * 1024
+}
+
+fn default_vcs_max_total_bytes() -> u64 {
+    512 * 1024 * 1024
+}
+
+fn default_vcs_max_total_files() -> u64 {
+    50_000
+}
+
+fn default_vcs_max_pack_bytes() -> u64 {
+    1024 * 1024 * 1024
+}
+
+impl Default for VcsConfig {
+    fn default() -> Self {
+        Self {
+            allowed_hosts: Vec::new(),
+            denied_hosts: Vec::new(),
+            fetch_timeout_secs: default_vcs_fetch_timeout_secs(),
+            max_blob_bytes: default_vcs_max_blob_bytes(),
+            max_total_bytes: default_vcs_max_total_bytes(),
+            max_total_files: default_vcs_max_total_files(),
+            max_pack_bytes: default_vcs_max_pack_bytes(),
+        }
+    }
 }
 
 /// Main configuration for dep-scan.
@@ -591,6 +659,25 @@ internal_prefixes = ["internal-", "private-", "corp-"]
 # Case-insensitive matching. Example:
 # allowed_hosts = ["git.corp.example.com"]
 # denied_hosts = ["untrusted.example.com"]
+# Maximum wall-clock seconds a single VCS fetch may take before it is aborted
+# (fail-closed: an unfetchable dep is never treated as safe). Default 30.
+fetch_timeout_secs = 30
+# Maximum size in bytes of a single blob materialised from a fetched tree.
+# Larger blobs are skipped with a warning and never read into memory, preventing
+# OOM on adversarially large files. Default 52428800 (50 MiB).
+max_blob_bytes = 52428800
+# Maximum TOTAL bytes materialised across the whole fetched tree (DoS cap).
+# Exceeding this fails the fetch closed. Default 536870912 (512 MiB).
+max_total_bytes = 536870912
+# Maximum TOTAL number of files materialised across the whole fetched tree
+# (DoS cap against a huge count of tiny files). Default 50000.
+max_total_files = 50000
+# Maximum size in bytes of the git pack fetched from the remote (SEC-006 DoS cap).
+# The blob/tree caps above only bound materialisation, which runs AFTER the whole
+# pack is on disk; this bounds the pack itself. Checked immediately after fetch,
+# before materialisation; exceeding it fails the fetch closed. Default 1073741824
+# (1 GiB).
+max_pack_bytes = 1073741824
 "#,
             version = dep_scan_version
         );
@@ -1053,6 +1140,36 @@ osv_url = "https://custom-osv.example.com"
             config.vcs.denied_hosts.is_empty(),
             "T-095-01: default vcs.denied_hosts must be empty"
         );
+    }
+
+    // T-096-07/08: VcsConfig defaults for the fetch timeout and blob-size cap.
+    #[test]
+    fn t096_vcs_fetch_defaults() {
+        let config = Config::default();
+        assert_eq!(
+            config.vcs.fetch_timeout_secs, 30,
+            "REQ-096-07: default vcs.fetch_timeout_secs must be 30"
+        );
+        assert_eq!(
+            config.vcs.max_blob_bytes,
+            50 * 1024 * 1024,
+            "REQ-096-08: default vcs.max_blob_bytes must be 50 MiB"
+        );
+    }
+
+    // T-096-07/08: an absent [vcs] section still yields the fetch defaults, and
+    // explicit values round-trip through TOML.
+    #[test]
+    fn t096_vcs_fetch_config_parsing() {
+        let absent = Config::from_toml_str("min_package_age_hours = 1\n").unwrap();
+        assert_eq!(absent.vcs.fetch_timeout_secs, 30);
+        assert_eq!(absent.vcs.max_blob_bytes, 50 * 1024 * 1024);
+
+        let explicit =
+            Config::from_toml_str("[vcs]\nfetch_timeout_secs = 5\nmax_blob_bytes = 1024\n")
+                .unwrap();
+        assert_eq!(explicit.vcs.fetch_timeout_secs, 5);
+        assert_eq!(explicit.vcs.max_blob_bytes, 1024);
     }
 
     // T-095-01 (cont.): Config::load with no [vcs] section uses defaults

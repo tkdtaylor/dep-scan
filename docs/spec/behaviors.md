@@ -1,7 +1,7 @@
 # Behaviors
 
 **Project:** dep-scan
-**Last updated:** 2026-06-11 (v1.2.1 — B-031: git dep visibility in scan output, task 093)
+**Last updated:** 2026-06-11 (v1.2.1 — B-096: sandboxed VCS fetch + B-031 updated, task 096)
 
 What the system does, observably. Each behavior describes a triggering condition, the system's response, and any externally-visible side effects. This is the "you can verify this from outside the process" view.
 
@@ -337,10 +337,20 @@ For each DSSE-signed attestation bundle, the following steps run in order in [`s
 ### B-031: Git-sourced dependency visibility in scan output
 
 - **Trigger:** A lockfile entry with `DependencySource::Git` (url + ref) enters the scan loop.
-- **Response:** The scan loop's dedicated git-dep arm produces a `CheckResult` with `result = "warn"`, `version = <ref>` (the commit SHA or branch name), `registry = "git"`, and a `reason` message containing the URL and ref — without contacting any registry client or making network calls.
-- **Verdict contract:** The verdict is always `Warn` for an unscanned git dep. It is **never** `Pass` (fail-closed posture per ADR 003 / ADR 008). A `Pass` verdict requires an actual scan; the VCS fetch capability (task 097) is not yet implemented.
-- **Output formats:** Both `--format native` (human-readable table) and `--format json` include a row/element for each git dep with its `warn` verdict and message. The ref appears in the version column so the output row is human-readable.
-- **Exit code:** Non-zero (exit 1) when at least one git dep is present, consistent with how other `Warn` verdicts behave.
-- **Multiple git deps:** Each git dep produces an individual `Warn` CheckResult.
+- **Response:** The scan loop's dedicated git-dep arm runs the mutable-ref policy (B-094) and then **attempts a sandboxed VCS fetch** (B-096, task 096). It produces a `CheckResult` with `version = <ref>`, `registry = "git"`, and a `reason` message containing the URL and ref. No registry client is ever contacted for a git dep.
+- **Verdict contract:** The verdict is **never** `Pass` unless the fetch succeeded *and* the mutable-ref policy passed (pinned full SHA). If the fetch fails, times out, or is blocked by host policy, the verdict fails closed to at least `Warn` (or `Block` when `mutable_git_ref = "block"`), even for a pinned SHA — an unfetchable dep is not safe (ADR 003 / ADR 008, T-096-15). Running the policy *pipeline* over the fetched tree is task 098; until then a successfully fetched dep is materialised but reported as "not yet scanned."
+- **Output formats:** Both `--format native` (human-readable table) and `--format json` include a row/element for each git dep with its verdict and message. The ref appears in the version column.
+- **Exit code:** Non-zero (exit 1) when at least one git dep yields a `Warn`/`Block`.
 - **Registry deps:** Completely unaffected — `DependencySource::Registry` deps continue to route to registry clients as before.
 - Source: [`src/main.rs`](../../src/main.rs) (`run_check` scan loop, `classify_dep_routing`, `DepRouting::GitSkip`).
+
+### B-096: Sandboxed VCS fetch
+
+- **Trigger:** The git-dep arm of `run_check` calls `VcsFetcher::fetch(url, ref_)` (task 096). Network I/O happens **only** here — never during config load or lockfile parse (REQ-096-02).
+- **Host policy first:** For network schemes, `check_host_policy_for_url` is evaluated **before any socket is opened** (REQ-096-03). A blocked host returns an error with no network I/O. `file://` and bare local paths bypass the host lists (no socket).
+- **No code execution (REQ-096-04):** The fetch uses pure-Rust gitoxide (`gix`) to pull the pack into an *ephemeral bare repo*, then reads blobs at the object level and materialises files itself. No `git` CLI, no checkout. Therefore: git hooks never run; submodules (`Commit` entries) are never recursed (recorded as a diagnostic); symlinks (`Link` entries) are never followed (recorded as a diagnostic, never written to disk); tree-entry names containing `..`, separators, NUL, or a drive/absolute prefix produce an error (the fetch fails closed, nothing is written outside the isolated root).
+- **Resource bounds:** A blob larger than `vcs.max_blob_bytes` (default 50 MiB) is skipped via its object header without being decoded into memory (REQ-096-08). The fetch is bounded by `vcs.fetch_timeout_secs` (default 30) on a worker thread; an overrun returns an error (REQ-096-07).
+- **Single-binary:** The default path works with **no system `git` on PATH** (REQ-096-06, pure-Rust transport).
+- **Lifecycle:** The returned `FetchedTree` owns an ephemeral temp dir removed on drop (REQ-096-01).
+- **Fail-closed:** Any error (DNS/connect/timeout/ref-not-found/sandbox violation) propagates to B-031's verdict as `Warn`/`Block`, never `Pass` (REQ-096-05).
+- Source: [`src/vcs/fetch.rs`](../../src/vcs/fetch.rs).
