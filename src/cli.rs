@@ -87,6 +87,17 @@ pub enum Command {
         /// Never affects the `native` or `json` paths.
         #[arg(long)]
         allow_unsigned: bool,
+
+        /// Enable transitive dependency scanning, overriding the config-file
+        /// `[transitive] enabled` value.  Use `--no-transitive` to disable.
+        /// When neither flag is given, the config-file value is used (default: false).
+        #[arg(long, overrides_with = "no_transitive")]
+        transitive: bool,
+
+        /// Disable transitive dependency scanning, overriding the config-file
+        /// `[transitive] enabled` value.
+        #[arg(long, overrides_with = "transitive")]
+        no_transitive: bool,
     },
 
     /// Install packages (wrapping the underlying package manager)
@@ -174,6 +185,25 @@ pub fn resolve_format(format: OutputFormat, json_flag: bool) -> OutputFormat {
         OutputFormat::Json
     } else {
         format
+    }
+}
+
+/// Resolve the effective transitive-scanning flag from the two CLI booleans.
+///
+/// - `--transitive` (only) → `Some(true)`: enable, overriding config.
+/// - `--no-transitive` (only) → `Some(false)`: disable, overriding config.
+/// - Neither flag → `None`: config-file value is authoritative.
+/// - Both flags simultaneously: clap's `overrides_with` ensures only the last
+///   one wins, so this function always receives at most one `true`.
+///
+/// Task 108 calls this helper and applies the result over `config.transitive.enabled`.
+pub fn resolve_transitive(transitive: bool, no_transitive: bool) -> Option<bool> {
+    if transitive {
+        Some(true)
+    } else if no_transitive {
+        Some(false)
+    } else {
+        None
     }
 }
 
