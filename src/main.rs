@@ -130,7 +130,10 @@ fn verify_hash(cached: Option<&str>, registry: Option<&str>) -> HashVerifyDecisi
 /// Abstraction over the VCS fetch client so the git-dep cache flow can be
 /// unit-tested with a spy/stub fetcher (T-097-02/04/09/11) without performing
 /// real network I/O.  The production implementation is [`vcs::fetch::VcsFetcher`].
-trait GitTreeFetcher {
+///
+/// Exposed at `pub(crate)` so the transitive `NodeScanner` (task 103) can inject
+/// the same fetch abstraction the flat git arm uses, keeping a single fetch path.
+pub(crate) trait GitTreeFetcher {
     /// Fetch the repository at `url` and materialise the tree at `ref_`.
     fn fetch_tree(&self, url: &str, ref_: &str) -> Result<vcs::fetch::FetchedTree>;
 }
@@ -150,7 +153,7 @@ impl GitTreeFetcher for vcs::fetch::VcsFetcher {
 /// compares it against a freshly recomputed hash on the next lookup, so a
 /// tampered cache row fails the comparison and triggers a re-fetch (REQ-097-04,
 /// fail-closed per ADR 003).
-fn git_tree_content_hash(tree: &vcs::fetch::FetchedTree) -> String {
+pub(crate) fn git_tree_content_hash(tree: &vcs::fetch::FetchedTree) -> String {
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
     for file in tree.files() {
@@ -175,7 +178,7 @@ fn git_tree_content_hash(tree: &vcs::fetch::FetchedTree) -> String {
 ///
 /// The tree's bytes are read for static analysis only — no file is ever executed
 /// (REQ-098-01 / T-098-02): the `Policy::evaluate` contract forbids side effects.
-fn run_git_tree_policies(
+pub(crate) fn run_git_tree_policies(
     tree: &vcs::fetch::FetchedTree,
     url: &str,
     name: &str,
@@ -196,7 +199,7 @@ fn run_git_tree_policies(
 /// Outcome of the git-dep cache decision (task 097).  Pure, side-effect-free so
 /// it can be unit-tested independently of the live scan loop.
 #[derive(Debug, PartialEq)]
-enum GitCacheAction {
+pub(crate) enum GitCacheAction {
     /// A verified cache hit: reuse the stored verdict without re-fetching.
     /// Carries the cached result string (`pass`/`warn`/`block`).
     Hit(String),
@@ -218,7 +221,7 @@ enum GitCacheAction {
 /// cache miss.  `expected_hash` is the hash recomputed from a fresh fetch when
 /// available; when it is `None` (no fresh fetch yet) the decision can only honor
 /// the cache if a verification hash is supplied, so it fails closed to `Fetch`.
-fn decide_git_cache_action(
+pub(crate) fn decide_git_cache_action(
     ref_kind: &policy::mutable_ref::RefKind,
     lookup: Option<(&str, Option<&str>)>,
     expected_hash: Option<&str>,
@@ -240,6 +243,25 @@ fn decide_git_cache_action(
         None => GitCacheAction::Fetch,
     }
 }
+
+// ---------------------------------------------------------------------------
+// Task 103 — transitive walker entry-point exposure (ADR 009 piece 3b).
+//
+// The concrete walker pieces live in `transitive::{providers, scanner}` and
+// compose with the task-102 `transitive::engine::TransitiveEngine`. They are
+// re-exported here as the single, documented seam task 108 wires into the scan
+// arm. Task 103 deliberately stops at exposure: it does NOT touch the scan-arm
+// control flow (that is task 108's scope). The `#[allow(unused_imports)]` holds
+// until task 108 consumes them; the modules themselves are fully tested here.
+// ---------------------------------------------------------------------------
+#[allow(unused_imports)]
+pub(crate) use transitive::engine::TransitiveEngine;
+#[allow(unused_imports)]
+pub(crate) use transitive::providers::{LockfileEdgeProvider, ManifestEdgeProvider};
+#[allow(unused_imports)]
+pub(crate) use transitive::scanner::{
+    GitTarget, GitTargetResolver, RegistryScanner, TransitiveNodeScanner,
+};
 
 /// A package to be scanned, with its optional pinned version.
 ///

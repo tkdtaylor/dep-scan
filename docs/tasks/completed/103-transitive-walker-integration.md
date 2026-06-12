@@ -1,6 +1,6 @@
 # Task 103 — Transitive walker integration
 
-**Status:** backlog
+**Status:** completed
 **Depends on:** 100 (lockfile graph reader), 101 (manifest edge reader),
                102 (DFS engine traits)
 **ADR:** 009 (piece 3b — concrete provider wiring)
