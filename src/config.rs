@@ -1690,23 +1690,59 @@ max_total_nodes = 200
         );
     }
 
-    // T-107-15: enabled=false suppresses transitive walker.
-    // Verified structurally: config.transitive.enabled == false means no DFS walk
-    // is entered. The gate (task 108) checks this flag before calling dfs_walk.
+    // T-107-15: enabled=false suppresses all transitive walker code paths.
+    //
+    // Asserts the GATE PRECONDITION the scan arm (task 108) will consult before
+    // invoking the DFS walker.  The composed resolve logic is:
+    //   effective = resolve_transitive(cli_transitive, cli_no_transitive)
+    //               .unwrap_or(config.transitive.enabled)
+    //
+    // Case (a): config enabled=false, no CLI flags → effective = false.
+    // Case (b): config enabled=true, --no-transitive → effective = false.
+    //
+    // Note: the "dfs_walk is not invoked when disabled" spy/mock assertion is
+    // intentionally deferred to task 108 (T-108-14 --no-transitive suppression
+    // test), because the walker call site is introduced in task 108, not here.
+    // T-107-15 covers the gate precondition; T-108-14 covers the wire.
     #[test]
-    fn t107_15_enabled_false_walker_disabled() {
-        // T-107-15: The enabled=false flag signals the walker should not run.
-        let config = Config::default();
+    fn t107_15_effective_enabled_gate_precondition() {
+        // T-107-15
+        use crate::cli::resolve_transitive;
+
+        // Case (a): config enabled=false, no CLI flag.
+        // resolve_transitive(false, false) → None → config value wins.
+        let config_a = Config::default(); // enabled defaults to false
+        let cli_override_a = resolve_transitive(false, false);
+        let effective_a = cli_override_a.unwrap_or(config_a.transitive.enabled);
         assert!(
-            !config.transitive.enabled,
-            "T-107-15: default config must have enabled=false to suppress the DFS walker"
+            !effective_a,
+            "T-107-15(a): config enabled=false + no CLI flag → effective enabled must be false"
         );
 
-        let explicit = Config::from_toml_str("[transitive]\nenabled = false\n")
+        // Also verify with an explicit [transitive] enabled = false block.
+        let explicit_a = Config::from_toml_str("[transitive]\nenabled = false\n")
             .expect("T-107-15: explicit enabled=false must parse");
+        let effective_explicit_a =
+            resolve_transitive(false, false).unwrap_or(explicit_a.transitive.enabled);
         assert!(
-            !explicit.transitive.enabled,
-            "T-107-15: explicit enabled=false must set enabled to false"
+            !effective_explicit_a,
+            "T-107-15(a): explicit enabled=false + no CLI flag → effective enabled must be false"
+        );
+
+        // Case (b): config enabled=true, --no-transitive flag.
+        // resolve_transitive(false, true) → Some(false) → overrides config.
+        let config_b = Config::from_toml_str("[transitive]\nenabled = true\n")
+            .expect("T-107-15: enabled=true must parse");
+        let cli_override_b = resolve_transitive(false, true); // --no-transitive
+        assert_eq!(
+            cli_override_b,
+            Some(false),
+            "T-107-15(b): resolve_transitive(false, true) must return Some(false)"
+        );
+        let effective_b = cli_override_b.unwrap_or(config_b.transitive.enabled);
+        assert!(
+            !effective_b,
+            "T-107-15(b): config enabled=true + --no-transitive → effective enabled must be false"
         );
     }
 

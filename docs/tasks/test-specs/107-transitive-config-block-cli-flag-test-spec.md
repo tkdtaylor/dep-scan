@@ -96,15 +96,26 @@ patterns from tasks 095 and 096. Config load performs zero network I/O.
 ## enabled=false non-regression
 
 ### T-107-14: enabled=false produces output identical to today's flat scan
-- Run dep-scan against a fixture `package-lock.json` with `[transitive] enabled = false`.
-- The scan output (exit code, verdict, printed table) is byte-for-byte
-  identical to the output produced without any `[transitive]` block.
-- (Non-regression: the transitive feature, when disabled, must not alter
-  existing behaviour in any observable way.)
+- Run the real dep-scan binary (via `assert_cmd`/`Command::cargo_bin`) twice against
+  a small offline Cargo.lock fixture (a single git-sourced dep; no registry needed).
+  - Scan A: config with NO `[transitive]` block (flat-scan baseline).
+  - Scan B: identical config but with `[transitive] enabled = false` appended.
+- Assert: stdout AND exit code are byte-for-byte identical between A and B.
+- Zero network: all registry URLs point at 127.0.0.1:1 and the git dep's host is
+  denied before any socket is opened (REQ-096-03).
+- (Non-regression: the transitive feature, when disabled, must not alter any
+  observable behaviour.)
 
 ### T-107-15: enabled=false suppresses all transitive walker code paths
-- With `enabled = false`, the DFS walker is never entered.
-- Assert via a spy/mock that `dfs_walk` is not called when transitive is disabled.
+- Assert the GATE PRECONDITION the scan arm consults before invoking the DFS walker:
+  `resolve_transitive(cli_transitive, cli_no_transitive).unwrap_or(config.transitive.enabled)`
+  yields `false` in the following cases:
+  - (a) config `enabled=false`, no CLI flags → effective enabled = false.
+  - (b) config `enabled=true`, `--no-transitive` → effective enabled = false.
+- Use real `assert_eq` / `assert!` on the resolved boolean in both cases.
+- Note: the "dfs_walk is not invoked when disabled" spy/mock assertion is verified
+  end-to-end in task 108 (T-108-14 --no-transitive suppression), because the walker
+  call site is introduced there. T-107-15 covers the gate precondition that task 108 wires to the walker.
 
 ---
 
