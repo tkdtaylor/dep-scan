@@ -12,3 +12,5 @@
 //! floors at the edges (depth limit / unresolved range → parent ≥ `Warn`).
 
 pub mod engine;
+pub mod providers;
+pub mod scanner;
