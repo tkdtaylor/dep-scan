@@ -124,6 +124,18 @@ pub enum Diagnostic {
         /// The unresolvable version range.
         range: String,
     },
+    /// A git node could not be fetched and scanned: its origin was unresolvable
+    /// (no `(url, ref)` provenance) or the fetch itself failed. The node's verdict
+    /// is floored at `Warn` (fail-closed), and this diagnostic explains *why* the
+    /// operator sees a bare `warn` row with no policy reason — without it the Warn
+    /// floor is silent (SEC-003, ADR 009 Decision 2c transparency).
+    Unfetchable {
+        /// The git node that could not be fetched/resolved.
+        node: NodeId,
+        /// A short, human-readable reason (`"unknown origin"` /
+        /// `"fetch failed"`).
+        reason: String,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -169,6 +181,13 @@ pub struct WalkResult {
     pub verdict: Verdict,
     /// Diagnostics emitted during the walk, in discovery order.
     pub diagnostics: Vec<Diagnostic>,
+    /// Per-node `(node, depth, own-scan verdict)` in first-visit order, exactly
+    /// as the walk scanned them. The orchestration builds its display rows from
+    /// THIS (a single authoritative scan) rather than re-scanning, so the rows
+    /// and the rolled-up verdict can never disagree (SEC-002). `depth` is the
+    /// first depth the node was reached at; `verdict` is its own scan verdict
+    /// (not the rolled-up subtree verdict), matching the per-node row semantics.
+    pub node_verdicts: Vec<(NodeId, usize, Verdict)>,
 }
 
 // ---------------------------------------------------------------------------
@@ -212,11 +231,13 @@ impl<'a, E: EdgeProvider, S: NodeScanner> TransitiveEngine<'a, E, S> {
             path: HashSet::new(),
             diagnostics: Vec::new(),
             verdicts: std::collections::HashMap::new(),
+            node_verdicts: Vec::new(),
         };
         let verdict = state.visit(root, 0);
         WalkResult {
             verdict,
             diagnostics: state.diagnostics,
+            node_verdicts: state.node_verdicts,
         }
     }
 }
@@ -240,6 +261,10 @@ struct WalkState<'a, E: EdgeProvider, S: NodeScanner> {
     /// Memoised verdict per scanned node, so a diamond re-visit reuses the
     /// already-computed verdict instead of re-scanning.
     verdicts: std::collections::HashMap<NodeId, Verdict>,
+    /// Per-node `(node, depth, own-scan verdict)` in first-visit order — the
+    /// single authoritative record of what each node scanned, surfaced on
+    /// [`WalkResult`] so display rows reuse it instead of re-scanning (SEC-002).
+    node_verdicts: Vec<(NodeId, usize, Verdict)>,
 }
 
 impl<E: EdgeProvider, S: NodeScanner> WalkState<'_, E, S> {
@@ -255,6 +280,10 @@ impl<E: EdgeProvider, S: NodeScanner> WalkState<'_, E, S> {
         self.visited.insert(node.clone());
         self.verdicts.insert(node.clone(), own);
         self.path.insert(node.clone());
+        // Record this node's own-scan verdict once, in first-visit order, so the
+        // orchestration's display rows derive from the SAME scan as the rollup
+        // (SEC-002) — no independent re-scan that could disagree.
+        self.node_verdicts.push((node.clone(), depth, own));
 
         // Post-order rollup (task 104, REQ-104-02): collect this node's own scan
         // verdict and every child/floor contribution, then fold them together

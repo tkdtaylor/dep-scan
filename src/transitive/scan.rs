@@ -112,6 +112,10 @@ pub(crate) enum TransitiveDiagnostic {
         name: String,
         range: String,
     },
+    /// A git node could not be fetched/resolved and was floored to `Warn`
+    /// (SEC-003). Carries the node + a short reason so the operator does not see
+    /// a bare `warn` row with no explanation.
+    Unfetchable { node: String, reason: String },
 }
 
 impl TransitiveDiagnostic {
@@ -131,6 +135,10 @@ impl TransitiveDiagnostic {
             TransitiveDiagnostic::UnresolvedRange { from, name, range } => format!(
                 "  transitive: UNRESOLVED-RANGE — {from} requires {name} {range} \
                  (cannot pin; verdict floored, fail-closed)"
+            ),
+            TransitiveDiagnostic::Unfetchable { node, reason } => format!(
+                "  transitive: UNFETCHABLE — {node} ({reason}); verdict floored to \
+                 warn (fail-closed)"
             ),
         }
     }
@@ -405,6 +413,10 @@ fn project_diagnostic(d: &Diagnostic) -> TransitiveDiagnostic {
                 range: range.clone(),
             }
         }
+        Diagnostic::Unfetchable { node, reason } => TransitiveDiagnostic::Unfetchable {
+            node: node_id_string(node),
+            reason: reason.clone(),
+        },
     }
 }
 
@@ -517,10 +529,31 @@ where
     // Pre-fetch + extract manifest edges for each direct git root, bounding the
     // number of simultaneous fetches at fetch_concurrency through the task-105
     // bounded pool (REQ-108-05 / T-108-15).
+    //
+    // A git root that is already a VALID warm cache hit (pinned SHA, content_hash
+    // and subtree_digest both present) is NOT re-fetched here (T-108-17): its
+    // cached verdict is authoritative and the subtree-digest gate guarantees its
+    // subtree is unchanged, so it is treated as a leaf. The invalidate pre-pass
+    // below still drops it if a child's verdict actually changed (T-108-18).
     if budget_breach.is_none() && !git_roots.is_empty() {
-        let trees =
-            bounded_fetch_trees(&git_roots, &git_resolver, fetcher, config.fetch_concurrency);
-        for (node, tree) in git_roots.iter().zip(trees) {
+        let cold_roots: Vec<NodeId> = git_roots
+            .iter()
+            .filter(|r| !is_warm_git_root(cache, &git_resolver, r))
+            .cloned()
+            .collect();
+        // Warm roots are leaves on this path: no fetch, no re-discovered edges.
+        for node in &git_roots {
+            if is_warm_git_root(cache, &git_resolver, node) {
+                composite.set_git_edges(node.clone(), Ok(vec![]));
+            }
+        }
+        let trees = bounded_fetch_trees(
+            &cold_roots,
+            &git_resolver,
+            fetcher,
+            config.fetch_concurrency,
+        );
+        for (node, tree) in cold_roots.iter().zip(trees) {
             let edges = match tree {
                 Some(tree) => {
                     let ecosystem = detect_ecosystem(&tree);
@@ -532,7 +565,23 @@ where
                 // re-fetch + Err → Warn path), so it is never silently Pass.
                 None => Ok(vec![]),
             };
+            // SEC-001: charge the budget for every node a git sub-tree's manifest
+            // discovers. Without this, a git sub-tree could declare an arbitrary
+            // fan-out that is never charged, so `max_total_nodes` would NOT be the
+            // hard upper bound ADR 009 Decision 3b mitigation 5 promises. A breach
+            // here still fails closed (NodeBudgetExceeded → ≥ Warn → exit ≥ 1).
+            if let Ok(children) = &edges {
+                for child in children {
+                    if let BudgetCharge::Exceeded(breach) = budget.charge(child) {
+                        budget_breach = Some(breach);
+                        break;
+                    }
+                }
+            }
             composite.set_git_edges(node.clone(), edges);
+            if budget_breach.is_some() {
+                break;
+            }
         }
     }
 
@@ -574,24 +623,59 @@ where
                     outcome.diagnostics.push(projected);
                 }
             }
-            // Record one row per node along this root's subtree (pure lookup over
-            // the already-fetched composite graph; cache-served git verdicts mean
-            // no new fetch here).
-            collect_node_rows(
-                root,
-                0,
-                max_depth,
-                &composite,
-                &scanner,
-                &mut seen_rows,
-                &mut outcome.nodes,
-            );
+            // SEC-002: build display rows from the walk's OWN per-node verdicts —
+            // the single authoritative scan the rollup above was computed from —
+            // NOT an independent re-scan. This guarantees a row can never show a
+            // verdict worse than the rolled-up `worst_verdict` while the exit code
+            // under-reports it: both derive from the same scan.
+            for (node, depth, verdict) in &result.node_verdicts {
+                let key = node_id_string(node);
+                if seen_rows.insert(key.clone(), ()).is_some() {
+                    continue; // diamond dedup across roots
+                }
+                // Belt-and-suspenders: fold any node-row verdict that is somehow
+                // worse than the rollup back into worst_verdict BEFORE is_failure()
+                // is consulted, so the exit code can never under-report relative to
+                // a printed row (SEC-002).
+                outcome.worst_verdict = Some(match outcome.worst_verdict {
+                    Some(prev) => prev.max(*verdict),
+                    None => *verdict,
+                });
+                outcome.nodes.push(TransitiveNodeRow {
+                    node: key,
+                    depth: *depth,
+                    verdict: verdict_str(*verdict).to_string(),
+                });
+            }
+        }
+
+        // SEC-003: surface every git node that was floored to Warn because it
+        // could not be fetched/resolved, so the operator sees WHY a `warn` row has
+        // no policy reason (rather than a bare, unexplained warn). Drained from the
+        // scanner after the walk; deduped against diagnostics already emitted.
+        for un in scanner.take_unfetchable() {
+            let projected = TransitiveDiagnostic::Unfetchable {
+                node: node_id_string(&un.node),
+                reason: un.reason,
+            };
+            let key = format!("{projected:?}");
+            if seen_diags.insert(key, ()).is_none() {
+                outcome.diagnostics.push(projected);
+            }
         }
     }
 
     // --- Write each scanned git node's subtree_digest (task 106) so a warm
     // re-scan is a cache hit and a changed child invalidates its parent.
-    write_subtree_digests(cache, &composite, &scanner, &roots, max_depth);
+    //
+    // SEC-004: skip the cache write entirely on a budget breach. A breached scan
+    // is a fail-closed, incomplete scan; persisting a pass row or an empty-subtree
+    // digest for it would let a subsequent run serve a stale cache hit derived
+    // from work that was never actually completed. A breached scan persists
+    // nothing.
+    if budget_breach.is_none() {
+        write_subtree_digests(cache, &composite, &scanner, &roots, max_depth);
+    }
 
     outcome
 }
@@ -670,35 +754,33 @@ where
         .expect("fetch sink mutex poisoned")
 }
 
-/// Recover per-node `(depth, verdict)` rows by re-walking the (already-fetched)
-/// composite graph. Pure lookup: the scanner's git arm hits the cache written on
-/// the first walk, so no new fetch is incurred here.
-fn collect_node_rows<E: EdgeProvider, S: NodeScanner>(
-    node: &NodeId,
-    depth: usize,
-    max_depth: usize,
-    edges: &E,
-    scanner: &S,
-    seen: &mut HashMap<String, ()>,
-    rows: &mut Vec<TransitiveNodeRow>,
-) {
-    let key = node_id_string(node);
-    if seen.insert(key.clone(), ()).is_some() {
-        return; // diamond dedup
+/// Whether a git root is a VALID warm cache hit that need not be re-fetched for
+/// edge discovery (T-108-17). True only when:
+///   - the resolved ref is a **pinned** SHA (mutable refs are never cached and
+///     always re-fetch — task 097), and
+///   - a cache row exists carrying BOTH a `content_hash` (the content gate) and a
+///     `subtree_digest` (the task-106 subtree gate).
+///
+/// When true the orchestration skips the pre-fetch and treats the root as a leaf:
+/// its cached verdict is authoritative and its subtree is provably unchanged. The
+/// invalidate pre-pass still drops the row if a child's verdict actually changed,
+/// forcing a re-walk (T-108-18).
+fn is_warm_git_root(cache: &Cache, resolver: &LockfileGitResolver, root: &NodeId) -> bool {
+    use crate::transitive::scanner::GitTargetResolver as _;
+    let NodeId::Git { name, .. } = root else {
+        return false;
+    };
+    let Some(target) = resolver.resolve(name, "") else {
+        return false;
+    };
+    if crate::policy::mutable_ref::classify_ref(&target.ref_)
+        != crate::policy::mutable_ref::RefKind::Pinned
+    {
+        return false;
     }
-    let verdict = scanner.scan(node);
-    rows.push(TransitiveNodeRow {
-        node: key,
-        depth,
-        verdict: verdict_str(verdict).to_string(),
-    });
-    if depth >= max_depth {
-        return;
-    }
-    if let Ok(children) = edges.edges_for(node) {
-        for child in children {
-            collect_node_rows(&child, depth + 1, max_depth, edges, scanner, seen, rows);
-        }
+    match cache.lookup(name, &target.ref_, "git") {
+        Ok(Some(entry)) => entry.content_hash.is_some() && entry.subtree_digest.is_some(),
+        _ => false,
     }
 }
 
@@ -855,10 +937,20 @@ mod tests {
     const PINNED: &str = "abc123def4567890abc123def4567890abc12345"; // 40 hex
 
     /// A fetcher returning a fixed tree and counting fetches (zero network).
+    ///
+    /// Also tracks peak concurrent fetches (T-108-15) and can be told to fail
+    /// every fetch (SEC-003 unfetchable path).
     #[derive(Clone)]
     struct SpyFetcher {
         files: Vec<(PathBuf, Vec<u8>)>,
         fetches: Arc<AtomicUsize>,
+        /// Live concurrent fetches right now, and the peak observed — the gauge
+        /// pattern from task 105's `ConcurrencyGauge`, inlined so T-108-15 can
+        /// assert the wired pool honours `fetch_concurrency`.
+        live: Arc<AtomicUsize>,
+        peak: Arc<AtomicUsize>,
+        /// When set, every `fetch_tree` returns an error (unfetchable path).
+        fail: bool,
     }
     impl SpyFetcher {
         fn new(files: &[(&str, &[u8])]) -> Self {
@@ -868,15 +960,37 @@ mod tests {
                     .map(|(p, c)| (PathBuf::from(p), c.to_vec()))
                     .collect(),
                 fetches: Arc::new(AtomicUsize::new(0)),
+                live: Arc::new(AtomicUsize::new(0)),
+                peak: Arc::new(AtomicUsize::new(0)),
+                fail: false,
             }
+        }
+        /// A fetcher whose every fetch fails (SEC-003 unfetchable git node).
+        fn failing() -> Self {
+            let mut f = Self::new(&[]);
+            f.fail = true;
+            f
         }
         fn fetch_count(&self) -> usize {
             self.fetches.load(Ordering::SeqCst)
+        }
+        /// Highest number of simultaneous fetches observed (T-108-15).
+        fn peak_concurrency(&self) -> usize {
+            self.peak.load(Ordering::SeqCst)
         }
     }
     impl crate::GitTreeFetcher for SpyFetcher {
         fn fetch_tree(&self, _url: &str, _ref_: &str) -> anyhow::Result<FetchedTree> {
             self.fetches.fetch_add(1, Ordering::SeqCst);
+            // Concurrency gauge: bump live, raise peak, hold briefly so an
+            // over-admission would be observable, then drop live.
+            let now = self.live.fetch_add(1, Ordering::SeqCst) + 1;
+            self.peak.fetch_max(now, Ordering::SeqCst);
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            self.live.fetch_sub(1, Ordering::SeqCst);
+            if self.fail {
+                return Err(anyhow::anyhow!("spy fetch failure (fixture)"));
+            }
             Ok(FetchedTree::from_files_for_test(self.files.clone()))
         }
     }
@@ -1148,6 +1262,15 @@ mod tests {
             outcome.nodes
         );
         assert_eq!(outcome.worst_verdict, Some(Verdict::Pass));
+        // T-108-15 (peak concurrency): with fetch_concurrency = 1 the wired pool
+        // must serialise fetches — observed peak concurrent fetches must be ≤ 1.
+        // The gauge in SpyFetcher makes an over-admission observable (20ms hold);
+        // a sequential walk also satisfies peak ≤ 1, so the assertion is honest.
+        assert!(
+            fetcher.peak_concurrency() <= 1,
+            "T-108-15: fetch_concurrency = 1 must keep peak concurrent fetches ≤ 1, observed {}",
+            fetcher.peak_concurrency()
+        );
     }
 
     // --- T-108-17: warm cache -> the pinned git node's verdict is served from
@@ -1181,6 +1304,8 @@ mod tests {
             fetcher.fetch_count() >= 1,
             "first scan must fetch the git node"
         );
+        // Capture the fetch count after the cold run.
+        let fetches_after_run1 = fetcher.fetch_count();
         let row = cache.lookup("g", sha, "git").unwrap().unwrap();
         assert!(
             row.subtree_digest.is_some(),
@@ -1192,6 +1317,14 @@ mod tests {
         assert_eq!(
             row2.result, "pass",
             "T-108-17: warm cache must serve the same Pass verdict"
+        );
+        // T-108-17 (warm-cache no-fetch): the second run must NOT re-fetch the
+        // unchanged pinned git node — its verdict and edges are served from cache.
+        assert_eq!(
+            fetcher.fetch_count(),
+            fetches_after_run1,
+            "T-108-17: a warm pinned node must NOT trigger another VcsFetcher::fetch \
+             (fetch count must not increase on the warm run)"
         );
     }
 
@@ -1210,11 +1343,18 @@ mod tests {
             crate::transitive::engine::WalkResult {
                 verdict: Verdict::Pass,
                 diagnostics: vec![],
+                node_verdicts: vec![],
             }
         }
     }
 
-    /// Mirror of the run_check gate: only walk when enabled.
+    /// Structural mirror of the run_check gate used to exercise the RootWalker
+    /// seam in isolation. NOTE: the REAL `if config.transitive.enabled` gate in
+    /// main.rs is exercised end-to-end by the integration test
+    /// `t108_03_real_gate_disabled_skips_walker_enabled_enters_it`
+    /// (tests/transitive_scan_path_integration.rs) — that test FAILS if the gate
+    /// is deleted. This unit test only proves the walker seam itself respects an
+    /// enabled flag (the deferred T-108-14 dfs_walk-spy assertion).
     fn gated_walk(walker: &SpyWalker, config: &TransitiveConfig, roots: &[NodeId]) {
         if config.enabled {
             for r in roots {
@@ -1394,6 +1534,244 @@ mod tests {
             "transitive section must not re-render the flat header"
         );
         assert!(section.contains("Transitive scan:"));
+    }
+
+    // --- SEC-002: a node whose row shows Block forces exit ≥ 1 (no under-report).
+    //
+    // Display rows and the rollup now derive from ONE scan (WalkResult.node_verdicts),
+    // so a row that shows `block` can never coexist with an exit code that
+    // under-reports it. This asserts the invariant end-to-end: the moment any node
+    // row is Block, is_failure() is true and worst_verdict is Block.
+    #[test]
+    fn sec_002_block_row_forces_failure_no_under_report() {
+        let cache = Cache::in_memory().unwrap();
+        let root = reg("root-pkg", "1.0.0");
+        let child = git("dep-evil", PINNED);
+        let graph = DependencyGraph::from_edges(vec![]);
+        // The git child scans Block (malicious install script fixture).
+        let policies: Vec<Box<dyn Policy>> = vec![Box::new(AlwaysBlock)];
+        let flat = vec![("root-pkg".to_string(), "pass".to_string())];
+        let fetcher = SpyFetcher::new(&[("postinstall.js", b"require('child_process')" as &[u8])]);
+        let inputs = TransitiveScanInputs {
+            graph,
+            roots: vec![
+                (root, None),
+                (
+                    child,
+                    Some(DependencySource::Git {
+                        url: "git://127.0.0.1/repo".to_string(),
+                        ref_: PINNED.to_string(),
+                    }),
+                ),
+            ],
+            flat_verdicts: flat,
+            cache: &cache,
+            policies: &policies,
+            config: &cfg(true),
+        };
+        let outcome = run_transitive_scan(inputs, &fetcher);
+
+        // The display row for the git child shows Block.
+        let block_row = outcome
+            .nodes
+            .iter()
+            .find(|r| r.node.contains("dep-evil"))
+            .expect("the git child must have a display row");
+        assert_eq!(
+            block_row.verdict, "block",
+            "SEC-002: the git child row must show block"
+        );
+        // Because a row shows Block, the exit code MUST be ≥ 1: is_failure() true
+        // and worst_verdict at least Block — never under-reporting the printed row.
+        assert!(
+            outcome.is_failure(),
+            "SEC-002: a node whose row shows Block must force exit ≥ 1 (no under-report)"
+        );
+        assert_eq!(
+            outcome.worst_verdict,
+            Some(Verdict::Block),
+            "SEC-002: worst_verdict must reflect the worst node row actually shown"
+        );
+    }
+
+    // --- SEC-001: a git sub-tree's manifest-discovered fan-out exceeding
+    // max_total_nodes triggers NodeBudgetExceeded (the hard ceiling now bounds
+    // nodes discovered DURING the walk, not just the up-front graph).
+    #[test]
+    fn sec_001_manifest_discovered_fan_out_breaches_budget() {
+        let cache = Cache::in_memory().unwrap();
+        // A git root whose fetched Cargo.toml declares 5 pinned git deps — a
+        // fan-out the lockfile graph never saw. These are discovered ONLY during
+        // the walk via the manifest.
+        let cargo = b"[package]\nname = \"x\"\nversion = \"0.1.0\"\n\
+            [dependencies]\n\
+            c0 = { git = \"https://h/c0\", rev = \"aaaa000000\" }\n\
+            c1 = { git = \"https://h/c1\", rev = \"aaaa111111\" }\n\
+            c2 = { git = \"https://h/c2\", rev = \"aaaa222222\" }\n\
+            c3 = { git = \"https://h/c3\", rev = \"aaaa333333\" }\n\
+            c4 = { git = \"https://h/c4\", rev = \"aaaa444444\" }\n";
+        let fetcher = SpyFetcher::new(&[("Cargo.toml", cargo as &[u8])]);
+        let root = git("rootgit", PINNED);
+        let policies: Vec<Box<dyn Policy>> = vec![];
+        // Budget of 2: the single git root is charged up front (1), then its 5
+        // manifest-discovered children breach the ceiling DURING edge extraction.
+        let mut config = cfg(true);
+        config.max_total_nodes = 2;
+        let inputs = TransitiveScanInputs {
+            graph: DependencyGraph::from_edges(vec![]),
+            roots: vec![(
+                root,
+                Some(DependencySource::Git {
+                    url: "git://127.0.0.1/repo".to_string(),
+                    ref_: PINNED.to_string(),
+                }),
+            )],
+            flat_verdicts: vec![],
+            cache: &cache,
+            policies: &policies,
+            config: &config,
+        };
+        let outcome = run_transitive_scan(inputs, &fetcher);
+        assert!(
+            outcome
+                .diagnostics
+                .iter()
+                .any(|d| matches!(d, TransitiveDiagnostic::NodeBudgetExceeded { .. })),
+            "SEC-001: manifest-discovered fan-out exceeding max_total_nodes must \
+             trigger NodeBudgetExceeded, diagnostics: {:?}",
+            outcome.diagnostics
+        );
+        assert!(
+            outcome.is_failure(),
+            "SEC-001: a budget breach (even from manifest-discovered nodes) must fail closed"
+        );
+    }
+
+    // --- SEC-004: a breached scan persists NOTHING to cache (no pass row, no
+    // empty-subtree digest written during a fail-closed breach).
+    #[test]
+    fn sec_004_breached_scan_writes_no_cache_row() {
+        let cache = Cache::in_memory().unwrap();
+        // A pinned git root that WOULD be cached on a clean scan. The Cargo.toml
+        // declares a fan-out that breaches the budget, so the scan fails closed.
+        let cargo = b"[package]\nname = \"x\"\nversion = \"0.1.0\"\n\
+            [dependencies]\n\
+            d0 = { git = \"https://h/d0\", rev = \"bbbb000000\" }\n\
+            d1 = { git = \"https://h/d1\", rev = \"bbbb111111\" }\n\
+            d2 = { git = \"https://h/d2\", rev = \"bbbb222222\" }\n";
+        let fetcher = SpyFetcher::new(&[("Cargo.toml", cargo as &[u8])]);
+        let root = git("breachgit", PINNED);
+        let policies: Vec<Box<dyn Policy>> = vec![];
+        let mut config = cfg(true);
+        config.max_total_nodes = 2;
+        let inputs = TransitiveScanInputs {
+            graph: DependencyGraph::from_edges(vec![]),
+            roots: vec![(
+                root,
+                Some(DependencySource::Git {
+                    url: "git://127.0.0.1/repo".to_string(),
+                    ref_: PINNED.to_string(),
+                }),
+            )],
+            flat_verdicts: vec![],
+            cache: &cache,
+            policies: &policies,
+            config: &config,
+        };
+        let outcome = run_transitive_scan(inputs, &fetcher);
+        assert!(
+            outcome.is_failure(),
+            "SEC-004 precondition: the scan breached"
+        );
+        // No cache row may have been written for the breached root.
+        assert!(
+            cache.lookup("breachgit", PINNED, "git").unwrap().is_none(),
+            "SEC-004: a breached (fail-closed) scan must persist NO cache row"
+        );
+    }
+
+    // --- SEC-003: an unfetchable git node surfaces an Unfetchable diagnostic in
+    // BOTH native and JSON (no bare, unexplained `warn` row).
+    #[test]
+    fn sec_003_unfetchable_node_emits_diagnostic_in_both_formats() {
+        let cache = Cache::in_memory().unwrap();
+        let root = git("unreachable", PINNED);
+        let policies: Vec<Box<dyn Policy>> = vec![];
+        // The fetcher fails every fetch → the git node is floored to Warn with the
+        // "fetch failed" reason recorded by the scanner.
+        let fetcher = SpyFetcher::failing();
+        let inputs = TransitiveScanInputs {
+            graph: DependencyGraph::from_edges(vec![]),
+            roots: vec![(
+                root,
+                Some(DependencySource::Git {
+                    url: "git://127.0.0.1/repo".to_string(),
+                    ref_: PINNED.to_string(),
+                }),
+            )],
+            flat_verdicts: vec![],
+            cache: &cache,
+            policies: &policies,
+            config: &cfg(true),
+        };
+        let outcome = run_transitive_scan(inputs, &fetcher);
+
+        // Fail-closed: the node is at least Warn.
+        assert!(
+            outcome.worst_verdict >= Some(Verdict::Warn),
+            "SEC-003: an unfetchable git node must be floored ≥ Warn"
+        );
+        // The Unfetchable diagnostic is present with a reason.
+        assert!(
+            outcome.diagnostics.iter().any(|d| matches!(
+                d,
+                TransitiveDiagnostic::Unfetchable { node, reason }
+                    if node.contains("unreachable") && reason == "fetch failed"
+            )),
+            "SEC-003: an Unfetchable diagnostic with a reason must be present: {:?}",
+            outcome.diagnostics
+        );
+        // Native renders it.
+        let native = outcome.render_native_section();
+        assert!(
+            native.contains("UNFETCHABLE") && native.contains("fetch failed"),
+            "SEC-003: native output must explain the unfetchable node:\n{native}"
+        );
+        // JSON renders it.
+        let json = serde_json::to_string(&outcome).unwrap();
+        assert!(
+            json.contains("Unfetchable") && json.contains("fetch failed"),
+            "SEC-003: JSON output must carry the Unfetchable diagnostic: {json}"
+        );
+    }
+
+    // --- SEC-003 (unknown-origin path): a git node whose origin cannot be
+    // resolved also surfaces an Unfetchable diagnostic (reason "unknown origin").
+    #[test]
+    fn sec_003_unknown_origin_emits_unfetchable() {
+        let cache = Cache::in_memory().unwrap();
+        // A git root with NO DependencySource → no provenance recorded → the
+        // scanner's resolve() returns None → "unknown origin".
+        let root = git("noorigin", PINNED);
+        let policies: Vec<Box<dyn Policy>> = vec![];
+        let fetcher = SpyFetcher::new(&[]);
+        let inputs = TransitiveScanInputs {
+            graph: DependencyGraph::from_edges(vec![]),
+            roots: vec![(root, None)],
+            flat_verdicts: vec![],
+            cache: &cache,
+            policies: &policies,
+            config: &cfg(true),
+        };
+        let outcome = run_transitive_scan(inputs, &fetcher);
+        assert!(
+            outcome.diagnostics.iter().any(|d| matches!(
+                d,
+                TransitiveDiagnostic::Unfetchable { reason, .. } if reason == "unknown origin"
+            )),
+            "SEC-003: an unresolvable-origin git node must emit Unfetchable(unknown origin): {:?}",
+            outcome.diagnostics
+        );
     }
 
     // --- T-108-19: tooling gate marker. `cargo test` / clippy -D warnings / fmt

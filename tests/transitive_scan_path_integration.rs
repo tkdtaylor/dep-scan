@@ -469,3 +469,144 @@ fn t108_11_json_output_is_valid_with_transitive_section() {
         "T-108-11: JSON must still carry the flat results: {stdout}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// T-108-03 (REAL gate): the `if config.transitive.enabled` gate in main.rs is
+// the live one. With enabled=false the walker is NEVER entered — the binary
+// output carries NO `Transitive scan:` section. With enabled=true (same
+// fixture) the section IS present. This test exercises the REAL gate end-to-end:
+// if someone deletes the `if config.transitive.enabled` guard in
+// run_check/run_transitive_scan, the enabled=false run would emit the section and
+// this test FAILS. (The presence/absence of the section is the observable proof
+// the DFS walker was/was not entered — the binary has no other walker for a git
+// sub-tree.)
+// ---------------------------------------------------------------------------
+#[test]
+fn t108_03_real_gate_disabled_skips_walker_enabled_enters_it() {
+    if !git_available() {
+        eprintln!("skip T-108-03: git CLI not available");
+        return;
+    }
+    // A clean git sub-tree (no malicious payload) so the two runs differ ONLY in
+    // whether the transitive walker ran, not in verdict noise.
+    let Some((_dir, _daemon, url, head)) =
+        build_served_repo(&[("package.json", br#"{"name":"gate-subtree"}"# as &[u8])])
+    else {
+        eprintln!("skip T-108-03: could not start local git daemon");
+        return;
+    };
+    let lock = git_dep_cargo_lock(&url, &head);
+
+    // enabled=false → the gate skips the walker → NO transitive section.
+    let tmp_off = TempDir::new().unwrap();
+    let cfg_off = write_config(
+        tmp_off.path().join("c.db").to_str().unwrap(),
+        "[transitive]\nenabled = false\n",
+    );
+    let lock_off = tmp_off.path().join("Cargo.lock");
+    std::fs::write(&lock_off, &lock).unwrap();
+    let out_off = dep_scan()
+        .args([
+            "--config",
+            cfg_off.path().to_str().unwrap(),
+            "check",
+            "--lockfile",
+            lock_off.to_str().unwrap(),
+            "--lockfile-type",
+            "crates",
+            "--format",
+            "native",
+        ])
+        .output()
+        .expect("T-108-03: enabled=false run");
+    let stdout_off = String::from_utf8_lossy(&out_off.stdout);
+    assert!(
+        !stdout_off.contains("Transitive scan:"),
+        "T-108-03: with the REAL gate and enabled=false the walker must NOT run \
+         (no transitive section) — deleting the gate would break this:\n{stdout_off}"
+    );
+
+    // enabled=true → the gate enters the walker → transitive section present.
+    let tmp_on = TempDir::new().unwrap();
+    let cfg_on = write_config(
+        tmp_on.path().join("c.db").to_str().unwrap(),
+        "[transitive]\nenabled = true\n",
+    );
+    let lock_on = tmp_on.path().join("Cargo.lock");
+    std::fs::write(&lock_on, &lock).unwrap();
+    let out_on = dep_scan()
+        .args([
+            "--config",
+            cfg_on.path().to_str().unwrap(),
+            "check",
+            "--lockfile",
+            lock_on.to_str().unwrap(),
+            "--lockfile-type",
+            "crates",
+            "--format",
+            "native",
+        ])
+        .output()
+        .expect("T-108-03: enabled=true run");
+    let stdout_on = String::from_utf8_lossy(&out_on.stdout);
+    assert!(
+        stdout_on.contains("Transitive scan:"),
+        "T-108-03: with the REAL gate and enabled=true the walker MUST run \
+         (transitive section present):\n{stdout_on}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// T-108-12: `--format native` with transitive enabled renders transitive node
+// rows that include depth values (the row format is `<node> depth <N> <verdict>`).
+// This proves the native table surfaces per-node depth for transitive deps, not
+// only the flat direct-dep rows.
+// ---------------------------------------------------------------------------
+#[test]
+fn t108_12_native_output_includes_transitive_depth_rows() {
+    if !git_available() {
+        eprintln!("skip T-108-12: git CLI not available");
+        return;
+    }
+    let Some((_dir, _daemon, url, head)) =
+        build_served_repo(&[("package.json", br#"{"name":"depth-subtree"}"# as &[u8])])
+    else {
+        eprintln!("skip T-108-12: could not start local git daemon");
+        return;
+    };
+
+    let tmp = TempDir::new().unwrap();
+    let cfg = write_config(
+        tmp.path().join("c.db").to_str().unwrap(),
+        "[transitive]\nenabled = true\n",
+    );
+    let lock = git_dep_cargo_lock(&url, &head);
+    let lockfile = tmp.path().join("Cargo.lock");
+    std::fs::write(&lockfile, &lock).unwrap();
+
+    let out = dep_scan()
+        .args([
+            "--config",
+            cfg.path().to_str().unwrap(),
+            "check",
+            "--lockfile",
+            lockfile.to_str().unwrap(),
+            "--lockfile-type",
+            "crates",
+            "--format",
+            "native",
+        ])
+        .output()
+        .expect("T-108-12: native run");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("Transitive scan:"),
+        "T-108-12: native output must include the transitive section:\n{stdout}"
+    );
+    // The git sub-tree root is a transitive node at depth 0 → its row carries a
+    // depth value rendered as `depth 0`.
+    assert!(
+        stdout.contains("depth 0"),
+        "T-108-12: transitive node rows must include a depth value (e.g. 'depth 0'):\n{stdout}"
+    );
+}

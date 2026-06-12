@@ -141,7 +141,8 @@ When transitive scanning is **enabled** (`[transitive] enabled = true` or `--tra
       { "kind": "DepthLimitReached", "node": "registry:npm/deep@1.0.0", "depth": 6 },
       { "kind": "CycleDetected", "from": "registry:npm/a@1.0", "to": "registry:npm/b@1.0" },
       { "kind": "NodeBudgetExceeded", "count": 5001, "limit": 5000 },
-      { "kind": "UnresolvedRange", "from": "git:dep@<sha>", "name": "express", "range": "^4.18.0" }
+      { "kind": "UnresolvedRange", "from": "git:dep@<sha>", "name": "express", "range": "^4.18.0" },
+      { "kind": "Unfetchable", "node": "git:dep@<sha>", "reason": "fetch failed" }
     ],
     "nodes": [
       { "node": "git:malicious-subtree@<sha>", "depth": 0, "verdict": "block" }
