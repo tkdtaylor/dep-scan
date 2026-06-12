@@ -59,7 +59,7 @@ These settle the open scoping questions before the emit-side tasks are written:
   SPDX of the release artifact is explicitly **dropped** — low ecosystem value.
 - **VEX depth (Q3).** Ship **presence-only VEX** first: `affected` / `fixed` /
   `under_investigation` derived from existing OSV data. dep-scan has **no reachability analysis
-  today** (the eleven policies do not include one), so it cannot honestly emit `not_affected` with a
+  today** (none of the scan policies perform reachability), so it cannot honestly emit `not_affected` with a
   reachability justification. Reachability-based suppression is a substantial, language-specific
   feature and is **removed from this ADR's scope** — it will get its own ADR and roadmap slot. This
   ADR no longer claims reachability exists.

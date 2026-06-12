@@ -18,7 +18,7 @@ dep-scan is organized into four layers plus a cross-cutting verification helper:
 
 1. **CLI layer** (`cli.rs`, `main.rs`) — parses commands (`check`, `install`, `config`), loads config, dispatches to the appropriate handler.
 2. **Registry layer** (`registry/`) — async clients for npm, PyPI, crates.io, and Go module proxy. Each implements the shared `Registry` trait that returns `PackageMetadata`. Companion clients for provenance/sumdb data: `npm_attestation` (npm provenance), `pypi_provenance` (PEP 740), `go_sumdb` (sum.golang.org lookups).
-3. **Policy layer** (`policy/`) — a pipeline of checks run against each package's metadata. Eleven policies in total: age, install_scripts, obfuscation, typosquatting, vulnerability, maintainer_change, dependency_confusion, popularity, npm_provenance, pypi_provenance, go_sumdb. Each returns a pass/warn/block verdict.
+3. **Policy layer** (`policy/`) — a pipeline of checks run against each package's metadata. Twelve policies in total: the eleven registry policies (age, install_scripts, obfuscation, typosquatting, vulnerability, maintainer_change, dependency_confusion, popularity, npm_provenance, pypi_provenance, go_sumdb) plus `mutable_ref` for git-sourced dependencies. Each returns a pass/warn/block verdict. (`vcs_host`, the VCS host-allowlist gate, is a function-based check rather than a `Policy` impl, so it is not counted among the twelve.)
 4. **Cache layer** (`cache.rs`) — SQLite-backed cache keyed by `(name, version, registry)`. Cache hits trigger content-hash verification before honoring the cached verdict (fail-closed per [ADR 003](decisions/003-content-hash-cache-integrity.md)).
 
 **Cross-cutting verification helpers:**

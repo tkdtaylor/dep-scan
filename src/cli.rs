@@ -12,12 +12,12 @@ pub enum OutputFormat {
     Json,
     /// OSV-schema-compatible JSON (consumable by OSV-Scanner, Trivy, Grype)
     Osv,
-    /// CycloneDX SBOM (not yet implemented — task 084)
+    /// CycloneDX 1.4+ JSON SBOM of the scanned dependency set, verdicts attached
     #[value(name = "cyclonedx")]
     CycloneDx,
-    /// SPDX SBOM (not yet implemented — task 084)
+    /// SPDX 2.3+ JSON SBOM of the scanned dependency set, verdicts attached
     Spdx,
-    /// VEX document (not yet implemented — task 085)
+    /// OpenVEX document (presence-only: affected / fixed / under_investigation)
     Vex,
 }
 

@@ -1,7 +1,7 @@
 # Architecture Diagrams
 
 **Project:** dep-scan
-**Last updated:** 2026-06-11 (v1.2.1 — task 087: keyless interchange-signing runtime outbound)
+**Last updated:** 2026-06-12 (task 108 — transitive walker, SBOM/VEX renderers, interchange signer in the component view)
 
 C4-structured Mermaid diagrams covering the system at three progressively detailed levels (Context → Container → Component), plus runtime sequence flows showing how the pieces collaborate. See [overview.md](overview.md) for prose context, [decisions/](decisions/) for the ADRs referenced here, and [`../spec/architecture.md`](../spec/architecture.md) for the structured element catalog these diagrams render.
 
@@ -88,9 +88,13 @@ C4Component
     Container(osv, "OSV client", "reqwest", "Vulnerability lookups")
     Container(typosquat, "Typosquat detector", "Custom Levenshtein", "Edit-distance + popular-package lists (256-char bound)")
 
-    Container(policy, "Policy layer", "11 modules", "age, install_scripts, obfuscation, typosquatting, vulnerability, maintainer_change, popularity, dependency_confusion, npm_provenance, pypi_provenance, go_sumdb")
+    Container(policy, "Policy layer", "12 modules", "age, install_scripts, obfuscation, typosquatting, vulnerability, maintainer_change, popularity, dependency_confusion, npm_provenance, pypi_provenance, go_sumdb, mutable_ref (+ vcs_host gate)")
     Container(sigstore, "Sigstore verifier", "x509-parser + p256", "Fulcio chain walk + DSSE + Rekor inclusion + timestamp window")
     Container(signednote, "Signed-note parser/verifier", "ed25519-dalek + p256", "RFC sumdb-style envelope; shared by sumdb + Rekor checkpoint")
+
+    Container(transitive, "Transitive walker", "DFS + fetch pool", "Opt-in DFS over EdgeProvider/NodeScanner; depth-limit, cycle detection, verdict roll-up (ADR 009/011)")
+    Container(vcs, "VCS fetch + manifest", "gitoxide", "Sandboxed read-only git fetch; manifest-fallback edge discovery for git deps (ADR 008/011)")
+    Container(interchange, "Interchange + signer", "serde_json + DSSE", "SBOM (CycloneDX/SPDX) + OpenVEX renderers; DSSE-signs interchange output (ADR 005/006/010)")
 
     Container(cache, "Cache layer", "rusqlite", "Content-hash decision matrix, fail-closed")
     Container(types, "Types", "—", "PackageMetadata, ScanContext, PolicyResult")
@@ -102,6 +106,10 @@ C4Component
     Rel(cli, osv, "Enriches ScanContext")
     Rel(cli, policy, "Runs pipeline")
     Rel(cli, cache, "Reads + writes verdicts")
+    Rel(cli, transitive, "Walks deps when --transitive")
+    Rel(cli, interchange, "Renders + signs --format output")
+    Rel(transitive, vcs, "Fetches git-sourced deps")
+    Rel(transitive, policy, "Scans each node")
     Rel(policy, sigstore, "Used by P-09, P-10")
     Rel(policy, signednote, "Used by P-11")
     Rel(sigstore, signednote, "Reuses note parser")
@@ -220,7 +228,7 @@ flowchart TD
     ReScan3 --> Scan
 ```
 
-The decision matrix is in [`../spec/data-model.md` § Cache decision matrix](../spec/data-model.md#cache-decision-matrix) and is verified by [F-002](../spec/fitness-functions.md#f-002), [F-007](../spec/fitness-functions.md#f-007), [F-008](../spec/fitness-functions.md#f-008).
+The decision matrix is in [`../spec/data-model.md` § Cache decision matrix](../spec/data-model.md#cache-decision-matrix) and is verified by fitness functions F-002, F-007, and F-008 (see [fitness-functions.md § Rules](../spec/fitness-functions.md#rules)).
 
 ---
 

@@ -1,7 +1,7 @@
 # Architecture — C4 Element Catalog
 
 **Project:** dep-scan
-**Last updated:** 2026-05-22 (v1.2.0)
+**Last updated:** 2026-06-12 (task 108: transitive walker, SBOM/VEX interchange, interchange signing, VCS manifest edges)
 
 The structured catalog of architectural elements that the diagrams in [`../architecture/diagrams.md`](../architecture/diagrams.md) render. Tables here are the **machine-readable spec** for the system's structure — they survive a Mermaid rewrite and are what a drift audit checks the code against.
 
@@ -68,8 +68,11 @@ dep-scan is a **single statically-linked Rust binary**. No service decomposition
 | **Lockfile parser** | [`src/lockfile.rs`](../../src/lockfile.rs) | Parses `package-lock.json`, `requirements.txt`, `Cargo.lock`, `go.sum` |
 | **OSV client** | [`src/osv.rs`](../../src/osv.rs) | Vulnerability lookups against OSV.dev |
 | **Typosquat detector** | [`src/typosquat.rs`](../../src/typosquat.rs) | Edit-distance + popular-package lists; 256-char length bound (F-020) |
-| **Policy layer** | [`src/policy/`](../../src/policy/) | 11 policies implementing `Policy::evaluate(&ScanContext) -> PolicyResult` |
-| **VCS fetch client** | [`src/vcs/fetch.rs`](../../src/vcs/fetch.rs) | Sandboxed, read-only git fetch (ADR 008, task 096). Pure-Rust gitoxide fetch-to-objects + materialise-ourselves; no `git` CLI, no checkout, no hooks/submodules/symlink-follow. First fetch of untrusted third-party source — highest-risk trust boundary. Host policy lives in [`src/policy/vcs_host.rs`](../../src/policy/vcs_host.rs) (task 095). |
+| **Policy layer** | [`src/policy/`](../../src/policy/) | 12 policies implementing `Policy::evaluate(&ScanContext) -> PolicyResult` (the 11 registry policies + `mutable_ref` for git deps). The `vcs_host` host-allowlist check (`src/policy/vcs_host.rs`) is a function-based gate, not a `Policy` impl. |
+| **Transitive walker** | [`src/transitive/`](../../src/transitive/) | Opt-in depth-first transitive dependency resolution (ADR 009/011). Pure algorithmic core (visited-set DFS, depth-limit, cycle detection) over `EdgeProvider`/`NodeScanner` traits, plus the concurrent fetch pool, budget, and verdict roll-up. Gated by `[transitive] enabled` / `--transitive`. |
+| **VCS fetch client** | [`src/vcs/fetch.rs`](../../src/vcs/fetch.rs), [`src/vcs/manifest.rs`](../../src/vcs/manifest.rs) | Sandboxed, read-only git fetch (ADR 008, task 096). Pure-Rust gitoxide fetch-to-objects + materialise-ourselves; no `git` CLI, no checkout, no hooks/submodules/symlink-follow. First fetch of untrusted third-party source — highest-risk trust boundary. `manifest.rs` reads direct edges from a fetched sub-tree's own manifest when the consuming lockfile doesn't cover them (ADR 011). Host policy lives in [`src/policy/vcs_host.rs`](../../src/policy/vcs_host.rs) (task 095). |
+| **SBOM / VEX renderers** | [`src/sbom.rs`](../../src/sbom.rs), [`src/vex.rs`](../../src/vex.rs) | Render the scanned dependency set as CycloneDX 1.4+ / SPDX 2.3+ JSON (sbom) and presence-only OpenVEX (vex) for the `--format` interchange paths (ADR 005). |
+| **Interchange signer** | [`src/interchange_sign.rs`](../../src/interchange_sign.rs), [`src/signing_export.rs`](../../src/signing_export.rs) | DSSE-signs interchange output once per run (keyless Fulcio+Rekor online, or offline `OperatorKeySigner` from `signing.key_path`; ADR 006/007/010). `signing_export.rs` backs `dep-scan signing export-pubkey`. |
 | **Cache layer** | [`src/cache.rs`](../../src/cache.rs) | SQLite-backed cache with content-hash decision matrix (F-002, F-007, F-008) |
 | **Sigstore verifier** | [`src/sigstore_verify.rs`](../../src/sigstore_verify.rs) | Fulcio chain walk + DSSE + Rekor inclusion proof + timestamp window; used by P-09, P-10 |
 | **Signed-note parser/verifier** | [`src/signed_note.rs`](../../src/signed_note.rs) | RFC sumdb-style envelope; shared by P-11 (sumdb) and the Rekor checkpoint |
@@ -98,7 +101,9 @@ Direction rules:
 
 | Concern | Decision | Where |
 |---------|----------|-------|
-| **Async runtime** | tokio (single-threaded for the registry/HTTP fan-out) | Cargo.toml; `main` uses `#[tokio::main]` |
+| **Async runtime** | tokio multi-thread (`#[tokio::main]`, default flavor) for the registry/HTTP fan-out and the transitive fetch pool. Multi-thread is required so the synchronous keyless signer can bridge to async network via `block_in_place` (ADR 010). | Cargo.toml; `main` uses `#[tokio::main]` |
+| **Transitive resolution** | Opt-in DFS walker with lockfile-first edge discovery and manifest fallback | [ADR 009](../architecture/decisions/009-transitive-resolution.md), [ADR 011](../architecture/decisions/011-manifest-edge-resolution-granularity.md) |
+| **Interchange output + signing** | OSV/CycloneDX/SPDX/VEX formats, DSSE-signed once per run; offline operator key custody out-of-band | [ADR 005](../architecture/decisions/005-interchange-standards-osv-sbom-vex.md), [ADR 006](../architecture/decisions/006-runtime-statement-integrity.md), [ADR 007](../architecture/decisions/007-offline-signing-key-custody.md), [ADR 010](../architecture/decisions/010-synchronous-signer-over-async-network.md) |
 | **HTTP client** | reqwest 0.12, `default-features = false, features = ["json", "rustls-tls"]`. HTTP/3 (`quinn`) is NOT linked. | Cargo.toml; verified during v1.2.0 audit |
 | **Crypto provider** | `ring` (via `rustls-tls`). aws-lc-rs is intentionally excluded — the aarch64 cross runner does not ship `cmake`. See [ADR 003 § Build/dependency notes](../architecture/decisions/003-content-hash-cache-integrity.md#builddependency-notes-post-v12) |
 | **TLS truststore** | Webpki + rustls-native-certs |

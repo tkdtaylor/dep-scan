@@ -1,13 +1,17 @@
 # Fitness functions
 
 **Status:** Authoritative — code MUST conform.
-**Last updated:** 2026-05-22 (v1.2.0)
+**Last updated:** 2026-06-12 (F-027 policy count → 12; clarified the two non-`cargo test` gates)
 
 A **fitness function** is a security invariant that the codebase MUST
-maintain across releases. Each row below is a contract pinned by at
+maintain across releases. Most rows below are a contract pinned by at
 least one paired test case (the `T-NNN-NN` markers in
-`docs/tasks/test-specs/`). A green test suite is the running proof that
-all `block`-severity fitness functions hold.
+`docs/tasks/test-specs/`), so a green `cargo test` suite is the running
+proof that they hold. Two rows are gated differently and are flagged as
+such in the table: **F-010** (no hardcoded registry URLs) is a source-grep
+gate enforced at code review, and **F-027** (policy-count completeness, a
+`warn` rule) is verified by the manual drift audit. Everything else is
+`cargo test`–automated.
 
 This is the "things that must never silently regress" list. If a test
 that pins an F-row breaks, the right next step is to investigate
@@ -44,7 +48,7 @@ silently broken (fix the code) — **never** to delete the test.
 | **F-024** | Install-script policy MUST strip line/block comments before pattern matching. The base64-shape detector MUST require at least one of `+`, `/`, `=`. | block | 051 | T-051-* (`src/policy/install_script.rs` false-positive tests) |
 | **F-025** | User-visible error output MUST scrub the anyhow chain by default. The full chain is gated behind `--verbose`. | warn | 053 | T-053-* (`tests/error_output_scrubbing_integration.rs`) |
 | **F-026** | The verbose audit log line at the install boundary MUST name the locked version + hash and MUST note that sigstore is not re-verified between scan-pass and `exec` (except for pip via `--require-hashes`). | warn | 055 | T-055-* (`tests/sigstore_install_path_audit_integration.rs`) |
-| **F-027** | The eleven policies are the complete set at v1.2.0. Adding or removing a policy requires updating `policies.md`, the README policy table, and the overview's "Eleven policies in total" count in the same PR. | warn | (CLAUDE.md "Common rationalizations") | Layer-2 audit (numbers + hooks) |
+| **F-027** | The twelve policies (eleven registry policies + `mutable_ref`; `vcs_host` is a function-based gate, not a `Policy` impl) are the complete set. Adding or removing a policy requires updating `policies.md`, the README policy table, and the overview's "Twelve policies in total" count in the same PR. | warn | (CLAUDE.md "Common rationalizations") | Manual drift audit (the cp-fix-drift / project-audit number-citation layer) |
 
 ## Severity meanings
 
@@ -57,8 +61,12 @@ silently broken (fix the code) — **never** to delete the test.
 
 1. The new F-row MUST cite the originating task ID (where the test was
    written) and at least one paired `T-NNN-*` marker.
-2. The test MUST be runnable via `cargo test` — no manual fitness
-   checks. If the invariant cannot be automated, it does not belong here.
+2. The invariant SHOULD be pinned by a `cargo test` case — prefer
+   automation: if it can be expressed as a test, it MUST be. The two
+   exceptions already in the table (F-010, a source-grep gate; F-027, a
+   `warn`-severity count verified by the drift audit) are the documented
+   limit; a new manual gate needs an explicit justification for why it
+   cannot be automated.
 3. The row MUST be added in the same PR that introduces the
    corresponding code change.
 

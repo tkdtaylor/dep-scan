@@ -22,7 +22,7 @@ Every release artifact is signed with [sigstore](https://sigstore.dev) keyless O
 If you have [cosign](https://github.com/sigstore/cosign) installed you can verify before running:
 
 ```bash
-VERSION=v1.2.0
+VERSION=v1.2.1
 ARTIFACT=dep-scan-${VERSION}-x86_64-unknown-linux-gnu.tar.gz
 
 cosign verify-blob \
@@ -63,14 +63,20 @@ dep-scan check serde tokio --registry crates
 dep-scan check github.com/gin-gonic/gin --registry go
 
 # JSON output for CI/CD pipelines
-dep-scan check express --registry npm --json
+dep-scan check express --registry npm --format json
+
+# Scan the full transitive dependency tree, not just direct deps
+dep-scan check express --registry npm --transitive
+
+# Emit a signed CycloneDX SBOM / OpenVEX document of what was scanned
+dep-scan check express --registry npm --format cyclonedx --allow-unsigned
 ```
 
 ## What it detects
 
 dep-scan eats its own dog food: every CI run scans dep-scan's own `Cargo.lock` with the same heuristics it applies to user projects, so any new transitive dependency that fails dep-scan's policies is caught before merge.
 
-dep-scan runs **11 security policies** against every package:
+dep-scan runs **12 security policies** against every package:
 
 | Policy | What it catches | Default |
 |--------|----------------|---------|
@@ -85,6 +91,9 @@ dep-scan runs **11 security policies** against every package:
 | **npm provenance** | Sigstore-verified SLSA attestation (Fulcio chain walk + Rekor inclusion + cert-validity window). Defends against a lying npm registry. | Warn (missing) / Block (invalid) |
 | **PyPI provenance** | PEP 740 sigstore attestation, same verification as npm with sha256 subject digests. Defends against a lying PyPI registry. | Warn (missing) / Block (invalid) |
 | **Go sumdb** | Ed25519 signature verification of `sum.golang.org` signed-tree-head responses. Defends against a lying Go module proxy. | Warn (missing) / Block (invalid) |
+| **Mutable ref** | Git-sourced dependencies pinned to a mutable ref (branch/tag) instead of an immutable commit SHA — the upstream can be silently rewritten after you vet it. Applies only to VCS deps. | Warn (configurable to Block via `[vcs] mutable_git_ref = "block"`) |
+
+> The `vcs_host` host-allowlist check (configured under `[vcs] allowed_hosts` / `denied_hosts`) gates which hosts a git dependency may be fetched from. It's a fail-closed network-egress gate rather than a per-package `Policy`, so it isn't counted among the twelve policies above.
 
 ### Dogfood policy
 
@@ -145,6 +154,39 @@ See [ADR 003](docs/architecture/decisions/003-content-hash-cache-integrity.md) f
 | 1 | One or more policy violations (warn or block) |
 | 2 | Runtime error (network failure, invalid config) |
 
+## Output formats
+
+`dep-scan check` and `dep-scan install` accept `--format <value>`:
+
+| Format | Output |
+|--------|--------|
+| `native` | Human-readable table (default) |
+| `json` | dep-scan's JSON array of per-package verdicts |
+| `osv` | OSV-schema JSON, consumable by OSV-Scanner / Trivy / Grype |
+| `cyclonedx` | CycloneDX 1.4+ JSON SBOM of the scanned dependency set, verdicts attached |
+| `spdx` | SPDX 2.3+ JSON SBOM of the scanned dependency set, verdicts attached |
+| `vex` | OpenVEX document (presence-only: `affected` / `fixed` / `under_investigation`) |
+
+> The bare `--json` flag is a **deprecated alias** for `--format json` — it still works but `--format json` is preferred. `--format` and `--json` are mutually exclusive.
+
+### Signed interchange output
+
+The machine-readable interchange formats (`osv`, `cyclonedx`, `spdx`, `vex`) are
+**DSSE-signed by default**, once per run over the whole result set. dep-scan signs
+either with a sigstore keyless identity (when `[signing] fulcio_url`/`rekor_url`/`oidc_token`
+are configured and the network is reachable) or with an offline operator key
+(`[signing] key_path`, a PEM PKCS#8 Ed25519 key). With no signing key configured on
+the offline path, a signed-format request **fails closed** — nothing is written to
+stdout. Pass `--allow-unsigned` to emit the raw payload with an explicit
+`"_dep_scan_unsigned": true` marker instead. The `native` and `json` paths are never
+signed.
+
+Consumers verify against the operator's public key, which you export with:
+
+```bash
+dep-scan signing export-pubkey > pubkey.pem   # reads [signing] key_path; PEM SPKI + key-id
+```
+
 ## Configuration
 
 Initialize a config file:
@@ -193,6 +235,26 @@ internal_prefixes = ["internal-", "private-", "corp-"]
 
 [popularity]
 min_downloads = 1000
+
+[signing]                  # interchange-output signing identity (see "Interchange output" below)
+offline    = false         # force the offline signing path, skip the network keyless path
+key_path   = ""            # operator-provisioned PEM PKCS#8 Ed25519 private key; empty = none
+fulcio_url = ""            # keyless Fulcio base URL (empty = keyless not provisioned)
+rekor_url  = ""            # keyless Rekor base URL (empty = keyless not provisioned)
+oidc_token = ""            # OIDC identity token presented to Fulcio (secret; redacted in `config show`)
+
+[vcs]                      # git/VCS dependency handling
+allowed_hosts      = []    # if non-empty, ONLY these hosts may be fetched
+denied_hosts       = []    # always rejected; deny wins over allow
+fetch_timeout_secs = 30    # hard wall-clock budget for a single VCS fetch
+max_blob_bytes     = 52428800   # 50 MiB; larger blobs are skipped, not read into memory
+
+[transitive]               # transitive dependency walker (opt-in)
+enabled           = false  # false = flat scan only (non-regressive default); --transitive overrides
+max_depth         = 5      # deepest level walked; 0 = root only
+on_depth_limit    = "warn" # verdict floor for cut nodes: "warn" (default) | "block"
+fetch_concurrency = 4      # parallel fetches during the walk; must be >= 1
+max_total_nodes   = 5000   # maximum distinct nodes scanned; must be >= 1
 ```
 
 The `require_*` knobs escalate a missing-attestation `Warn` into a `Block`. Most packages don't publish provenance yet, so the defaults are `Warn` to avoid a false-positive flood. Invalid attestations always `Block` regardless of these flags.
@@ -309,7 +371,7 @@ dep-scan check --lockfile Cargo.lock --lockfile-type crates
 dep-scan check --lockfile go.sum --lockfile-type go
 
 # In CI/CD — fail the build on any policy violation
-dep-scan check --lockfile package-lock.json --lockfile-type npm --json
+dep-scan check --lockfile package-lock.json --lockfile-type npm --format json
 ```
 
 ### 4. Ongoing use
@@ -632,7 +694,7 @@ alias go='gods'
 
 - name: Scan dependencies before install
   run: |
-    dep-scan check $(jq -r '.dependencies | keys[]' package.json) --registry npm --json
+    dep-scan check $(jq -r '.dependencies | keys[]' package.json) --registry npm --format json
     # Exit code 1 = policy violation, fails the workflow
 
 - name: Install dependencies
@@ -685,6 +747,14 @@ See [docs/architecture/overview.md](docs/architecture/overview.md) for system de
 - [ADR 001](docs/architecture/decisions/001-language-choice.md) — Rust as implementation language
 - [ADR 002](docs/architecture/decisions/002-detection-strategy.md) — v0.2 detection strategy and external data sources
 - [ADR 003](docs/architecture/decisions/003-content-hash-cache-integrity.md) — content-hash cache integrity, sigstore + sumdb provenance verification
+- [ADR 004](docs/architecture/decisions/004-popularity-none-downloads.md) — popularity policy: treat `None` downloads as Pass, not zero
+- [ADR 005](docs/architecture/decisions/005-interchange-standards-osv-sbom-vex.md) — adopt OSV, CycloneDX/SPDX, and VEX as interchange output standards
+- [ADR 006](docs/architecture/decisions/006-runtime-statement-integrity.md) — runtime integrity of statements exchanged between ecosystem blocks
+- [ADR 007](docs/architecture/decisions/007-offline-signing-key-custody.md) — offline signing key custody
+- [ADR 008](docs/architecture/decisions/008-git-vcs-dependency-handling.md) — git/VCS dependency handling and transitive scanning
+- [ADR 009](docs/architecture/decisions/009-transitive-resolution.md) — transitive dependency resolution (the DFS walker)
+- [ADR 010](docs/architecture/decisions/010-synchronous-signer-over-async-network.md) — driving the async sigstore network from the synchronous signer trait
+- [ADR 011](docs/architecture/decisions/011-manifest-edge-resolution-granularity.md) — manifest edge resolution granularity for git dependencies
 
 ## Security
 

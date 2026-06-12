@@ -61,7 +61,7 @@ Numbers are stable. Removed behaviors stay numbered as `B-NNN: REMOVED — see A
   4. Build `ScanContext` and run policies P-01…P-11 (see [§ B-006 through B-016](#b-006-policy-p-01-age-block-on-young-packages)).
   5. Aggregate per-policy verdicts using the worst-case rule (any block ⇒ `block`; else any warn ⇒ `warn`; else `pass`).
   6. Write the resulting row to the cache (including the registry-published `content_hash` and any verified `provenance_identity`).
-  7. Emit output according to `--format` (default `native` table; `json` for legacy JSON array; `osv` for OSV-shaped JSON; `cyclonedx`/`spdx`/`vex` not yet implemented — see B-027, B-028).
+  7. Emit output according to `--format` (default `native` table; `json` for legacy JSON array; `osv` for OSV-shaped JSON; `cyclonedx`/`spdx` for SBOM and `vex` for OpenVEX — see B-027, B-028; interchange formats are DSSE-signed per B-029/B-030).
 - **Side effects:** Network I/O (registry, OSV.dev, attestation endpoints, sumdb). Local SQLite write. No subprocess invocation.
 - **Failure modes:** Exit `2` on registry network failure, invalid config, validation reject. Exit `1` on `warn` or `block` aggregate verdict. Exit `0` on `pass`.
 - **References:** [ADR 003](../architecture/decisions/003-content-hash-cache-integrity.md), [`src/policy/mod.rs:74-89`](../../src/policy/mod.rs#L74-L89) (`aggregate_results`).
@@ -297,10 +297,23 @@ For each DSSE-signed attestation bundle, the following steps run in order in [`s
   - `dep_scan_result` — extension field: `"pass"` | `"warn"` | `"block"`
 - The ecosystem string follows the OSV registry mapping: `npm` → `"npm"`, `pypi` → `"PyPI"`, `crates` → `"crates.io"`, `go` → `"Go"`.
 
-### B-028: Unimplemented format stubs
+### B-028: SBOM and VEX interchange formats
 
 - **Trigger:** `dep-scan check --format cyclonedx|spdx|vex`.
-- **Response:** Process exits non-zero with a message containing `"not yet implemented"` and the format name. CycloneDX/SPDX will be implemented in task 084; VEX in task 085.
+- **Response:** dep-scan renders the scanned dependency set as a Software Bill of
+  Materials or VEX document, with scan verdicts attached:
+  - `cyclonedx` → CycloneDX 1.4+ JSON ([`src/sbom.rs::render_cyclonedx`](../../src/sbom.rs)).
+  - `spdx` → SPDX 2.3+ JSON ([`src/sbom.rs::render_spdx`](../../src/sbom.rs)).
+  - `vex` → OpenVEX, presence-only (`affected` / `fixed` / `under_investigation`
+    derived from existing OSV data; no reachability analysis —
+    [`src/vex.rs::render_vex`](../../src/vex.rs), [ADR 005](../architecture/decisions/005-interchange-standards-osv-sbom-vex.md)).
+- The SBOM is of the **analyzed dependency tree**, not dep-scan's own binary (the
+  release-artifact SBOM is a separate concern; see [ADR 005](../architecture/decisions/005-interchange-standards-osv-sbom-vex.md)).
+- Like all interchange formats, these are signed by default and gated by
+  [B-029](#b-029-dsse-signing-for-interchange-output) / [B-030](#b-030-signing-identity-resolution-and-fail-closed)
+  (use `--allow-unsigned` to emit the raw payload).
+- *(Superseded the pre-083 stub behavior, which exited non-zero with
+  `"not yet implemented"`. The formats shipped in tasks 084/085.)*
 
 ### B-029: DSSE signing for interchange output
 

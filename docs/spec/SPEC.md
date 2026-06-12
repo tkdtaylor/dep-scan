@@ -42,7 +42,7 @@ When [ADR 003](../architecture/decisions/003-content-hash-cache-integrity.md) de
 
 For a first reader:
 
-1. **behaviors.md** — what dep-scan does (CLI flow, 11 policies, verification pipelines).
+1. **behaviors.md** — what dep-scan does (CLI flow, 12 policies, verification pipelines).
 2. **interfaces.md** — the exact surface the user interacts with.
 3. **data-model.md** — what dep-scan remembers between runs.
 4. **fitness-functions.md** — the security invariants those three layers must never violate.
