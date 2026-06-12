@@ -3,6 +3,11 @@
 **Status:** ready
 **Module under test:** `src/vcs/manifest.rs` — `manifest_edges_from_tree`
 
+**Governing decision:** [ADR 011](../architecture/decisions/011-manifest-edge-resolution-granularity.md)
+— `ManifestEdge::Resolved` is emitted **only** for a Cargo git dependency with an explicit
+`rev = "<sha>"` (→ `NodeId::Git`). Every other manifest edge is
+`ManifestEdge::Unresolved(UnresolvedRange { name, range })`.
+
 ---
 
 ## Acceptance criteria
@@ -54,7 +59,7 @@ with the version string preserved verbatim.
 
 ---
 
-### T-101-04 — Cargo.toml plain version dep → NodeId::Registry
+### T-101-04 — Cargo.toml plain string + table version deps → both UnresolvedRange (ADR 011)
 
 **Given** a `FetchedTree` containing a `Cargo.toml` with:
 ```toml
@@ -64,17 +69,21 @@ version = "0.1.0"
 
 [dependencies]
 serde = "1.0"
-tokio = { version = "1.0", features = ["full"] }
+tokio = { version = "1", features = ["full"] }
 ```
 
 **When** `manifest_edges_from_tree(tree, Ecosystem::Cargo)` is called.
 
-**Then** the result is `Ok`, containing two `ManifestEdge::Resolved(NodeId::Registry)`
-entries: `{ name: "serde", version: "1.0", registry: "crates" }` and
-`{ name: "tokio", version: "1.0", registry: "crates" }`.
+**Then** the result is `Ok`, containing two `ManifestEdge::Unresolved` entries:
+- `serde` → `UnresolvedRange { name: "serde", range: "1.0" }` (verbatim string)
+- `tokio` → `UnresolvedRange { name: "tokio", range: "1" }` (verbatim version from table)
 
-**Assertion:** REQ-101-03 — Cargo registry deps become NodeId::Registry with
-`registry = "crates"`.
+No `ManifestEdge::Resolved` edge is present.
+
+**Assertion:** ADR 011 — both string-form (`"1.0"`) and table-form (`{ version = "1" }`)
+are version ranges, not exact pins. Classifying either as `NodeId::Registry` would produce
+an identity whose `version` field holds a range string, not an exact artifact version.
+Only `git+rev` may be `Resolved`.
 
 ---
 
@@ -179,21 +188,25 @@ only a `&FetchedTree`, which is already a no-network type.
 
 ---
 
-### T-101-12 — Cargo.toml git dep without `rev` → UnresolvedRange
+### T-101-12 — Cargo.toml git dep without `rev` → UnresolvedRange with git URL as range
 
-**Given** a `FetchedTree` containing a `Cargo.toml` where a git dep specifies
-only `git = "https://..."` with no `rev`, `branch`, or `tag` field — so no
-pinned SHA is available.
+**Given** a `FetchedTree` containing a `Cargo.toml` with:
+```toml
+[dependencies]
+mylib = { git = "https://github.com/example/mylib" }
+```
+(no `rev`, `branch`, or `tag` — no pinned SHA available).
 
 **When** `manifest_edges_from_tree(tree, Ecosystem::Cargo)` is called.
 
-**Then** the result contains one `ManifestEdge::Unresolved` entry for that dep
-with an appropriate range/hint string (e.g. the git URL or an empty range),
-indicating it could not be resolved to a `NodeId::Git` with a pinned SHA.
+**Then** the result contains exactly one `ManifestEdge::Unresolved` entry:
+`UnresolvedRange { name: "mylib", range: "https://github.com/example/mylib" }`.
+The `range` field stores the git URL **verbatim** (ADR 011: `range` = the git URL
+for a rev-less git dep), so a later resolver can attempt resolution.
 
-**Assertion:** REQ-101-03 — git dep without pinned SHA cannot become
-`NodeId::Git`; it must be recorded as `UnresolvedRange`, not silently dropped
-or error.
+**Assertion:** ADR 011 — git dep without pinned SHA is `Unresolved` with
+`range` = the exact git URL. It must not become `NodeId::Git` (no SHA) and must
+not be silently dropped or error.
 
 ---
 

@@ -225,12 +225,16 @@ fn cargo_edges(tree: &crate::vcs::fetch::FetchedTree) -> Result<Vec<ManifestEdge
 
 /// Classify a single Cargo dependency value into a `ManifestEdge`.
 ///
-/// - Plain string `"1.0"` → `UnresolvedRange` (version range, not pinned).
+/// Per ADR 011: `Resolved` is emitted **only** when a concrete pinned identity
+/// is available without semver parsing — that is exactly one case: a Cargo git
+/// dependency with an explicit `rev = "<sha>"`, which yields `NodeId::Git`.
+/// Every other manifest edge is `Unresolved(UnresolvedRange)`:
+///
+/// - Plain string `"1.0"` → `UnresolvedRange` (range, not a pin).
 /// - Table with `git` + `rev` → `NodeId::Git` (pinned commit SHA).
-/// - Table with `git` but no `rev` → `UnresolvedRange` (unpinned git, REQ-101-12).
-/// - Table with `version` → `ManifestEdge::Resolved(NodeId::Registry)`.
-/// - Table with `path` and no `version` → `UnresolvedRange` (local path dep,
-///   treated as unresolved for the transitive walk).
+/// - Table with `git` but no `rev` → `UnresolvedRange` (range = git URL).
+/// - Table with `version` → `UnresolvedRange` (range = the version string).
+/// - Table with `path` and no `version` → `UnresolvedRange` (local path dep).
 fn classify_cargo_dep(name: &str, val: &toml::Value) -> ManifestEdge {
     match val {
         // Inline string: `dep = "1.0"` or `dep = "*"` — version range.
@@ -241,7 +245,7 @@ fn classify_cargo_dep(name: &str, val: &toml::Value) -> ManifestEdge {
 
         // Inline table: `dep = { version = "…", features = […] }` etc.
         toml::Value::Table(table) => {
-            // Git dep with pinned rev → NodeId::Git
+            // Git dep with pinned rev → NodeId::Git (ADR 011: the ONLY Resolved case).
             if let Some(rev) = table.get("rev").and_then(|r| r.as_str())
                 && !rev.is_empty()
             {
@@ -251,7 +255,7 @@ fn classify_cargo_dep(name: &str, val: &toml::Value) -> ManifestEdge {
                 });
             }
 
-            // Git dep without pinned rev → UnresolvedRange (REQ-101-12).
+            // Git dep without pinned rev → UnresolvedRange (range = git URL).
             if table.contains_key("git") {
                 let git_url = table
                     .get("git")
@@ -264,12 +268,14 @@ fn classify_cargo_dep(name: &str, val: &toml::Value) -> ManifestEdge {
                 });
             }
 
-            // Registry dep with explicit version → NodeId::Registry (crates).
+            // Registry dep with explicit version → UnresolvedRange (ADR 011: a
+            // version string like "1" is a range, not an exact pin; classifying
+            // it as NodeId::Registry would produce an identity whose `version`
+            // field holds a range string, not an exact artifact version).
             if let Some(version_str) = table.get("version").and_then(|v| v.as_str()) {
-                return ManifestEdge::Resolved(NodeId::Registry {
+                return ManifestEdge::Unresolved(UnresolvedRange {
                     name: name.to_string(),
-                    version: version_str.to_string(),
-                    registry: "crates".to_string(),
+                    range: version_str.to_string(),
                 });
             }
 
@@ -383,40 +389,53 @@ mod tests {
         );
     }
 
-    // T-101-04: Cargo.toml plain version deps → NodeId::Registry
+    // T-101-04: Cargo.toml plain string + table version deps → both UnresolvedRange (ADR 011)
     #[test]
-    fn t101_04_cargo_plain_version_becomes_registry() {
+    fn t101_04_cargo_plain_version_becomes_unresolved() {
         let toml_src = b"[package]\nname = \"mylib\"\nversion = \"0.1.0\"\n\
-            [dependencies]\nserde = \"1.0\"\ntokio = { version = \"1.0\", features = [\"full\"] }\n";
+            [dependencies]\nserde = \"1.0\"\ntokio = { version = \"1\", features = [\"full\"] }\n";
         let tree = tree_from(&[("Cargo.toml", toml_src)]);
         let edges = manifest_edges_from_tree(&tree, Ecosystem::Cargo)
             .expect("T-101-04: must return Ok for valid Cargo.toml");
 
-        // serde = "1.0" is a plain string → UnresolvedRange (version range, not pinned exact).
-        // tokio = { version = "1.0" } → NodeId::Registry (has explicit version key in table).
-        // Find serde edge
-        let serde_edge = edges.iter().find(|e| match e {
-            ManifestEdge::Unresolved(u) => u.name == "serde",
-            ManifestEdge::Resolved(n) => {
-                matches!(n, NodeId::Registry { name, .. } if name == "serde")
-            }
-        });
-        assert!(serde_edge.is_some(), "T-101-04: serde must be present");
+        // Per ADR 011: both string-form ("1.0") and table-form ({ version = "1" }) are
+        // version ranges — neither is a pinned exact identity. Both must be Unresolved.
 
-        // Find tokio edge — it has a table with version key → Resolved
-        let tokio_edge = edges.iter().find(|e| {
-            matches!(e, ManifestEdge::Resolved(NodeId::Registry { name, registry, .. })
-                if name == "tokio" && registry == "crates")
-        });
+        // serde = "1.0" → UnresolvedRange { range: "1.0" }
+        let serde_edge = edges
+            .iter()
+            .find(|e| matches!(e, ManifestEdge::Unresolved(u) if u.name == "serde"));
+        assert!(
+            serde_edge.is_some(),
+            "T-101-04: serde must be present as Unresolved"
+        );
+        if let Some(ManifestEdge::Unresolved(u)) = serde_edge {
+            assert_eq!(
+                u.range, "1.0",
+                "T-101-04: serde range must be verbatim \"1.0\""
+            );
+        }
+
+        // tokio = { version = "1", features = ["full"] } → UnresolvedRange { range: "1" }
+        let tokio_edge = edges
+            .iter()
+            .find(|e| matches!(e, ManifestEdge::Unresolved(u) if u.name == "tokio"));
         assert!(
             tokio_edge.is_some(),
-            "T-101-04: tokio must be Resolved NodeId::Registry with registry=crates"
+            "T-101-04: tokio must be present as Unresolved (not Resolved), got {:?}",
+            edges
         );
-
-        // Verify the version on tokio
-        if let Some(ManifestEdge::Resolved(NodeId::Registry { version, .. })) = tokio_edge {
-            assert_eq!(version, "1.0", "T-101-04: tokio version must be 1.0");
+        if let Some(ManifestEdge::Unresolved(u)) = tokio_edge {
+            assert_eq!(u.range, "1", "T-101-04: tokio range must be verbatim \"1\"");
         }
+
+        // Confirm no Resolved edges exist (ADR 011: only git+rev may be Resolved).
+        let has_resolved = edges.iter().any(|e| matches!(e, ManifestEdge::Resolved(_)));
+        assert!(
+            !has_resolved,
+            "T-101-04: no Resolved edges expected for registry deps (ADR 011), got {:?}",
+            edges
+        );
     }
 
     // T-101-05: Cargo.toml git dep with rev → NodeId::Git
@@ -550,9 +569,10 @@ mod tests {
             1,
             "T-101-10: Cargo hint must return exactly one edge"
         );
+        // Per ADR 011: table-with-version is Unresolved (range = the version string).
         assert!(
-            matches!(&cargo_edges[0], ManifestEdge::Resolved(NodeId::Registry { name, .. }) if name == "serde"),
-            "T-101-10: Cargo edge must be serde, got {:?}",
+            matches!(&cargo_edges[0], ManifestEdge::Unresolved(u) if u.name == "serde"),
+            "T-101-10: Cargo edge must be serde as Unresolved (ADR 011), got {:?}",
             cargo_edges
         );
     }
@@ -573,7 +593,7 @@ mod tests {
         );
     }
 
-    // T-101-12: Cargo git dep without rev → UnresolvedRange
+    // T-101-12: Cargo git dep without rev → UnresolvedRange with git URL as range
     #[test]
     fn t101_12_cargo_git_dep_without_rev_is_unresolved() {
         let toml_src = b"[package]\nname = \"x\"\nversion = \"0.1.0\"\n\
@@ -586,10 +606,10 @@ mod tests {
         match &edges[0] {
             ManifestEdge::Unresolved(u) => {
                 assert_eq!(u.name, "mylib", "T-101-12: name");
-                // The git URL should be the range hint.
-                assert!(
-                    !u.range.is_empty() || u.range.is_empty(), // either way, it's Unresolved
-                    "T-101-12: edge must be Unresolved (no pinned SHA)"
+                // The git URL must be stored verbatim as the range (ADR 011).
+                assert_eq!(
+                    u.range, "https://github.com/example/mylib",
+                    "T-101-12: range must be the exact git URL verbatim"
                 );
             }
             ManifestEdge::Resolved(_) => {
