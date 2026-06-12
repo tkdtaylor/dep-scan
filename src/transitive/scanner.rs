@@ -175,7 +175,7 @@ impl<'a, F: GitTreeFetcher, G: GitTargetResolver, R: RegistryScanner>
             let content_hash = crate::git_tree_content_hash(&tree);
             let _ = self
                 .cache
-                .insert_git(name, &ref_, &result_str, Some(&content_hash));
+                .insert_git(name, &ref_, &result_str, Some(&content_hash), None);
         }
 
         verdict_from_result_str(&result_str)

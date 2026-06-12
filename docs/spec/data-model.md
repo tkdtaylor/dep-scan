@@ -42,6 +42,7 @@ scanned_at           TEXT   no         RFC 3339 UTC timestamp
 content_hash         TEXT   yes        <algo>:<hex> — see Content-hash rules; for git rows: sha256 over the fetched tree (task 097)
 provenance_identity  TEXT   yes        Verified OIDC subject (npm/PyPI) or "sum.golang.org" (Go)
 source_kind          TEXT   yes        "git" for git-sourced rows (task 097); NULL for registry and legacy rows
+subtree_digest       TEXT   yes        sha256:<hex> fingerprint of the (child NodeId, child verdict) set a transitive verdict depended on (task 106); NULL for flat-scan and legacy rows
 ```
 
 - **Identity:** composite primary key `(name, version, registry)`. Git-sourced rows use the slot `registry = "git"` with `version = commit_sha` (task 097); the `"git"` slot does not collide with any `RegistryType` string.
@@ -74,6 +75,7 @@ Migration history:
 - Task 029: added `content_hash TEXT NULL`.
 - Task 032: added `provenance_identity TEXT NULL`.
 - Task 097: added `source_kind TEXT NULL` (`"git"` for git-sourced rows, NULL for registry/legacy rows). Existing registry rows remain valid with no backfill.
+- Task 106: added `subtree_digest TEXT NULL` (ADR 009 Decision 4). A `sha256:<hex>` digest over the sorted, length-framed set of `(child NodeId, child verdict)` pairs a transitive verdict depended on. NULL for flat-scan and legacy rows (no backfill). A cached **transitive** row is a Hit only if **both** the content-hash gate (B-020) **and** the recomputed `subtree_digest` match the stored values; either mismatch → re-scan (fail-closed). NULL `subtree_digest` rows are flat-scan entries — the subtree-digest gate is skipped and the content-hash gate alone applies, preserving pre-106 behaviour.
 
 ---
 
