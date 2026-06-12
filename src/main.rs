@@ -26,7 +26,9 @@ use clap::Parser;
 use serde::Serialize;
 
 use cache::Cache;
-use cli::{Cli, Command, ConfigAction, OutputFormat, SigningAction, resolve_format};
+use cli::{
+    Cli, Command, ConfigAction, OutputFormat, SigningAction, resolve_format, resolve_transitive,
+};
 use config::Config;
 use osv::{OsvClient, OsvQueryContext, registry_to_ecosystem};
 use policy::age::AgePolicy;
@@ -460,8 +462,14 @@ async fn run(cli: Cli) -> Result<i32> {
             lockfile,
             lockfile_type,
             allow_unsigned,
+            transitive,
+            no_transitive,
         } => {
             let effective_format = resolve_format(format, json);
+            // CLI flag overrides config-file value (REQ-107-05).
+            // resolve_transitive returns Some(true/false) when a flag was given,
+            // None when neither flag is present (config file wins).
+            let transitive_override = resolve_transitive(transitive, no_transitive);
             run_check(
                 cli.config.as_deref(),
                 cli.verbose,
@@ -471,6 +479,7 @@ async fn run(cli: Cli) -> Result<i32> {
                 lockfile,
                 lockfile_type,
                 allow_unsigned,
+                transitive_override,
             )
             .await
         }
@@ -784,8 +793,13 @@ async fn run_check(
     lockfile_path: Option<std::path::PathBuf>,
     lockfile_type_str: Option<String>,
     allow_unsigned: bool,
+    transitive_override: Option<bool>,
 ) -> Result<i32> {
-    let config = Config::load(config_path)?;
+    let mut config = Config::load(config_path)?;
+    // REQ-107-05: CLI flag takes precedence over config-file value.
+    if let Some(enabled) = transitive_override {
+        config.transitive.enabled = enabled;
+    }
 
     // Parse registry type early so we can pass it to the validator.
     // (We re-parse below after reading the lockfile; this first parse is for validation only.)
@@ -1756,6 +1770,7 @@ async fn run_install(
         None, // no lockfile
         None, // no lockfile type
         allow_unsigned,
+        None, // no transitive CLI override; config file value is used
     )
     .await?;
 

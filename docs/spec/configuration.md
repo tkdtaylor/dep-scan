@@ -1,7 +1,7 @@
 # Configuration specification
 
 **Status:** Authoritative — code MUST conform.
-**Last updated:** 2026-06-11 (v1.2.1 — [signing] section + DEP_SCAN_OFFLINE, task 087)
+**Last updated:** 2026-06-12 (task 107: [transitive] config block — enabled, max_depth, on_depth_limit, fetch_concurrency, max_total_nodes)
 
 This document specifies how dep-scan resolves its effective configuration
 at runtime: layering order, environment-variable overrides, and the
@@ -82,7 +82,24 @@ allowed_hosts     = []    # if non-empty, ONLY these hosts may be fetched (task 
 denied_hosts      = []    # always rejected; deny wins over allow (task 095)
 fetch_timeout_secs = 30   # hard wall-clock budget for a single VCS fetch (task 096)
 max_blob_bytes    = 52428800  # 50 MiB; larger blobs are skipped, not read into memory (task 096)
+
+[transitive]              # transitive dependency walker (ADR 009, task 107)
+enabled           = false # opt-in; false = flat scan only (non-regressive default)
+max_depth         = 5     # deepest level walked; 0 = root only (children cut)
+on_depth_limit    = "warn"  # verdict floor for cut nodes: "warn" (default) | "block"
+fetch_concurrency = 4     # parallel fetches during the walk; must be ≥ 1
+max_total_nodes   = 5000  # maximum distinct nodes scanned; must be ≥ 1
 ```
+
+> `[transitive]` `enabled = false` (the default) is the **non-regressive posture**: with
+> it, no transitive walk code path is entered and scan output is byte-for-byte
+> identical to a pre-transitive flat scan. Operators opt in by setting
+> `enabled = true` or passing `--transitive` on the CLI (REQ-107-04/05).
+> `fetch_concurrency = 0` and `max_total_nodes = 0` are rejected at config load
+> time (fail-closed: zero concurrency deadlocks the pool; zero node budget fails
+> immediately, which is never useful — REQ-107-03). `max_depth = 0` is accepted:
+> it scans the root only; all direct children trigger `DepthLimitReached` (REQ-107-01).
+> `on_depth_limit` accepts only `"warn"` and `"block"`; any other string is rejected.
 
 > `[vcs]` host lists govern **network egress only**: `file://` URLs and bare
 > local paths open no socket and bypass the lists. Host matching is

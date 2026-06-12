@@ -1,7 +1,7 @@
 # Interfaces
 
 **Project:** dep-scan
-**Last updated:** 2026-06-11 (v1.2.1 — task 087: signing identity — keyless + operator-key offline, resolve_signer)
+**Last updated:** 2026-06-12 (task 107: --transitive / --no-transitive CLI flags + [transitive] config block)
 
 The system's contact surface — everything that calls into the system, everything the system calls out to, and the public traits within the system. Each interface is a stable contract: changes here are breaking changes.
 
@@ -45,6 +45,8 @@ dep-scan check <PACKAGE>... [--registry <NAME>] [--format <FORMAT>]
 | `--lockfile <PATH>` | path | no | Scan every entry in the lockfile |
 | `--lockfile-type <TYPE>` | string | no | Override format detection: `npm` \| `pypi` \| `crates` \| `go` |
 | `--allow-unsigned` | bool | no | Emit interchange output (`osv`/`cyclonedx`/`spdx`/`vex`) **unsigned** — the raw payload with an explicit `"_dep_scan_unsigned": true` marker instead of a DSSE envelope. Never affects `native`/`json` (B-029). |
+| `--transitive` | bool | no | Enable transitive dependency scanning for this invocation, regardless of `[transitive] enabled` in the config file. Mutually exclusive with `--no-transitive` (last flag wins). CLI value takes precedence over config. |
+| `--no-transitive` | bool | no | Disable transitive dependency scanning for this invocation, regardless of `[transitive] enabled` in the config file. Mutually exclusive with `--transitive` (last flag wins). CLI value takes precedence over config. |
 
 ### Subcommand: `install`
 
