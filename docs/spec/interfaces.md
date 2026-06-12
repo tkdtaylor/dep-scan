@@ -1,7 +1,7 @@
 # Interfaces
 
 **Project:** dep-scan
-**Last updated:** 2026-06-12 (task 107: --transitive / --no-transitive CLI flags + [transitive] config block)
+**Last updated:** 2026-06-12 (task 108: transitive scan path wiring — native `Transitive scan:` section + combined `{results, transitive}` JSON shape when transitive is enabled)
 
 The system's contact surface — everything that calls into the system, everything the system calls out to, and the public traits within the system. Each interface is a stable contract: changes here are breaking changes.
 
@@ -127,6 +127,30 @@ Header columns: exactly `Package`, `Version`, `Age`, `Result` in that order. Per
 ```
 
 Per-policy and aggregate `result` values are exactly one of `"pass"`, `"warn"`, `"block"`. The aggregate `reason` mirrors the worst-case policy's reason (any `block` first, then any `warn`, else `null`).
+
+#### Transitive JSON shape (B-108)
+
+When transitive scanning is **enabled** (`[transitive] enabled = true` or `--transitive`), the `--format json` payload is a two-key object carrying both the flat results and the transitive outcome; the bare results array is preserved unchanged when transitive is disabled (byte-for-byte non-regression, REQ-108-01):
+
+```json
+{
+  "results": [ /* the flat per-package results above */ ],
+  "transitive": {
+    "worst_verdict": "block",
+    "diagnostics": [
+      { "kind": "DepthLimitReached", "node": "registry:npm/deep@1.0.0", "depth": 6 },
+      { "kind": "CycleDetected", "from": "registry:npm/a@1.0", "to": "registry:npm/b@1.0" },
+      { "kind": "NodeBudgetExceeded", "count": 5001, "limit": 5000 },
+      { "kind": "UnresolvedRange", "from": "git:dep@<sha>", "name": "express", "range": "^4.18.0" }
+    ],
+    "nodes": [
+      { "node": "git:malicious-subtree@<sha>", "depth": 0, "verdict": "block" }
+    ]
+  }
+}
+```
+
+Native (`--format native`) appends a `Transitive scan:` section after the flat table with one row per scanned transitive node (`<node-id> depth <n> <verdict>`) followed by one line per diagnostic. The transitive worst verdict raises the exit code exactly like a flat failure (Warn/Block ⇒ exit ≥ 1).
 
 ### Verbose audit log
 

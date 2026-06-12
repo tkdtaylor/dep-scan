@@ -845,6 +845,12 @@ async fn run_check(
         .map(|name| (PackageRef::from_cli(name), None))
         .collect();
     let mut lockfile_registry = None;
+    // Task 108 (ADR 009): when transitive scanning is enabled, capture the npm
+    // dependency *graph* (edges between resolved entries) from the lockfile so
+    // the transitive walker can traverse it. Parsed only when the feature is on,
+    // so the disabled (flat-scan) path reads exactly the same bytes as before
+    // (REQ-108-01 byte-for-byte non-regression).
+    let mut transitive_graph: Option<lockfile::DependencyGraph> = None;
     if let Some(ref lf_path) = lockfile_path {
         let format = lockfile_type_str
             .as_deref()
@@ -857,6 +863,18 @@ async fn run_check(
         for dep in deps {
             let pkg_ref = PackageRef::from_lockfile_dep(dep.name, dep.version);
             all_packages.push((pkg_ref, Some(dep.source)));
+        }
+        // Build the registry dependency graph (npm package-lock.json only — the
+        // one ecosystem whose lockfile encodes resolved edges, task 100). Other
+        // lockfile formats fall back to an empty graph: their direct deps are
+        // still walked as roots, and any git sub-trees are discovered via
+        // manifests during the walk.
+        if config.transitive.enabled
+            && lockfile_registry == Some(RegistryType::Npm)
+            && let Ok(content) = std::fs::read_to_string(lf_path)
+            && let Ok(graph) = lockfile::package_lock_json_to_graph(&content)
+        {
+            transitive_graph = Some(graph);
         }
     }
 
@@ -1584,6 +1602,58 @@ async fn run_check(
         });
     }
 
+    // Task 108 (ADR 009 capstone): transitive scan, gated on
+    // `[transitive].enabled`. When disabled, this entire block is skipped and the
+    // flat output below is byte-for-byte what it was pre-108 (REQ-108-01). When
+    // enabled, the walker traverses the dependency graph from each direct dep,
+    // fetches + scans git sub-trees, and rolls up the worst verdict + diagnostics.
+    let transitive_outcome: Option<transitive::scan::TransitiveOutcome> = if config
+        .transitive
+        .enabled
+    {
+        // Map each direct dependency to its cache-identity NodeId + source.
+        let roots: Vec<(lockfile::NodeId, Option<lockfile::DependencySource>)> = all_packages
+            .iter()
+            .map(|(pkg_ref, source)| {
+                let node = match source {
+                    Some(lockfile::DependencySource::Git { ref_, .. }) => lockfile::NodeId::Git {
+                        name: pkg_ref.name.clone(),
+                        commit_sha: ref_.clone(),
+                    },
+                    _ => lockfile::NodeId::Registry {
+                        name: pkg_ref.name.clone(),
+                        version: pkg_ref.version.clone().unwrap_or_default(),
+                        registry: reg_type.to_string(),
+                    },
+                };
+                (node, source.clone())
+            })
+            .collect();
+        // Reuse the flat-scan verdicts for registry nodes (no re-scan).
+        let flat_verdicts: Vec<(String, String)> = results
+            .iter()
+            .map(|r| (r.package.clone(), r.result.clone()))
+            .collect();
+        let fetcher = vcs::fetch::VcsFetcher::from_config(&config);
+        let inputs = transitive::scan::TransitiveScanInputs {
+            graph: transitive_graph.unwrap_or_default(),
+            roots,
+            flat_verdicts,
+            cache: &cache,
+            policies: &policies,
+            config: &config.transitive,
+        };
+        let outcome = transitive::scan::run_transitive_scan(inputs, &fetcher);
+        // A transitive Warn/Block (or a node-budget breach) fails the scan
+        // closed — it raises the exit code exactly like a flat failure.
+        if outcome.is_failure() {
+            has_failure = true;
+        }
+        Some(outcome)
+    } else {
+        None
+    };
+
     // Output results
     match output_format {
         OutputFormat::Native => {
@@ -1591,7 +1661,16 @@ async fn run_check(
             // so the exact bytes can be asserted in a test (T-098-13) without
             // spawning the binary.  `render_native` already terminates each line
             // with a newline, so `print!` (not `println!`) avoids a double blank.
+            //
+            // REQ-108-04: the transitive section reuses `render_native`'s output
+            // for the flat table and appends its own section via the pure
+            // `render_native_section` helper — no flat-table rendering is
+            // duplicated. When transitive is disabled, `transitive_outcome` is
+            // None and not a single extra byte is emitted (REQ-108-01).
             print!("{}", render_native(&results));
+            if let Some(outcome) = &transitive_outcome {
+                print!("{}", outcome.render_native_section());
+            }
         }
         // Json + interchange formats (osv/cyclonedx/spdx/vex) are produced by
         // the pure dispatcher below.  Json is rendered raw (never signed);
@@ -1599,6 +1678,22 @@ async fn run_check(
         // operation per run) unless `--allow-unsigned` is set.  Building the
         // output BEFORE writing anything to stdout means a signing failure
         // returns Err and nothing is printed (REQ-086-05 / T-086-17).
+        // REQ-108-03/11: when transitive scanning is enabled, the `--format json`
+        // payload carries both the flat results AND the transitive outcome
+        // (verdict + diagnostics + node rows) as one valid JSON object. The
+        // bare-array shape is preserved exactly when transitive is disabled
+        // (transitive_outcome is None), so the flat JSON path is unchanged
+        // (REQ-108-01). Json is never signed (ADR 006 Q8), so this bypasses the
+        // signer dispatcher entirely.
+        OutputFormat::Json if transitive_outcome.is_some() => {
+            let combined = serde_json::json!({
+                "results": &results,
+                "transitive": transitive_outcome.as_ref().unwrap(),
+            });
+            let out = serde_json::to_string_pretty(&combined)
+                .context("Failed to serialize combined transitive results to JSON")?;
+            println!("{out}");
+        }
         OutputFormat::Json
         | OutputFormat::Osv
         | OutputFormat::CycloneDx
