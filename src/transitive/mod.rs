@@ -11,7 +11,9 @@
 //! `aggregate_results`) is task 104; this task only previews the fail-closed
 //! floors at the edges (depth limit / unresolved range → parent ≥ `Warn`).
 
+pub mod budget;
 pub mod engine;
+pub mod pool;
 pub mod providers;
 pub mod rollup;
 pub mod scanner;
