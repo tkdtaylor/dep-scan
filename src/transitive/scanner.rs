@@ -27,11 +27,25 @@
 //! visited set guarantees `scan` is called at most once per node, and the cache
 //! decision short-circuits a pinned re-scan before any fetch.
 
+use std::cell::RefCell;
+
 use crate::lockfile::NodeId;
 use crate::policy::Policy;
 use crate::policy::mutable_ref::{RefKind, classify_ref};
 use crate::transitive::engine::{NodeScanner, Verdict};
 use crate::{GitCacheAction, GitTreeFetcher, decide_git_cache_action};
+
+/// The reason a git node was floored to `Warn` without a policy verdict, recorded
+/// for the operator-facing `Unfetchable` diagnostic (SEC-003). A git node whose
+/// origin cannot be resolved or whose fetch fails produces a bare `warn` row; this
+/// records *why* so the orchestration can surface a [`crate::transitive::engine::Diagnostic::Unfetchable`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnfetchableNode {
+    /// The git node that could not be fetched/resolved.
+    pub node: NodeId,
+    /// A short reason (`"unknown origin"` / `"fetch failed"`).
+    pub reason: String,
+}
 
 /// The fetch coordinates for a git [`NodeId`].
 ///
@@ -107,6 +121,11 @@ pub struct TransitiveNodeScanner<'a, F: GitTreeFetcher, G: GitTargetResolver, R:
     policies: &'a [Box<dyn Policy>],
     git_targets: &'a G,
     registry_scanner: &'a R,
+    /// Records each git node floored to `Warn` because it could not be
+    /// fetched/resolved, so the orchestration can surface the `Unfetchable`
+    /// diagnostic (SEC-003). Interior mutability because `scan(&self)` is the
+    /// trait shape; the walk is single-threaded so a `RefCell` suffices.
+    unfetchable: RefCell<Vec<UnfetchableNode>>,
 }
 
 #[allow(dead_code)] // constructed by task 108 entry-point wiring
@@ -127,6 +146,30 @@ impl<'a, F: GitTreeFetcher, G: GitTargetResolver, R: RegistryScanner>
             policies,
             git_targets,
             registry_scanner,
+            unfetchable: RefCell::new(Vec::new()),
+        }
+    }
+
+    /// Drain the unfetchable git nodes recorded so far (SEC-003). The
+    /// orchestration calls this after the walk to project each into a
+    /// [`crate::transitive::engine::Diagnostic::Unfetchable`]. Draining (rather
+    /// than cloning) keeps the recording idempotent across the multiple
+    /// scan passes the orchestration runs (walk + node-row + digest passes).
+    pub fn take_unfetchable(&self) -> Vec<UnfetchableNode> {
+        std::mem::take(&mut self.unfetchable.borrow_mut())
+    }
+
+    /// Record a git node that was floored to `Warn` without a policy verdict,
+    /// deduplicating on the full `(node, reason)` so repeated scan passes over
+    /// the same node add at most one diagnostic.
+    fn record_unfetchable(&self, node: &NodeId, reason: &str) {
+        let entry = UnfetchableNode {
+            node: node.clone(),
+            reason: reason.to_string(),
+        };
+        let mut sink = self.unfetchable.borrow_mut();
+        if !sink.contains(&entry) {
+            sink.push(entry);
         }
     }
 
@@ -134,11 +177,13 @@ impl<'a, F: GitTreeFetcher, G: GitTargetResolver, R: RegistryScanner>
     /// classify_ref-gated cache write. Mirrors the flat git arm in `run_check`
     /// and the `scan_git_dep_once` harness exactly, so a passing transitive walk
     /// reflects real git-arm behaviour (REQ-103-03).
-    fn scan_git(&self, name: &str, commit_sha: &str) -> Verdict {
+    fn scan_git(&self, node: &NodeId, name: &str, commit_sha: &str) -> Verdict {
         // The ref a git NodeId carries IS its commit_sha (cache identity); the
         // URL is resolved from the introducing edge's provenance.
         let Some(target) = self.git_targets.resolve(name, commit_sha) else {
             // Unknown origin: cannot fetch → unscannable → fail closed to Warn.
+            // Record the reason so the operator sees WHY (SEC-003).
+            self.record_unfetchable(node, "unknown origin");
             return Verdict::Warn;
         };
         let ref_ = target.ref_;
@@ -164,7 +209,11 @@ impl<'a, F: GitTreeFetcher, G: GitTargetResolver, R: RegistryScanner>
         let tree = match self.fetcher.fetch_tree(&target.url, &ref_) {
             Ok(tree) => tree,
             // Fetch failure is unscannable → fail closed to ≥ Warn (ADR 008/009).
-            Err(_) => return Verdict::Warn,
+            // Record the reason so the operator sees WHY (SEC-003).
+            Err(_) => {
+                self.record_unfetchable(node, "fetch failed");
+                return Verdict::Warn;
+            }
         };
         let details = crate::run_git_tree_policies(&tree, &target.url, name, &ref_, self.policies);
         let (result_str, _reason) = crate::policy::aggregate_results(&details);
@@ -187,7 +236,7 @@ impl<F: GitTreeFetcher, G: GitTargetResolver, R: RegistryScanner> NodeScanner
 {
     fn scan(&self, node: &NodeId) -> Verdict {
         match node {
-            NodeId::Git { name, commit_sha } => self.scan_git(name, commit_sha),
+            NodeId::Git { name, commit_sha } => self.scan_git(node, name, commit_sha),
             NodeId::Registry {
                 name,
                 version,

@@ -16,4 +16,5 @@ pub mod engine;
 pub mod pool;
 pub mod providers;
 pub mod rollup;
+pub mod scan;
 pub mod scanner;

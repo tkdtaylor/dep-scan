@@ -215,6 +215,10 @@ impl FetchedTree {
 /// (REQ-096-02): nothing in config load or lockfile parse constructs one.
 ///
 /// [`fetch`]: VcsFetcher::fetch
+///
+/// `Clone` is a cheap `Arc` bump of the shared config; the transitive scan
+/// (task 108) clones the fetcher into the bounded fetch pool's worker threads.
+#[derive(Clone)]
 pub struct VcsFetcher {
     config: Arc<Config>,
 }
