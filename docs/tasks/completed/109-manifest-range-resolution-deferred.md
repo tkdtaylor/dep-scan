@@ -3,7 +3,7 @@
 **Status:** DEFERRED — backlog stub only
 **Depends on:** 103 (walker integration — UnresolvedRange diagnostics already
                emitted there; this task optionally resolves them)
-**ADR:** 009 (piece 8 — explicitly deferred, lowest priority)
+**ADR:** 009 — [`docs/architecture/decisions/009-transitive-resolution.md`](../../architecture/decisions/009-transitive-resolution.md) (piece 8 — explicitly deferred, lowest priority)
 **Scope:** large (estimated); lowest priority in the transitive epic
 **Priority:** LOWEST — do not start without completing a semver-crate-choice ADR
 
