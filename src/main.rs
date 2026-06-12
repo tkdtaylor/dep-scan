@@ -10,6 +10,7 @@ mod sbom;
 mod signed_note;
 mod signing_export;
 mod sigstore_verify;
+mod transitive;
 mod types;
 mod typosquat;
 mod validation;
