@@ -249,18 +249,25 @@ impl<E: EdgeProvider, S: NodeScanner> WalkState<'_, E, S> {
     /// is only ever called for a node that is neither on the current path nor
     /// already visited.
     fn visit(&mut self, node: &NodeId, depth: usize) -> Verdict {
-        // Scan this node and seed its verdict. Mark visited + on-path before
-        // descending so children see this node for cycle/dedup checks.
-        let mut verdict = self.scanner.scan(node);
+        // Scan this node and seed its own contribution. Mark visited + on-path
+        // before descending so children see this node for cycle/dedup checks.
+        let own = self.scanner.scan(node);
         self.visited.insert(node.clone());
-        self.verdicts.insert(node.clone(), verdict);
+        self.verdicts.insert(node.clone(), own);
         self.path.insert(node.clone());
 
-        // Resolve this node's edges. An UnresolvedRange floors the parent.
+        // Post-order rollup (task 104, REQ-104-02): collect this node's own scan
+        // verdict and every child/floor contribution, then fold them together
+        // ONCE through the shared worst-verdict-wins combiner. Children are
+        // visited (and their verdicts fully computed) before this fold runs.
+        let mut contributions = vec![own];
+
+        // Resolve this node's edges. An UnresolvedRange floors the parent at
+        // Warn (REQ-104-03); a resolved edge contributes the child's rollup.
         match self.edges.edges_for(node) {
             Ok(children) => {
                 for child in &children {
-                    verdict = verdict.max(self.descend(node, child, depth));
+                    contributions.push(self.descend(node, child, depth));
                 }
             }
             Err(EdgeError::UnresolvedRange { name, range }) => {
@@ -269,9 +276,13 @@ impl<E: EdgeProvider, S: NodeScanner> WalkState<'_, E, S> {
                     name,
                     range,
                 });
-                verdict = verdict.max(Verdict::Warn);
+                contributions.push(Verdict::Warn);
             }
         }
+
+        // Single rollup point: reuse aggregate_results via combine_verdicts
+        // (REQ-104-01) — no worst-verdict comparison logic lives in the engine.
+        let verdict = crate::transitive::rollup::combine_verdicts(&contributions);
 
         self.path.remove(node);
         // Record the final rolled-up verdict for any later diamond re-visit.
