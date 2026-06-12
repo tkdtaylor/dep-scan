@@ -39,6 +39,16 @@ pub struct ScanContext {
     pub vulnerabilities: Vec<VulnerabilityInfo>,
     /// Install scripts found in the package.
     pub install_scripts: Vec<InstallScript>,
+    /// Non-install source files available for static inspection (task 098).
+    ///
+    /// Populated by [`ScanContext::from_fetched_tree`] from the *non-install-hook*
+    /// files of a fetched git tree (`name` = the file's path relative to the fetch
+    /// root, `content` = the file's bytes decoded lossily as UTF-8). Empty for
+    /// registry-sourced dependencies, whose enrichment comes from registry
+    /// metadata rather than a materialised source tree. The `ObfuscationPolicy`
+    /// scans these in addition to `install_scripts` so that obfuscated payloads in
+    /// ordinary source files of a git dependency are still detected.
+    pub source_files: Vec<InstallScript>,
     /// Previous maintainers, if maintainer history is available.
     pub previous_maintainers: Option<Vec<String>>,
     /// Git source information for git-sourced dependencies (task 094).
@@ -90,6 +100,7 @@ impl ScanContext {
             metadata,
             vulnerabilities: Vec::new(),
             install_scripts: Vec::new(),
+            source_files: Vec::new(),
             previous_maintainers: None,
             git_source: None,
             npm_attestations: None,
@@ -100,6 +111,96 @@ impl ScanContext {
             go_sumdb_result: None,
         }
     }
+
+    /// Build a `ScanContext` from the materialised files of a fetched git tree
+    /// (task 098 — ADR 008 piece 2).
+    ///
+    /// Each file is classified by its path:
+    /// - **install-hook files** (see [`is_install_hook_path`]) are placed in
+    ///   `install_scripts` so the `InstallScriptPolicy` inspects them exactly as
+    ///   it inspects registry-declared `preinstall`/`install`/`postinstall`
+    ///   hooks;
+    /// - **every other file** is placed in `source_files`, which the
+    ///   `ObfuscationPolicy` additionally scans.
+    ///
+    /// In both cases the `InstallScript.name` is the file's path **relative to the
+    /// fetch root** (e.g. `scripts/preinstall.js`) so any policy verdict naming the
+    /// script points the operator at the offending file (REQ-098-05).
+    ///
+    /// Security (REQ-098-01 / T-098-02): this constructor performs **static
+    /// analysis only**. It never executes, spawns, sources, or otherwise runs any
+    /// file in the tree — it only reads each blob's already-materialised bytes and
+    /// decodes them lossily to UTF-8 for pattern matching. The tree itself was
+    /// fetched into a read-only sandbox with hooks/filters/submodules structurally
+    /// unreachable (task 096); this step adds no new execution surface.
+    ///
+    /// The resulting context carries empty registry-enrichment fields and a
+    /// placeholder `metadata` (name/version derived by the caller). It is the
+    /// caller's responsibility to set `git_source` so the registry-only policies
+    /// (age, typosquatting, dependency-confusion, maintainer-change) recognise the
+    /// dependency as git-sourced and return `Pass` rather than acting on absent
+    /// registry fields (REQ-098-03).
+    pub fn from_fetched_tree(tree: &crate::vcs::fetch::FetchedTree) -> Self {
+        let mut install_scripts = Vec::new();
+        let mut source_files = Vec::new();
+        for file in tree.files() {
+            let rel_path = file.path().to_string_lossy().replace('\\', "/");
+            // Lossy decode: never execute, only read bytes for static scanning.
+            let content = String::from_utf8_lossy(file.content()).into_owned();
+            let entry = InstallScript {
+                name: rel_path.clone(),
+                content,
+            };
+            if is_install_hook_path(&rel_path) {
+                install_scripts.push(entry);
+            } else {
+                source_files.push(entry);
+            }
+        }
+        let mut ctx = Self::from_metadata(PackageMetadata {
+            name: String::new(),
+            version: String::new(),
+            description: None,
+            published_at: None,
+            maintainers: Vec::new(),
+            downloads: None,
+            repository_url: None,
+            content_hash: None,
+        });
+        ctx.install_scripts = install_scripts;
+        ctx.source_files = source_files;
+        ctx
+    }
+}
+
+/// Whether a tree-relative path names an install-time hook script.
+///
+/// Mirrors how the registry path identifies install scripts (npm's
+/// `preinstall`/`install`/`postinstall` hooks — see `registry::npm`), extended to
+/// the standalone files those hooks reference in a source tree. A path is an
+/// install hook when the **file stem** (the basename with a single trailing
+/// extension removed) is one of `preinstall`, `install`, or `postinstall`
+/// (so `scripts/preinstall.js`, `install`, and `postinstall.sh` all match), or
+/// when the **basename** is exactly `binding.gyp` (the node-gyp build descriptor
+/// run at install time). Matching is case-insensitive on the stem.
+///
+/// This is a pure path predicate: it inspects only the path string and never
+/// reads or executes the file.
+pub fn is_install_hook_path(rel_path: &str) -> bool {
+    // Basename: the final `/`-separated segment.
+    let basename = rel_path.rsplit('/').next().unwrap_or(rel_path);
+    if basename.eq_ignore_ascii_case("binding.gyp") {
+        return true;
+    }
+    // Stem: basename with a single trailing `.ext` removed (if any).
+    let stem = match basename.rsplit_once('.') {
+        Some((stem, _ext)) => stem,
+        None => basename,
+    };
+    matches!(
+        stem.to_ascii_lowercase().as_str(),
+        "preinstall" | "install" | "postinstall"
+    )
 }
 
 /// Metadata about a package retrieved from a registry.
@@ -289,6 +390,7 @@ mod tests {
                 name: "postinstall".to_string(),
                 content: "echo hello".to_string(),
             }],
+            source_files: vec![],
             previous_maintainers: Some(vec!["old-maintainer".to_string()]),
             git_source: None,
             npm_attestations: None,

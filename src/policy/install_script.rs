@@ -256,6 +256,7 @@ mod tests {
             metadata: meta,
             vulnerabilities: vec![],
             install_scripts: scripts,
+            source_files: vec![],
             previous_maintainers: None,
             git_source: None,
             npm_attestations: None,

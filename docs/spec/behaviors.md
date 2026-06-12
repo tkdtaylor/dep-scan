@@ -1,7 +1,7 @@
 # Behaviors
 
 **Project:** dep-scan
-**Last updated:** 2026-06-11 (v1.2.1 — B-097: git-source cache integration, task 097)
+**Last updated:** 2026-06-11 (v1.2.2 — B-098: policy pipeline on fetched git trees, task 098)
 
 What the system does, observably. Each behavior describes a triggering condition, the system's response, and any externally-visible side effects. This is the "you can verify this from outside the process" view.
 
@@ -251,6 +251,17 @@ For each DSSE-signed attestation bundle, the following steps run in order in [`s
 - **Side effects:** SQLite INSERT OR REPLACE keyed `(name, commit_sha, "git")` with `source_kind = "git"`, pinned refs only.
 - **References:** [ADR 008 § Piece 2 cache resolution](../architecture/decisions/008-git-vcs-dependency-handling.md), B-020, B-023, B-096, tasks 094 / 096 / 097.
 
+### B-098: Policy pipeline on fetched git trees
+
+- **Trigger:** The git-dep scan arm fetches a tree (B-096) on a cache miss / mutable ref (B-097).
+- **Context construction:** `ScanContext::from_fetched_tree(&tree)` classifies every materialised file by path: a file whose basename stem is `preinstall`/`install`/`postinstall`, or whose basename is exactly `binding.gyp`, becomes an `install_scripts` entry; **every other file** becomes a `source_files` entry. In both, the entry `name` is the file's path **relative to the fetch root** so a verdict naming the file points the operator at it (REQ-098-05). The builder performs **static analysis only** — it reads each blob's already-materialised bytes (decoded lossily to UTF-8) and **never executes** any file (REQ-098-01, T-098-02). The caller sets `metadata.{name,version}` to the dep name/ref and `git_source = Some((url, ref))`.
+- **Pipeline:** The arm runs the mutable-ref policy plus the **same enabled policy set** the registry path uses (T-098-09), then aggregates **worst-verdict-wins** (T-098-08), identical to B-004.
+  - `install_scripts` (B-007) fires on dangerous patterns in install-hook files; `obfuscation` (B-008) additionally scans `source_files`, so an obfuscated payload in an ordinary source file of a git dep is still caught (T-098-06).
+  - **Registry-only policies return `Pass` for git deps** — `age`, `typosquatting`, `dependency_confusion`, and `maintainer_change` short-circuit to `Pass` when `git_source.is_some()`, because a git dep has no registry publish date, registry name to compare, or maintainer history (REQ-098-03, T-098-14/15). `popularity`, `vulnerability`, and the provenance/sumdb policies already `Pass` on their absent enrichment fields.
+- **Cache hit skips the pipeline:** A verified pinned-SHA cache hit (B-097) reuses the stored verdict **without fetching or running any policy** (T-098-10).
+- **Output:** Each evaluated policy contributes a `PolicyDetail`; both `--format native` and `--format json` surface the git-dep verdict and the tree-relative path in the message (T-098-12/13).
+- **References:** [ADR 008 § Piece 2](../architecture/decisions/008-git-vcs-dependency-handling.md), B-004, B-007, B-008, B-096, B-097, task 098.
+
 ---
 
 ## Output behaviors
@@ -347,8 +358,8 @@ For each DSSE-signed attestation bundle, the following steps run in order in [`s
 ### B-031: Git-sourced dependency visibility in scan output
 
 - **Trigger:** A lockfile entry with `DependencySource::Git` (url + ref) enters the scan loop.
-- **Response:** The scan loop's dedicated git-dep arm runs the mutable-ref policy (B-094) and then **attempts a sandboxed VCS fetch** (B-096, task 096). It produces a `CheckResult` with `version = <ref>`, `registry = "git"`, and a `reason` message containing the URL and ref. No registry client is ever contacted for a git dep.
-- **Verdict contract:** The verdict is **never** `Pass` unless the fetch succeeded *and* the mutable-ref policy passed (pinned full SHA). If the fetch fails, times out, or is blocked by host policy, the verdict fails closed to at least `Warn` (or `Block` when `mutable_git_ref = "block"`), even for a pinned SHA — an unfetchable dep is not safe (ADR 003 / ADR 008, T-096-15). Running the policy *pipeline* over the fetched tree is task 098; until then a successfully fetched dep is materialised but reported as "not yet scanned."
+- **Response:** The scan loop's dedicated git-dep arm runs the mutable-ref policy (B-094), **attempts a sandboxed VCS fetch** (B-096, task 096), and on a successful fetch runs the **full policy pipeline** over the fetched tree (B-098, task 098). It produces a `CheckResult` with `version = <ref>`, `registry = "git"`, a `reason` message containing the URL and ref, and one `PolicyDetail` per policy evaluated. No registry client is ever contacted for a git dep.
+- **Verdict contract:** The verdict is **never** `Pass` unless the fetch succeeded *and* every policy passed. A fetch that fails, times out, or is blocked by host policy fails closed to at least `Warn` (or `Block` when `mutable_git_ref = "block"`), even for a pinned SHA — an unfetchable dep is not safe (ADR 003 / ADR 008, T-096-15). On a successful fetch the aggregate is worst-verdict-wins across all policies (B-098).
 - **Output formats:** Both `--format native` (human-readable table) and `--format json` include a row/element for each git dep with its verdict and message. The ref appears in the version column.
 - **Exit code:** Non-zero (exit 1) when at least one git dep yields a `Warn`/`Block`.
 - **Registry deps:** Completely unaffected — `DependencySource::Registry` deps continue to route to registry clients as before.

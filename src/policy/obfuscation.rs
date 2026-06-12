@@ -129,7 +129,13 @@ impl Policy for ObfuscationPolicy {
     }
 
     fn evaluate(&self, ctx: &ScanContext) -> PolicyResult {
-        if ctx.install_scripts.is_empty() {
+        // Obfuscation hides in any code, not just install hooks. For registry deps
+        // `source_files` is empty, so this scans only install scripts (unchanged
+        // behaviour); for git deps (task 098) the materialised non-install source
+        // files are scanned too, so obfuscated payloads outside install hooks are
+        // still caught. Each entry's `name` is its tree-relative path, so the
+        // verdict message points at the offending file (REQ-098-05).
+        if ctx.install_scripts.is_empty() && ctx.source_files.is_empty() {
             return PolicyResult::Pass;
         }
 
@@ -137,7 +143,7 @@ impl Policy for ObfuscationPolicy {
         let mut worst_severity: Option<Severity> = None;
         let mut worst_message: Option<String> = None;
 
-        for script in &ctx.install_scripts {
+        for script in ctx.install_scripts.iter().chain(ctx.source_files.iter()) {
             // Cap the scanned content to SCRIPT_SCAN_CAP_BYTES at a valid UTF-8
             // boundary to bound worst-case scan time.
             let raw = script.content.as_bytes();
@@ -208,6 +214,7 @@ mod tests {
             metadata: meta,
             vulnerabilities: vec![],
             install_scripts: scripts,
+            source_files: vec![],
             previous_maintainers: None,
             git_source: None,
             npm_attestations: None,
