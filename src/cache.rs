@@ -30,6 +30,95 @@ pub struct CacheEntry {
     ///   - `Some("git")` for git-sourced rows keyed `(name, commit_sha, "git")`,
     ///   - `None` for registry-sourced rows and every legacy/pre-097 row.
     pub source_kind: Option<String>,
+    /// Subtree-state fingerprint (task 106, ADR 009 Decision 4):
+    /// a `sha256:<hex>` digest over the sorted, length-framed set of
+    /// `(child_NodeId_string, child_verdict_string)` pairs the parent's verdict
+    /// depended on.
+    ///
+    /// `None` for:
+    ///   - every legacy/pre-106 row (the column reads back NULL — no backfill),
+    ///   - flat-scan rows that recorded no transitive children (the
+    ///     subtree-digest gate is skipped for these; only the content-hash gate
+    ///     applies — see [`subtree_digest_valid`]).
+    ///
+    /// `Some(_)` for transitive rows, including the deterministic
+    /// empty-child-set digest (a leaf scanned transitively).
+    pub subtree_digest: Option<String>,
+}
+
+/// Compute the task-106 subtree digest (ADR 009 Decision 4) over a set of
+/// `(child_NodeId_string, child_verdict_string)` pairs.
+///
+/// The digest is a `sha256:<hex>` fingerprint of the subtree state the parent's
+/// verdict was computed against. Inputs are taken pre-stringified so this lives
+/// in `cache.rs` without depending on the transitive `NodeId`/`Verdict` types
+/// (the wiring layer, task 108, stringifies them).
+///
+/// Algorithm (mirrors the `git_tree_content_hash` framing discipline in
+/// `src/main.rs:152`, REQ-106-02):
+///
+/// 1. Sort the pairs lexicographically by the NodeId string (deterministic, so
+///    insertion order does not change the digest — T-106-06).
+/// 2. For each sorted pair, feed the hasher, in order: the 8-byte little-endian
+///    `node_id` length frame, the `node_id` bytes, the 8-byte little-endian
+///    `verdict` length frame, then the `verdict` bytes. Explicit length framing
+///    means no two distinct pair-sets can collide by concatenation (e.g.
+///    `("ab","c")` cannot alias `("a","bc")`).
+/// 3. Format the finalized hash as `sha256:<hex>`.
+///
+/// An empty child set hashes the empty input to a deterministic, non-NULL digest
+/// (T-106-07): every leaf scanned transitively produces the same value.
+///
+/// Wired into the live scan path by task 108 (main.rs wiring); suppressed until
+/// then per the project dead-code convention (cf. tasks 100/102).
+#[allow(dead_code)]
+pub fn compute_subtree_digest(children: &[(&str, &str)]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut pairs: Vec<(&str, &str)> = children.to_vec();
+    // Deterministic order — sort on the NodeId string, then the verdict string
+    // as a tiebreaker so a fixed input always yields a fixed digest.
+    pairs.sort_unstable();
+    let mut hasher = Sha256::new();
+    for (node_id, verdict) in pairs {
+        let nid = node_id.as_bytes();
+        let vrd = verdict.as_bytes();
+        hasher.update((nid.len() as u64).to_le_bytes());
+        hasher.update(nid);
+        hasher.update((vrd.len() as u64).to_le_bytes());
+        hasher.update(vrd);
+    }
+    format!("sha256:{:x}", hasher.finalize())
+}
+
+/// Task-106 subtree-digest gate (ADR 009 Decision 4, REQ-106-03 / REQ-106-05).
+///
+/// Returns `true` iff the subtree-digest gate is *satisfied* — meaning a cached
+/// transitive row may be served (subject also to the separate task-030
+/// content-hash gate, which the caller checks alongside this; **both** must pass
+/// for a Hit).
+///
+/// Fail-closed rules:
+///   - `stored = None` (flat-scan / legacy row): the row carries no transitive
+///     context, so the subtree-digest gate does not apply and returns `true`.
+///     The content-hash gate is the sole guard for these rows (REQ-106-05).
+///   - `stored = Some(s)`: the row is transitive. The gate passes **only** if a
+///     `recomputed` digest is present and byte-equal to `s`. A `recomputed`
+///     of `None` (children could not be re-fingerprinted — e.g. a mutable-ref
+///     child that is never cached, T-106-15) fails the gate → Miss → re-scan.
+///     A differing `recomputed` (a child's verdict changed, T-106-09/11) fails
+///     the gate → Miss → re-scan. A stale `Pass` is never served.
+///
+/// Wired into the live cache-lookup path by task 108; suppressed until then per
+/// the project dead-code convention.
+#[allow(dead_code)]
+pub fn subtree_digest_valid(stored: Option<&str>, recomputed: Option<&str>) -> bool {
+    match stored {
+        // Flat-scan / legacy row: subtree-digest gate skipped (content-hash gate
+        // still applies at the call site).
+        None => true,
+        // Transitive row: fail-closed — must have a recomputed digest that matches.
+        Some(s) => recomputed == Some(s),
+    }
 }
 
 /// Local SQLite cache for storing scan results so already-scanned packages
@@ -169,6 +258,20 @@ impl Cache {
             conn.execute_batch("ALTER TABLE scanned_packages ADD COLUMN source_kind TEXT;")?;
         }
 
+        // Additive migration (task 106, ADR 009 Decision 4): add subtree_digest.
+        //
+        // Binds a cached transitive verdict to the fingerprint of the child
+        // verdicts it depended on (`compute_subtree_digest`).  Additive and
+        // nullable, exactly like the content_hash / provenance_identity /
+        // source_kind migrations above: the column is only added when absent
+        // (idempotent — T-106-02), legacy and registry/flat-scan rows read back
+        // NULL with no backfill (T-106-03/04), and a NULL value means "no
+        // transitive context recorded" so only the content-hash gate applies for
+        // that row (REQ-106-05).
+        if !existing_columns.iter().any(|n| n == "subtree_digest") {
+            conn.execute_batch("ALTER TABLE scanned_packages ADD COLUMN subtree_digest TEXT;")?;
+        }
+
         Ok(Self { conn })
     }
 
@@ -183,7 +286,8 @@ impl Cache {
     /// Returns `None` if no entry exists for the given key.
     pub fn lookup(&self, name: &str, version: &str, registry: &str) -> Result<Option<CacheEntry>> {
         let mut stmt = self.conn.prepare(
-            "SELECT result, scanned_at, content_hash, provenance_identity, source_kind
+            "SELECT result, scanned_at, content_hash, provenance_identity, source_kind,
+                    subtree_digest
              FROM scanned_packages
              WHERE name = ?1 AND version = ?2 AND registry = ?3",
         )?;
@@ -195,6 +299,7 @@ impl Cache {
                 content_hash: row.get(2)?,
                 provenance_identity: row.get(3)?,
                 source_kind: row.get(4)?,
+                subtree_digest: row.get(5)?,
             })
         })?;
 
@@ -214,6 +319,16 @@ impl Cache {
     ///
     /// `provenance_identity` is the verified Fulcio OIDC subject identity from
     /// the npm provenance attestation (task 032), or `None`.
+    ///
+    /// `subtree_digest` (task 106, ADR 009 Decision 4) is the `sha256:<hex>`
+    /// fingerprint of the child verdicts a transitive scan depended on
+    /// (`compute_subtree_digest`), or `None` for a flat (non-transitive) scan.
+    /// Callers that pass `None` write NULL, preserving the pre-106 flat-scan
+    /// behaviour (REQ-106-04/05 — backwards-compatible).
+    // The cache row genuinely has this many independent columns (name, version,
+    // registry, result, content_hash, provenance_identity, subtree_digest);
+    // bundling them into a struct would not improve clarity at the call sites.
+    #[allow(clippy::too_many_arguments)]
     pub fn insert(
         &self,
         name: &str,
@@ -222,14 +337,15 @@ impl Cache {
         result: &str,
         content_hash: Option<&str>,
         provenance_identity: Option<&str>,
+        subtree_digest: Option<&str>,
     ) -> Result<()> {
         let scanned_at = Utc::now().to_rfc3339();
         // Registry-sourced rows carry source_kind = NULL (matches legacy rows).
         self.conn.execute(
             "INSERT OR REPLACE INTO scanned_packages
              (name, version, registry, result, scanned_at, content_hash, provenance_identity,
-              source_kind)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL)",
+              source_kind, subtree_digest)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, ?8)",
             rusqlite::params![
                 name,
                 version,
@@ -237,7 +353,8 @@ impl Cache {
                 result,
                 scanned_at,
                 content_hash,
-                provenance_identity
+                provenance_identity,
+                subtree_digest
             ],
         )?;
         Ok(())
@@ -258,20 +375,32 @@ impl Cache {
     /// not uniquely identify a tree, so caching it would serve stale/poisoned
     /// content (REQ-097-02).  The mutable-vs-pinned decision lives in the scan
     /// loop via `classify_ref` (task 094).
+    /// `subtree_digest` (task 106, ADR 009 Decision 4) is the `sha256:<hex>`
+    /// fingerprint of the child verdicts a transitive git scan depended on, or
+    /// `None` for a flat git scan. Passing `None` writes NULL (backwards-
+    /// compatible with the pre-106 flat git arm).
     pub fn insert_git(
         &self,
         name: &str,
         commit_sha: &str,
         result: &str,
         content_hash: Option<&str>,
+        subtree_digest: Option<&str>,
     ) -> Result<()> {
         let scanned_at = Utc::now().to_rfc3339();
         self.conn.execute(
             "INSERT OR REPLACE INTO scanned_packages
              (name, version, registry, result, scanned_at, content_hash, provenance_identity,
-              source_kind)
-             VALUES (?1, ?2, 'git', ?3, ?4, ?5, NULL, 'git')",
-            rusqlite::params![name, commit_sha, result, scanned_at, content_hash],
+              source_kind, subtree_digest)
+             VALUES (?1, ?2, 'git', ?3, ?4, ?5, NULL, 'git', ?6)",
+            rusqlite::params![
+                name,
+                commit_sha,
+                result,
+                scanned_at,
+                content_hash,
+                subtree_digest
+            ],
         )?;
         Ok(())
     }
@@ -355,7 +484,7 @@ mod tests {
     fn insert_and_lookup() {
         let cache = Cache::in_memory().unwrap();
         cache
-            .insert("lodash", "4.17.21", "npm", "pass", None, None)
+            .insert("lodash", "4.17.21", "npm", "pass", None, None, None)
             .unwrap();
 
         let entry = cache.lookup("lodash", "4.17.21", "npm").unwrap();
@@ -376,10 +505,10 @@ mod tests {
     fn insert_upserts_on_conflict() {
         let cache = Cache::in_memory().unwrap();
         cache
-            .insert("lodash", "4.17.21", "npm", "pass", None, None)
+            .insert("lodash", "4.17.21", "npm", "pass", None, None, None)
             .unwrap();
         cache
-            .insert("lodash", "4.17.21", "npm", "block", None, None)
+            .insert("lodash", "4.17.21", "npm", "block", None, None, None)
             .unwrap();
 
         let entry = cache.lookup("lodash", "4.17.21", "npm").unwrap().unwrap();
@@ -391,7 +520,7 @@ mod tests {
     fn invalidate_removes_entry() {
         let cache = Cache::in_memory().unwrap();
         cache
-            .insert("lodash", "4.17.21", "npm", "pass", None, None)
+            .insert("lodash", "4.17.21", "npm", "pass", None, None, None)
             .unwrap();
         cache.invalidate("lodash", "4.17.21", "npm").unwrap();
 
@@ -414,12 +543,14 @@ mod tests {
     #[test]
     fn clear_removes_all_entries() {
         let cache = Cache::in_memory().unwrap();
-        cache.insert("a", "1.0", "npm", "pass", None, None).unwrap();
         cache
-            .insert("b", "2.0", "pypi", "block", None, None)
+            .insert("a", "1.0", "npm", "pass", None, None, None)
             .unwrap();
         cache
-            .insert("c", "3.0", "cargo", "warn", None, None)
+            .insert("b", "2.0", "pypi", "block", None, None, None)
+            .unwrap();
+        cache
+            .insert("c", "3.0", "cargo", "warn", None, None, None)
             .unwrap();
 
         cache.clear().unwrap();
@@ -434,10 +565,10 @@ mod tests {
     fn different_registries_are_distinct() {
         let cache = Cache::in_memory().unwrap();
         cache
-            .insert("foo", "1.0", "npm", "pass", None, None)
+            .insert("foo", "1.0", "npm", "pass", None, None, None)
             .unwrap();
         cache
-            .insert("foo", "1.0", "pypi", "block", None, None)
+            .insert("foo", "1.0", "pypi", "block", None, None, None)
             .unwrap();
 
         let npm_entry = cache.lookup("foo", "1.0", "npm").unwrap().unwrap();
@@ -457,7 +588,7 @@ mod tests {
         {
             let cache = Cache::new(&db_path).unwrap();
             cache
-                .insert("lodash", "4.17.21", "npm", "pass", None, None)
+                .insert("lodash", "4.17.21", "npm", "pass", None, None, None)
                 .unwrap();
         }
         // Cache is dropped here, connection closed.
@@ -515,7 +646,7 @@ mod tests {
         let cache = Cache::in_memory().unwrap();
         let before = Utc::now();
         cache
-            .insert("lodash", "4.17.21", "npm", "pass", None, None)
+            .insert("lodash", "4.17.21", "npm", "pass", None, None, None)
             .unwrap();
         let after = Utc::now();
 
@@ -631,6 +762,7 @@ mod tests {
                 "pass",
                 Some("sha512:abcdef1234567890"),
                 None,
+                None,
             )
             .unwrap();
 
@@ -649,7 +781,7 @@ mod tests {
     fn insert_none_content_hash_stores_null() {
         let cache = Cache::in_memory().unwrap();
         cache
-            .insert("lodash", "4.17.21", "npm", "pass", None, None)
+            .insert("lodash", "4.17.21", "npm", "pass", None, None, None)
             .unwrap();
 
         let entry = cache
@@ -706,10 +838,26 @@ mod tests {
     fn re_insert_updates_content_hash() {
         let cache = Cache::in_memory().unwrap();
         cache
-            .insert("pkg", "1.0.0", "npm", "pass", Some("sha256:aaaa"), None)
+            .insert(
+                "pkg",
+                "1.0.0",
+                "npm",
+                "pass",
+                Some("sha256:aaaa"),
+                None,
+                None,
+            )
             .unwrap();
         cache
-            .insert("pkg", "1.0.0", "npm", "pass", Some("sha256:bbbb"), None)
+            .insert(
+                "pkg",
+                "1.0.0",
+                "npm",
+                "pass",
+                Some("sha256:bbbb"),
+                None,
+                None,
+            )
             .unwrap();
 
         let entry = cache
@@ -830,7 +978,7 @@ mod tests {
     fn t047_02_lookup_after_insert_returns_ok_some() {
         let cache = Cache::in_memory().expect("T-047-02: in_memory cache should succeed");
         cache
-            .insert("pkg", "1.0.0", "npm", "pass", None, None)
+            .insert("pkg", "1.0.0", "npm", "pass", None, None, None)
             .expect("T-047-02: insert should succeed");
         let result = cache.lookup("pkg", "1.0.0", "npm");
         assert!(
@@ -877,6 +1025,7 @@ mod tests {
                 "pass",
                 Some("sha512:abcdef"),
                 Some(identity),
+                None,
             )
             .unwrap();
 
@@ -1031,7 +1180,7 @@ mod tests {
         let db_path = dir.path().join("wal_rw.db");
         let cache = Cache::new(&db_path).expect("T-054-07: Cache::new should succeed");
         cache
-            .insert("pkg", "1.0.0", "npm", "pass", None, None)
+            .insert("pkg", "1.0.0", "npm", "pass", None, None, None)
             .expect("T-054-07: insert should succeed");
         let entry = cache
             .lookup("pkg", "1.0.0", "npm")
@@ -1104,7 +1253,7 @@ mod tests {
     fn t057_04_insert_and_lookup_result() {
         let cache = Cache::in_memory().unwrap();
         cache
-            .insert("pkg", "1.0.0", "npm", "pass", None, None)
+            .insert("pkg", "1.0.0", "npm", "pass", None, None, None)
             .expect("T-057-04: insert should succeed under rusqlite 0.39");
         let entry = cache
             .lookup("pkg", "1.0.0", "npm")
@@ -1125,10 +1274,10 @@ mod tests {
     fn t057_05_upsert_updates_row() {
         let cache = Cache::in_memory().unwrap();
         cache
-            .insert("pkg", "1.0.0", "npm", "pass", None, None)
+            .insert("pkg", "1.0.0", "npm", "pass", None, None, None)
             .unwrap();
         cache
-            .insert("pkg", "1.0.0", "npm", "block", None, None)
+            .insert("pkg", "1.0.0", "npm", "block", None, None, None)
             .unwrap();
         let entry = cache.lookup("pkg", "1.0.0", "npm").unwrap().unwrap();
         assert_eq!(
@@ -1142,7 +1291,7 @@ mod tests {
     fn t057_06_invalidate_removes_row() {
         let cache = Cache::in_memory().unwrap();
         cache
-            .insert("pkg", "1.0.0", "npm", "pass", None, None)
+            .insert("pkg", "1.0.0", "npm", "pass", None, None, None)
             .unwrap();
         cache.invalidate("pkg", "1.0.0", "npm").unwrap();
         let entry = cache.lookup("pkg", "1.0.0", "npm").unwrap();
@@ -1165,6 +1314,7 @@ mod tests {
                 "pass",
                 Some("sha512:abcdef1234567890"),
                 None,
+                None,
             )
             .expect("T-057-07: insert with content_hash must succeed");
         let entry = cache.lookup("pkg", "1.0.0", "npm").unwrap().unwrap();
@@ -1182,7 +1332,7 @@ mod tests {
         let cache = Cache::in_memory().unwrap();
         let identity = "https://github.com/example/.github/workflows/release.yml@refs/tags/v1";
         cache
-            .insert("pkg", "1.0.0", "npm", "pass", None, Some(identity))
+            .insert("pkg", "1.0.0", "npm", "pass", None, Some(identity), None)
             .expect("T-057-08: insert with provenance_identity must succeed");
         let entry = cache.lookup("pkg", "1.0.0", "npm").unwrap().unwrap();
         assert_eq!(
@@ -1199,7 +1349,7 @@ mod tests {
         let cache = Cache::in_memory().unwrap();
         // SHA-1 packages store content_hash = None (NULL) per task 040
         cache
-            .insert("pkg", "1.0.0", "npm", "pass", None, None)
+            .insert("pkg", "1.0.0", "npm", "pass", None, None, None)
             .expect("T-057-09: insert with None content_hash must succeed");
         let entry = cache.lookup("pkg", "1.0.0", "npm").unwrap().unwrap();
         assert_eq!(
@@ -1221,6 +1371,7 @@ mod tests {
                 "pass",
                 Some("sha512:aaaa"),
                 None,
+                None,
             )
             .unwrap();
         cache
@@ -1230,6 +1381,7 @@ mod tests {
                 "npm",
                 "pass",
                 Some("sha512:bbbb"),
+                None,
                 None,
             )
             .unwrap();
@@ -1529,7 +1681,7 @@ mod tests {
         let db_path = dir.path().join("t059_11.db");
         let cache = Cache::new(&db_path).expect("T-059-11: Cache::new should succeed");
         cache
-            .insert("mylib", "2.0.0", "crates", "pass", None, None)
+            .insert("mylib", "2.0.0", "crates", "pass", None, None, None)
             .expect("T-059-11: insert should succeed");
         let entry = cache
             .lookup("mylib", "2.0.0", "crates")
@@ -1573,7 +1725,7 @@ mod tests {
     fn t097_01_insert_git_keys_by_name_sha_git() {
         let cache = Cache::in_memory().unwrap();
         cache
-            .insert_git("pkg-name", SHA1_PIN, "pass", Some("sha256:deadbeef"))
+            .insert_git("pkg-name", SHA1_PIN, "pass", Some("sha256:deadbeef"), None)
             .unwrap();
 
         let entry = cache
@@ -1600,10 +1752,11 @@ mod tests {
                 "block",
                 Some("sha256:aaaa"),
                 None,
+                None,
             )
             .unwrap();
         cache
-            .insert_git("foo", SHA1_PIN, "pass", Some("sha256:bbbb"))
+            .insert_git("foo", SHA1_PIN, "pass", Some("sha256:bbbb"), None)
             .unwrap();
 
         let crates_entry = cache.lookup("foo", SHA1_PIN, "crates").unwrap().unwrap();
@@ -1683,7 +1836,7 @@ mod tests {
         {
             let cache = Cache::new(&db_path).unwrap();
             cache
-                .insert_git("g", SHA1_PIN, "warn", Some("sha256:cafe"))
+                .insert_git("g", SHA1_PIN, "warn", Some("sha256:cafe"), None)
                 .unwrap();
         }
         // Second open must not error (no duplicate source_kind column).
@@ -1767,10 +1920,10 @@ mod tests {
     fn t097_08c_insert_git_upserts() {
         let cache = Cache::in_memory().unwrap();
         cache
-            .insert_git("p", SHA1_PIN, "pass", Some("sha256:1111"))
+            .insert_git("p", SHA1_PIN, "pass", Some("sha256:1111"), None)
             .unwrap();
         cache
-            .insert_git("p", SHA1_PIN, "block", Some("sha256:2222"))
+            .insert_git("p", SHA1_PIN, "block", Some("sha256:2222"), None)
             .unwrap();
         let entry = cache.lookup("p", SHA1_PIN, "git").unwrap().unwrap();
         assert_eq!(entry.result, "block");
@@ -1782,12 +1935,403 @@ mod tests {
     fn t097_08d_registry_insert_has_null_source_kind() {
         let cache = Cache::in_memory().unwrap();
         cache
-            .insert("pkg", "1.0.0", "npm", "pass", None, None)
+            .insert("pkg", "1.0.0", "npm", "pass", None, None, None)
             .unwrap();
         let entry = cache.lookup("pkg", "1.0.0", "npm").unwrap().unwrap();
         assert_eq!(
             entry.source_kind, None,
             "T-097-08d: registry rows must carry source_kind = NULL"
         );
+    }
+
+    // ── T-106 tests — subtree_digest cache column (ADR 009 Decision 4) ──────────
+
+    /// Model of the task-030 content-hash gate, isolated here so the T-106
+    /// two-gate tests can exercise the *combined* (content-hash AND
+    /// subtree-digest) Hit rule without reaching into main.rs's scan loop.  The
+    /// production content-hash gate (`verify_hash` / `hash_verify_decision` in
+    /// `src/main.rs`) is the byte-equality check this mirrors: a stored hash is
+    /// honoured only when it equals the freshly recomputed one.
+    fn content_hash_gate(stored: Option<&str>, recomputed: Option<&str>) -> bool {
+        match (stored, recomputed) {
+            (Some(s), Some(r)) => s == r,
+            // A row with no stored content hash cannot be hash-verified — the
+            // production gate re-scans in that case (fail-closed).
+            _ => false,
+        }
+    }
+
+    /// The combined two-gate Hit rule (REQ-106-03): a cached transitive row is a
+    /// Hit IFF the content-hash gate passes AND the subtree-digest gate passes.
+    /// This is exactly the composition task 108 wires into the live lookup.
+    fn is_hit(
+        stored_hash: Option<&str>,
+        recomputed_hash: Option<&str>,
+        stored_digest: Option<&str>,
+        recomputed_digest: Option<&str>,
+    ) -> bool {
+        content_hash_gate(stored_hash, recomputed_hash)
+            && subtree_digest_valid(stored_digest, recomputed_digest)
+    }
+
+    // T-106-01: Migration adds the subtree_digest column on a fresh DB.
+    #[test]
+    fn t106_01_migration_adds_subtree_digest_column() {
+        let cache = Cache::in_memory().unwrap();
+        let mut stmt = cache
+            .conn
+            .prepare("PRAGMA table_info(scanned_packages)")
+            .unwrap();
+        let col = stmt
+            .query_map([], |row| {
+                let name: String = row.get(1)?;
+                let col_type: String = row.get(2)?;
+                let not_null: i64 = row.get(3)?;
+                Ok((name, col_type, not_null))
+            })
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .find(|(name, _, _)| name == "subtree_digest");
+
+        let col = col.expect("T-106-01: subtree_digest column should exist");
+        assert_eq!(
+            col.1.to_uppercase(),
+            "TEXT",
+            "T-106-01: column type should be TEXT"
+        );
+        assert_eq!(
+            col.2, 0,
+            "T-106-01: subtree_digest must be nullable (not_null = 0)"
+        );
+    }
+
+    // T-106-02: Migration is idempotent — column appears exactly once across two opens.
+    #[test]
+    fn t106_02_migration_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("t106_02.db");
+
+        // First open adds subtree_digest.
+        let _ = Cache::new(&db_path).unwrap();
+        // Second open (simulating a second run) must not error on a duplicate column.
+        let cache = Cache::new(&db_path).expect("T-106-02: second open must not error");
+
+        let count: i64 = {
+            let mut stmt = cache
+                .conn
+                .prepare("PRAGMA table_info(scanned_packages)")
+                .unwrap();
+            stmt.query_map([], |row| {
+                let name: String = row.get(1)?;
+                Ok(name)
+            })
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .filter(|n: &String| n == "subtree_digest")
+            .count() as i64
+        };
+        assert_eq!(
+            count, 1,
+            "T-106-02: subtree_digest column must appear exactly once"
+        );
+    }
+
+    // T-106-03: Legacy registry rows read NULL for subtree_digest (no backfill).
+    #[test]
+    fn t106_03_legacy_registry_rows_read_null() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("t106_03.db");
+
+        // Pre-106 schema: has content_hash + provenance_identity + source_kind,
+        // but no subtree_digest.
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE scanned_packages (
+                    name                TEXT NOT NULL,
+                    version             TEXT NOT NULL,
+                    registry            TEXT NOT NULL,
+                    result              TEXT NOT NULL,
+                    scanned_at          TEXT NOT NULL,
+                    content_hash        TEXT,
+                    provenance_identity TEXT,
+                    source_kind         TEXT,
+                    PRIMARY KEY (name, version, registry)
+                );",
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO scanned_packages
+                 (name, version, registry, result, scanned_at, content_hash)
+                 VALUES ('lodash', '4.17.21', 'npm', 'pass',
+                         '2025-01-01T00:00:00Z', 'sha512:abcd')",
+                [],
+            )
+            .unwrap();
+        }
+
+        let cache = Cache::new(&db_path).expect("T-106-03: migration should succeed");
+        let entry = cache
+            .lookup("lodash", "4.17.21", "npm")
+            .unwrap()
+            .expect("T-106-03: legacy row must survive migration");
+        assert_eq!(entry.result, "pass");
+        assert_eq!(
+            entry.subtree_digest, None,
+            "T-106-03: legacy registry row must read subtree_digest = None"
+        );
+    }
+
+    // T-106-04: Legacy git rows (task 097) read NULL for subtree_digest.
+    #[test]
+    fn t106_04_legacy_git_rows_read_null() {
+        let cache = Cache::in_memory().unwrap();
+        // insert_git with None subtree_digest models a pre-106 / flat git row.
+        cache
+            .insert_git("pkg", SHA1_PIN, "pass", Some("sha256:deadbeef"), None)
+            .unwrap();
+        let entry = cache
+            .lookup("pkg", SHA1_PIN, "git")
+            .unwrap()
+            .expect("T-106-04: git row should exist");
+        assert_eq!(entry.source_kind, Some("git".to_string()));
+        assert_eq!(
+            entry.subtree_digest, None,
+            "T-106-04: flat git row must read subtree_digest = None"
+        );
+    }
+
+    // T-106-05: Digest is sha256 over sorted, length-framed pairs (golden test).
+    #[test]
+    fn t106_05_digest_golden() {
+        let children = [("foo@1.0.0@npm", "pass"), ("bar@abc123@git", "warn")];
+        let digest = compute_subtree_digest(&children);
+        assert_eq!(
+            digest, "sha256:4c4205a67d2817b860fea6d74ef63956852ebe5fa4b0e5494e5b274aea30c4a5",
+            "T-106-05: digest must match the precomputed golden value"
+        );
+    }
+
+    // T-106-06: Digest is order-independent.
+    #[test]
+    fn t106_06_digest_order_independent() {
+        let forward = [("foo@1.0.0@npm", "pass"), ("bar@abc123@git", "warn")];
+        let reversed = [("bar@abc123@git", "warn"), ("foo@1.0.0@npm", "pass")];
+        assert_eq!(
+            compute_subtree_digest(&forward),
+            compute_subtree_digest(&reversed),
+            "T-106-06: insertion order must not change the digest"
+        );
+    }
+
+    // T-106-07: Empty child set produces a deterministic, non-NULL digest.
+    #[test]
+    fn t106_07_empty_child_set_deterministic() {
+        let a = compute_subtree_digest(&[]);
+        let b = compute_subtree_digest(&[]);
+        assert_eq!(a, b, "T-106-07: empty-child digest must be deterministic");
+        assert_eq!(
+            a, "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "T-106-07: empty-child digest must be sha256 of the empty input"
+        );
+        // It is a real digest, not the NULL sentinel a flat row carries.
+        assert!(a.starts_with("sha256:"));
+    }
+
+    // T-106-08: Hit requires BOTH the content-hash gate AND the subtree_digest match.
+    #[test]
+    fn t106_08_hit_requires_both_gates() {
+        let stored_hash = Some("sha256:aaa");
+        let stored_digest = Some("sha256:bbb");
+
+        // Both gates pass → Hit.
+        assert!(
+            is_hit(
+                stored_hash,
+                Some("sha256:aaa"),
+                stored_digest,
+                Some("sha256:bbb")
+            ),
+            "T-106-08: matching hash and matching digest must be a Hit"
+        );
+        // Content-hash matches but recomputed digest differs → Miss (fail-closed).
+        assert!(
+            !is_hit(
+                stored_hash,
+                Some("sha256:aaa"),
+                stored_digest,
+                Some("sha256:ZZZ")
+            ),
+            "T-106-08: a differing subtree_digest must force a Miss even when the hash matches"
+        );
+    }
+
+    // T-106-09: Changed child verdict → recomputed digest differs → re-scan.
+    #[test]
+    fn t106_09_changed_child_verdict_forces_rescan() {
+        // Parent A's digest computed when child B scanned Pass.
+        let stored_digest = compute_subtree_digest(&[("B@1.0.0@npm", "pass")]);
+        // Child B flips to Warn on the next run.
+        let recomputed_digest = compute_subtree_digest(&[("B@1.0.0@npm", "warn")]);
+        assert_ne!(
+            stored_digest, recomputed_digest,
+            "T-106-09: a changed child verdict must change the digest"
+        );
+        // With the content-hash gate satisfied, the digest mismatch alone is a Miss.
+        assert!(
+            !is_hit(
+                Some("sha256:aaa"),
+                Some("sha256:aaa"),
+                Some(&stored_digest),
+                Some(&recomputed_digest),
+            ),
+            "T-106-09: parent A must be re-scanned, not served a stale Pass"
+        );
+    }
+
+    // T-106-10: content-hash mismatch alone forces a re-scan (existing gate unchanged).
+    #[test]
+    fn t106_10_content_hash_mismatch_forces_rescan() {
+        let digest = Some("sha256:bbb");
+        assert!(
+            !is_hit(Some("sha256:aaa"), Some("sha256:TAMPERED"), digest, digest),
+            "T-106-10: a tampered content_hash must force a Miss even with a matching digest"
+        );
+    }
+
+    // T-106-11: subtree_digest mismatch alone forces a re-scan even if content-hash matches.
+    #[test]
+    fn t106_11_subtree_digest_mismatch_forces_rescan() {
+        assert!(
+            !is_hit(
+                Some("sha256:aaa"),
+                Some("sha256:aaa"),
+                Some("sha256:bbb"),
+                Some("sha256:DIFFERENT"),
+            ),
+            "T-106-11: a differing subtree_digest must force a Miss"
+        );
+        // Sanity: the subtree-digest gate itself rejects the mismatch.
+        assert!(!subtree_digest_valid(
+            Some("sha256:bbb"),
+            Some("sha256:DIFFERENT")
+        ));
+        assert!(subtree_digest_valid(Some("sha256:bbb"), Some("sha256:bbb")));
+    }
+
+    // T-106-12: insert writes subtree_digest when provided.
+    #[test]
+    fn t106_12_insert_writes_subtree_digest() {
+        let cache = Cache::in_memory().unwrap();
+        let digest = compute_subtree_digest(&[("child@1.0.0@npm", "pass")]);
+        cache
+            .insert(
+                "parent",
+                "2.0.0",
+                "npm",
+                "pass",
+                Some("sha512:abcd"),
+                None,
+                Some(&digest),
+            )
+            .unwrap();
+        let entry = cache.lookup("parent", "2.0.0", "npm").unwrap().unwrap();
+        assert_eq!(
+            entry.subtree_digest,
+            Some(digest),
+            "T-106-12: insert must round-trip subtree_digest"
+        );
+    }
+
+    // T-106-13: insert_git writes subtree_digest when provided.
+    #[test]
+    fn t106_13_insert_git_writes_subtree_digest() {
+        let cache = Cache::in_memory().unwrap();
+        let digest = compute_subtree_digest(&[("child@abc@git", "warn")]);
+        cache
+            .insert_git(
+                "parent",
+                SHA1_PIN,
+                "warn",
+                Some("sha256:cafe"),
+                Some(&digest),
+            )
+            .unwrap();
+        let entry = cache.lookup("parent", SHA1_PIN, "git").unwrap().unwrap();
+        assert_eq!(
+            entry.subtree_digest,
+            Some(digest),
+            "T-106-13: insert_git must round-trip subtree_digest"
+        );
+    }
+
+    // T-106-14: insert with None subtree_digest writes NULL.
+    #[test]
+    fn t106_14_insert_none_writes_null() {
+        let cache = Cache::in_memory().unwrap();
+        cache
+            .insert(
+                "pkg",
+                "1.0.0",
+                "npm",
+                "pass",
+                Some("sha512:abcd"),
+                None,
+                None,
+            )
+            .unwrap();
+        let entry = cache.lookup("pkg", "1.0.0", "npm").unwrap().unwrap();
+        assert_eq!(
+            entry.subtree_digest, None,
+            "T-106-14: insert with None must store NULL for subtree_digest"
+        );
+    }
+
+    // T-106-15: A parent depending on a mutable-ref child is never served as a
+    // stale Hit. The mutable-ref child is never cached (task 097), so on the next
+    // run its verdict cannot be re-fingerprinted into the parent's recomputed
+    // digest (recomputed = None) → the subtree-digest gate fails → Miss → re-scan.
+    #[test]
+    fn t106_15_mutable_ref_parent_not_served_stale() {
+        // Parent stored a digest computed over its children, one of which is a
+        // mutable-ref git child.
+        let stored_digest =
+            compute_subtree_digest(&[("dep@1.0.0@npm", "pass"), ("mut@main@git", "pass")]);
+
+        // On the next run the mutable-ref child has no cache row → its verdict is
+        // unavailable for re-fingerprinting → the parent cannot recompute a
+        // digest at all (recomputed = None).
+        let recomputed_digest: Option<&str> = None;
+
+        // Even with the content-hash gate satisfied, the parent is a Miss.
+        assert!(
+            !is_hit(
+                Some("sha256:aaa"),
+                Some("sha256:aaa"),
+                Some(&stored_digest),
+                recomputed_digest,
+            ),
+            "T-106-15: a parent depending on a mutable-ref child must be re-scanned, never served stale"
+        );
+        // Directly: a None recomputed digest against a stored digest fails the gate.
+        assert!(
+            !subtree_digest_valid(Some(&stored_digest), None),
+            "T-106-15: an un-recomputable subtree (mutable-ref child) fails the digest gate"
+        );
+    }
+
+    // T-106-05b: NULL stored digest (flat-scan row) skips the subtree-digest gate
+    // (REQ-106-05) — the content-hash gate alone governs. Documents the
+    // flat-scan / transitive boundary the column introduces.
+    #[test]
+    fn t106_05b_null_digest_skips_subtree_gate() {
+        // Flat-scan row: stored digest is None → gate is skipped (returns true)
+        // regardless of any recomputed value.
+        assert!(subtree_digest_valid(None, None));
+        assert!(subtree_digest_valid(None, Some("sha256:anything")));
+        // The combined Hit rule for a flat row therefore reduces to the
+        // content-hash gate: matching hash → Hit, mismatching hash → Miss.
+        assert!(is_hit(Some("sha256:aaa"), Some("sha256:aaa"), None, None));
+        assert!(!is_hit(Some("sha256:aaa"), Some("sha256:bbb"), None, None));
     }
 }

@@ -1144,8 +1144,16 @@ async fn run_check(
                     && let Ok(tree) = &fetch_outcome
                 {
                     let content_hash = git_tree_content_hash(tree);
-                    let _ =
-                        cache.insert_git(&pkg_ref.name, &ref_, &result_str, Some(&content_hash));
+                    // Flat git scan — no transitive children recorded, so
+                    // subtree_digest = None (task 106; the flat-scan gate is
+                    // content-hash only).
+                    let _ = cache.insert_git(
+                        &pkg_ref.name,
+                        &ref_,
+                        &result_str,
+                        Some(&content_hash),
+                        None,
+                    );
                 }
 
                 if result_str == "warn" || result_str == "block" {
@@ -1559,6 +1567,9 @@ async fn run_check(
             &result_str,
             cache_hash,
             ctx.provenance_identity.as_deref(),
+            // Flat registry scan — no transitive children, subtree_digest = None
+            // (task 106; flat-scan gate is content-hash only).
+            None,
         );
 
         results.push(CheckResult {
@@ -4399,7 +4410,7 @@ mod tests {
         // Store only pinned SHAs.
         if ref_kind == policy::mutable_ref::RefKind::Pinned {
             let content_hash = git_tree_content_hash(&tree);
-            let _ = cache.insert_git(name, ref_, &result_str, Some(&content_hash));
+            let _ = cache.insert_git(name, ref_, &result_str, Some(&content_hash), None);
         }
         result_str
     }
@@ -4532,7 +4543,9 @@ mod tests {
 
         // Tamper: clear the integrity hash on the cached row (simulates an
         // attacker editing the SQLite row to break the verdict↔tree binding).
-        cache.insert_git("pkg", T097_SHA, "pass", None).unwrap();
+        cache
+            .insert_git("pkg", T097_SHA, "pass", None, None)
+            .unwrap();
 
         // Next scan must NOT honor the tampered row — it re-fetches.
         scan_git_dep_once(&cache, &spy, &no_policies(), "pkg", T097_SHA);
