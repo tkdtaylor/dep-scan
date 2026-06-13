@@ -83,3 +83,10 @@ version = "0.3.4"
 policy = "maintainer_change"
 justification = "Benign co-maintainer alternation inside the rust-random GitHub org: josephlr (Joe Richey) and newpavlov (Artyom Pavlov) have been alternating release-cutters on getrandom since 2020. 0.3.4 was tagged and published by josephlr, a longstanding public member of the rust-random org. See docs/security/getrandom-maintainer-investigation.md."
 opened_at = "2026-05-22"
+
+[[allow]]
+package = "getrandom"
+version = "0.4.2"
+policy = "maintainer_change"
+justification = "Benign migration to crates.io Trusted Publishing — the same event documented in docs/security/getrandom-maintainer-investigation.md (verdict BENIGN), which explicitly recommended allowlisting getrandom@0.4.2. The 'removed [josephlr], added [trustpub:github:rust-random/getrandom]' diff is getrandom moving from a personal-account publish to OIDC-based Trusted Publishing from the official rust-random/getrandom GitHub repo. Task 082 taught dep-scan to synthesise the trustpub:<provider>:<repository> label (previously this surfaced as 'added []'). Entry added now because getrandom@0.4.2 first entered dep-scan's own tree in v1.3.0 via tempfile and the new gix stack."
+opened_at = "2026-06-13"
