@@ -527,23 +527,20 @@ mod tests {
         let serial_elapsed = start.elapsed();
         assert_eq!(serial.len(), n);
 
-        // Ideal parallel time is ceil(n / concurrency) * per_task = 2 * 100ms.
-        let ideal_rounds = n.div_ceil(concurrency as usize) as u32;
-        let ideal = per_task * ideal_rounds;
-        // Generous jitter allowance (1.9x ideal) keeps this deterministic while
-        // staying far below the serial bound (4 * 100ms = 400ms).
-        let upper = ideal.mul_f64(1.9);
-        assert!(
-            parallel_elapsed < upper,
-            "T-105-10: parallel run {parallel_elapsed:?} must be under {upper:?} \
-             (ideal {ideal:?}); serial was {serial_elapsed:?}"
-        );
-        // And the parallel run is meaningfully faster than serial — the whole
-        // point of the pool. Require parallel < 0.75 × serial.
+        // Concurrency must reduce wall-clock time. We compare the parallel run
+        // directly against a serial run on the SAME machine rather than against
+        // an absolute millisecond budget. Absolute wall-clock bounds are flaky
+        // on shared CI runners: the margin between ideal-parallel (~2 rounds =
+        // 200ms) and serial (~4 rounds = 400ms) is only 2x, and a loaded runner
+        // can inflate the parallel run past an absolute ceiling from
+        // thread-scheduling jitter alone. The relative check is self-normalising
+        // — both runs absorb the same machine load — so it stays meaningful
+        // without flaking. Require parallel < 0.75 × serial (ideal ratio is 0.5).
+        let ideal_parallel = per_task * (n.div_ceil(concurrency as usize) as u32);
         assert!(
             parallel_elapsed.as_secs_f64() < serial_elapsed.as_secs_f64() * 0.75,
             "T-105-10: concurrency must reduce wall-clock: parallel {parallel_elapsed:?} \
-             vs serial {serial_elapsed:?}"
+             vs serial {serial_elapsed:?} (ideal parallel ~{ideal_parallel:?})"
         );
     }
 }
