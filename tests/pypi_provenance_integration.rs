@@ -36,6 +36,10 @@ fn write_pypi_provenance_config(
     require_pypi_provenance: bool,
     check_pypi_provenance: bool,
 ) -> NamedTempFile {
+    // Escape backslashes so Windows paths (C:\Users\...) are valid TOML basic
+    // strings; on Unix this is a no-op. The escaped path round-trips back to the
+    // original value after TOML parsing, so stderr-path assertions still match.
+    let cache_path = cache_path.replace('\\', "\\\\");
     let mut f = NamedTempFile::new().expect("create temp config");
     writeln!(
         f,
@@ -70,6 +74,10 @@ min_downloads = 0
 
 /// Write a config for npm (PyPI provenance should not be exercised).
 fn write_npm_config(npm_url: &str, cache_path: &str) -> NamedTempFile {
+    // Escape backslashes so Windows paths (C:\Users\...) are valid TOML basic
+    // strings; on Unix this is a no-op. The escaped path round-trips back to the
+    // original value after TOML parsing, so stderr-path assertions still match.
+    let cache_path = cache_path.replace('\\', "\\\\");
     let mut f = NamedTempFile::new().expect("create temp config");
     writeln!(
         f,

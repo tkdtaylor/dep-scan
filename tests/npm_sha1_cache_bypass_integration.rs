@@ -27,6 +27,10 @@ fn dep_scan() -> Command {
 
 /// Write a minimal config with only age check enabled (to keep tests fast).
 fn write_config(npm_url: &str, cache_path: &str) -> NamedTempFile {
+    // Escape backslashes so Windows paths (C:\Users\...) are valid TOML basic
+    // strings; on Unix this is a no-op. The escaped path round-trips back to the
+    // original value after TOML parsing, so stderr-path assertions still match.
+    let cache_path = cache_path.replace('\\', "\\\\");
     let mut f = NamedTempFile::new().expect("create temp config");
     writeln!(
         f,
@@ -339,7 +343,9 @@ internal_prefixes = []
 [popularity]
 min_downloads = 0
 "#,
-        cache_path = db_str,
+        // Escape backslashes so Windows paths (C:\Users\...) are valid TOML basic
+        // strings; on Unix this is a no-op and round-trips back to the raw path.
+        cache_path = db_str.replace('\\', "\\\\"),
         npm_url = server.uri(),
     )
     .expect("write config");

@@ -22,6 +22,10 @@ fn dep_scan() -> Command {
 
 /// Write a minimal config file pointing at the given PyPI mock URL.
 fn write_pypi_config(pypi_url: &str, cache_path: &str) -> NamedTempFile {
+    // Escape backslashes so Windows paths (C:\Users\...) are valid TOML basic
+    // strings; on Unix this is a no-op. The escaped path round-trips back to the
+    // original value after TOML parsing, so stderr-path assertions still match.
+    let cache_path = cache_path.replace('\\', "\\\\");
     let mut f = NamedTempFile::new().expect("create temp config");
     writeln!(
         f,
@@ -55,6 +59,10 @@ min_downloads = 0
 
 /// Write a minimal config with npm URL set (for T-031-11).
 fn write_npm_config(npm_url: &str, cache_path: &str) -> NamedTempFile {
+    // Escape backslashes so Windows paths (C:\Users\...) are valid TOML basic
+    // strings; on Unix this is a no-op. The escaped path round-trips back to the
+    // original value after TOML parsing, so stderr-path assertions still match.
+    let cache_path = cache_path.replace('\\', "\\\\");
     let mut f = NamedTempFile::new().expect("create temp config");
     writeln!(
         f,

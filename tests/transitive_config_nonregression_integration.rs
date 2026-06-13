@@ -39,6 +39,10 @@ source = "git+https://github.com/example/test-pkg#abcdef1234567890abcdef12345678
 /// All registry URLs and OSV point at 127.0.0.1:1; the git dep's host is denied,
 /// making the run fully offline.
 fn write_flat_config(cache_path: &str) -> NamedTempFile {
+    // Escape backslashes so Windows paths (C:\Users\...) are valid TOML basic
+    // strings; on Unix this is a no-op. The escaped path round-trips back to the
+    // original value after TOML parsing, so stderr-path assertions still match.
+    let cache_path = cache_path.replace('\\', "\\\\");
     let dead_url = "http://127.0.0.1:1";
     let mut f = NamedTempFile::new().expect("create temp config");
     writeln!(
@@ -87,6 +91,10 @@ fetch_timeout_secs = 3
 /// Everything else is identical to `write_flat_config`.  When transitive is
 /// disabled it must not alter any observable output (REQ-107-04).
 fn write_transitive_disabled_config(cache_path: &str) -> NamedTempFile {
+    // Escape backslashes so Windows paths (C:\Users\...) are valid TOML basic
+    // strings; on Unix this is a no-op. The escaped path round-trips back to the
+    // original value after TOML parsing, so stderr-path assertions still match.
+    let cache_path = cache_path.replace('\\', "\\\\");
     let dead_url = "http://127.0.0.1:1";
     let mut f = NamedTempFile::new().expect("create temp config");
     writeln!(

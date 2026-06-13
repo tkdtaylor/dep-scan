@@ -20,6 +20,10 @@ fn dep_scan() -> Command {
 
 /// Write a minimal config with `[signing] key_path = <path>` to a temp file.
 fn write_signing_config(key_path: &std::path::Path) -> NamedTempFile {
+    // Escape backslashes so Windows paths (C:\Users\...) are valid TOML basic
+    // strings; on Unix this is a no-op. The escaped path round-trips back to the
+    // original value after TOML parsing, so stderr-path assertions still match.
+    let key_path = key_path.display().to_string().replace('\\', "\\\\");
     let mut f = NamedTempFile::new().expect("create temp config");
     writeln!(
         f,
@@ -28,7 +32,7 @@ fn write_signing_config(key_path: &std::path::Path) -> NamedTempFile {
 [signing]
 key_path = "{}"
 "#,
-        key_path.display()
+        key_path
     )
     .expect("write temp config");
     f

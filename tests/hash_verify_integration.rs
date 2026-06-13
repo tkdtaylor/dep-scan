@@ -25,6 +25,10 @@ fn dep_scan() -> Command {
 /// Write a minimal config with only min_age enabled (to allow age-based blocks
 /// in T-030-08/T-030-12) and other heavy checks disabled for speed.
 fn write_config(npm_url: &str, cache_path: &str) -> NamedTempFile {
+    // Escape backslashes so Windows paths (C:\Users\...) are valid TOML basic
+    // strings; on Unix this is a no-op. The escaped path round-trips back to the
+    // original value after TOML parsing, so stderr-path assertions still match.
+    let cache_path = cache_path.replace('\\', "\\\\");
     let mut f = NamedTempFile::new().expect("create temp config");
     writeln!(
         f,

@@ -50,6 +50,11 @@ fn crates_json(name: &str, version: &str) -> String {
 /// Write a config pointed at the stub crates/osv servers, with the optional
 /// `[signing]` body appended verbatim.
 fn write_config(crates_url: &str, osv_url: &str, cache_path: &str, signing: &str) -> NamedTempFile {
+    // Escape backslashes so Windows paths (C:\Users\...) are valid TOML basic
+    // strings; on Unix this is a no-op. The escaped path round-trips back to the
+    // original value after TOML parsing, so stderr-path assertions still match.
+    // (The `signing` fragment is escaped at its source by the caller.)
+    let cache_path = cache_path.replace('\\', "\\\\");
     let mut f = NamedTempFile::new().expect("create temp config");
     writeln!(
         f,
@@ -192,7 +197,8 @@ async fn t_087_16_offline_operator_key_signs() {
 
     let signing = format!(
         "[signing]\noffline = true\nkey_path = \"{}\"",
-        key_path.to_str().unwrap()
+        // Escape backslashes so Windows paths are valid TOML basic strings; no-op on Unix.
+        key_path.to_str().unwrap().replace('\\', "\\\\")
     );
     let config = write_config(
         &crates_server.uri(),

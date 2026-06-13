@@ -23,6 +23,10 @@ fn dep_scan() -> Command {
 /// Write a config file that points to the given cache path (valid SQLite).
 /// Uses port 9 as the npm URL so network calls fail immediately.
 fn write_config_with_cache(cache_path: &str) -> NamedTempFile {
+    // Escape backslashes so Windows paths (C:\Users\...) are valid TOML basic
+    // strings; on Unix this is a no-op. The escaped path round-trips back to the
+    // original value after TOML parsing, so stderr-path assertions still match.
+    let cache_path = cache_path.replace('\\', "\\\\");
     let mut f = NamedTempFile::new().expect("create temp config");
     writeln!(
         f,
@@ -66,6 +70,10 @@ min_downloads = 0
 /// In non-verbose mode we see only the outermost message (with path).
 /// In verbose mode we see both (path in outer + rusqlite detail in inner).
 fn write_config_pointing_at_garbage_db(db_path: &str, npm_url: &str) -> NamedTempFile {
+    // Escape backslashes so Windows paths (C:\Users\...) are valid TOML basic
+    // strings; on Unix this is a no-op. The escaped path round-trips back to the
+    // original value after TOML parsing, so stderr-path assertions still match.
+    let db_path = db_path.replace('\\', "\\\\");
     let mut f = NamedTempFile::new().expect("create temp config");
     writeln!(
         f,

@@ -141,6 +141,10 @@ fn build_served_repo(files: &[(&str, &[u8])]) -> Option<(TempDir, GitDaemon, Str
 /// All registry URLs are dead (127.0.0.1:1); install-script detection is ON so a
 /// malicious `postinstall.js` in a fetched git tree is detected.
 fn write_config(cache_path: &str, transitive_block: &str) -> tempfile::NamedTempFile {
+    // Escape backslashes so Windows paths (C:\Users\...) are valid TOML basic
+    // strings; on Unix this is a no-op. The escaped path round-trips back to the
+    // original value after TOML parsing, so stderr-path assertions still match.
+    let cache_path = cache_path.replace('\\', "\\\\");
     let dead = "http://127.0.0.1:1";
     let mut f = tempfile::NamedTempFile::new().expect("create temp config");
     writeln!(

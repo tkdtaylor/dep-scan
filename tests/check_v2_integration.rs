@@ -15,6 +15,10 @@ fn dep_scan() -> Command {
 /// Write a temporary config file with all v0.2 policies enabled,
 /// pointing at the given wiremock npm and OSV URLs.
 fn write_v2_config(npm_url: &str, osv_url: &str, cache_path: &str) -> NamedTempFile {
+    // Escape backslashes so Windows paths (C:\Users\...) are valid TOML basic
+    // strings; on Unix this is a no-op. The escaped path round-trips back to the
+    // original value after TOML parsing, so stderr-path assertions still match.
+    let cache_path = cache_path.replace('\\', "\\\\");
     let mut f = NamedTempFile::new().expect("create temp config");
     writeln!(
         f,
@@ -53,6 +57,10 @@ fn write_config_with_toggles(
     check_install_scripts: bool,
     check_vulnerabilities: bool,
 ) -> NamedTempFile {
+    // Escape backslashes so Windows paths (C:\Users\...) are valid TOML basic
+    // strings; on Unix this is a no-op. The escaped path round-trips back to the
+    // original value after TOML parsing, so stderr-path assertions still match.
+    let cache_path = cache_path.replace('\\', "\\\\");
     let mut f = NamedTempFile::new().expect("create temp config");
     writeln!(
         f,

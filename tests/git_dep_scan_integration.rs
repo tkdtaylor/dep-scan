@@ -48,6 +48,10 @@ source = "git+https://github.com/user/evil-pkg#abcdef1234567890"
 /// A stray registry call will return a connection-refused error, causing the
 /// test to fail loudly rather than silently passing.
 fn write_offline_config(cache_path: &str) -> NamedTempFile {
+    // Escape backslashes so Windows paths (C:\Users\...) are valid TOML basic
+    // strings; on Unix this is a no-op. The escaped path round-trips back to the
+    // original value after TOML parsing, so stderr-path assertions still match.
+    let cache_path = cache_path.replace('\\', "\\\\");
     // Port 1 is system-reserved; the OS refuses connections immediately without
     // a network round-trip, so any stray registry call errors out fast.
     let dead_url = "http://127.0.0.1:1";
