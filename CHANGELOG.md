@@ -5,6 +5,116 @@ All notable changes to dep-scan are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.0] — 2026-06-13
+
+A feature release adding three major capabilities: standards-based
+interchange output (OSV, CycloneDX/SPDX SBOM, VEX, DSSE-signed statements),
+first-class git/VCS dependency handling with a sandboxed fetch client, and
+recursive transitive dependency scanning. All changes are additive and
+backward-compatible — existing scan/install invocations behave identically,
+and every new behavior is opt-in via flags or config. No breaking changes;
+MSRV unchanged (1.88).
+
+### Added — interchange & standards output (ADR 005/006/007, tasks 083–089)
+
+- **`--format` enum with OSV emission** (task 083) — `dep-scan scan
+  --format <human|json|osv>` selects the output encoding. `osv` emits
+  findings in the [OSV](https://ossf.github.io/osv-schema/) vulnerability
+  schema. `human` (default) and `json` preserve prior behavior byte-for-byte.
+- **Scan-result SBOM** (task 084) — generate a CycloneDX 1.5 or SPDX 2.3
+  Software Bill of Materials of the scanned dependency set, with a UUIDv4
+  `serialNumber` / `documentNamespace` per run.
+- **Presence-only VEX emission** (task 085) — emit a
+  [VEX](https://www.cisa.gov/sbom/vex) document recording which scanned
+  components a vulnerability statement applies to, independent of the
+  pass/block verdict.
+- **DSSE-signed interchange output** (task 086) — interchange statements are
+  wrapped in a [DSSE](https://github.com/secure-systems-lab/dsse) envelope
+  with an Ed25519 signature so downstream consumers can verify integrity.
+- **Signing identity** (task 087) — keyless (sigstore) signing, or an
+  operator-provisioned offline Ed25519 key loaded from a PEM PKCS#8 file
+  (see ADR 007 for key custody). Honors `DEP_SCAN_OFFLINE` for zero-network
+  operation.
+- **Statement freshness** (task 088) — interchange statements carry an
+  `osv_snapshot` timestamp and a `valid_until` expiry so stale verdicts are
+  detectable.
+- **Public-key export** (task 089) — `dep-scan` can export the signer's
+  public key in PEM form for consumers to pin and verify against.
+
+### Added — git/VCS dependency handling (ADR 008, tasks 090–098)
+
+- **Dependency source model** (task 090) — a `DependencySource` enum
+  distinguishes registry packages from git/VCS dependencies and routes each
+  to the appropriate scanner.
+- **Git dependency parsing** — npm lockfile git URLs (task 091) and Cargo
+  lockfile git sources (task 092) are recognized and surfaced in scan output
+  (task 093).
+- **Mutable-ref policy** (task 094) — warns when a git dependency pins a
+  mutable ref (branch/tag such as `#main`) rather than an immutable commit
+  SHA.
+- **VCS host policy** (task 095) — a configurable allow-list of permitted VCS
+  hosts; fetches to unlisted hosts are blocked before any network call.
+- **Sandboxed VCS fetch client** (task 096) — a pure-Rust git client
+  (gitoxide) fetches into an ephemeral object store over the existing
+  reqwest+rustls stack — no system `git`, no OpenSSL, no SSH/curl transports.
+  Blobs are materialized by dep-scan itself behind path-traversal, symlink,
+  and absolute-path sandbox checks. HTTPS-only scheme allow-list and bounded
+  download size.
+- **VCS fetch cache integration** (task 097) and **policy pipeline on fetched
+  trees** (task 098) — fetched git trees run through the full policy pipeline,
+  with results cached to skip re-fetching unchanged refs.
+
+### Added — transitive dependency scanning (ADR 009/011, tasks 099–108)
+
+- **Recursive transitive resolution** — dep-scan now walks the full
+  dependency graph rather than scanning only direct dependencies. A
+  lockfile-graph edge model (task 100) and a manifest-edge reader for fetched
+  git sub-trees (task 101) feed a DFS engine (task 102) and walker (task 103).
+- **Verdict roll-up** (task 104) — a child dependency's verdict propagates to
+  its parents, so a malicious transitive package blocks the whole install.
+- **Bounded, parallel fetching** (task 105) — a transitive fetch pool with a
+  configurable node budget caps fan-out and concurrency.
+- **Subtree-digest cache column** (task 106) — caches the digest of an entire
+  resolved sub-tree to skip re-walking unchanged sub-graphs.
+- **Opt-in via config + CLI** (task 107) — a `[transitive]` config block and
+  a CLI flag enable the walk; the default preserves prior direct-only
+  behavior (verified by a non-regression test).
+- **End-to-end path wiring** (task 108, capstone) — the transitive scan path
+  is wired through the `scan` and `install` commands end to end.
+
+### Documentation
+
+- New ADRs: **005** (adopt OSV/CycloneDX/SPDX/VEX interchange standards),
+  **006** (runtime statement integrity), **007** (offline signing key
+  custody), **008** (git/VCS dependency handling and transitive scanning),
+  **009** (synchronous signer over async sigstore network — original signing
+  ADR renumbered to **010**), and **011** (manifest edge resolution
+  granularity).
+- Drift audit across README, spec, and architecture diagrams reconciled to
+  the shipped behavior of tasks 083–108 (task 109 verified the doc contract).
+
+### Changed (dependencies)
+
+- New runtime dependencies: `uuid` (SBOM serial numbers, task 084) and `gix`
+  (gitoxide — pure-Rust sandboxed git fetch, task 096, with a deliberately
+  minimal feature set: no worktree mutation, no submodules, no ssh/curl
+  transports).
+- `rand_core` promoted from dev-dependency to runtime (default interchange
+  signer key generation, task 086).
+- `ed25519-dalek` gained the `pkcs8` + `pem` features to load operator-key
+  PEM PKCS#8 files (task 087); no new top-level dependency (both arrive via
+  existing `p256`).
+
+### Stats
+
+- 1303 tests passing (up from 813 at v1.2.1 — +490 new tests across tasks
+  083–109).
+- `cargo clippy --all-targets --all-features -- -D warnings` clean.
+- `cargo fmt --check` clean.
+- `cargo audit` clean.
+
+---
+
 ## [1.2.1] — 2026-05-22
 
 A patch release that fixes two behavioural bugs uncovered by a post-v1.2.0
@@ -324,7 +434,9 @@ before installation and gates the install on the verdict.
   by a `sha256sums.txt`.
 - Install script: `curl -fsSL https://raw.githubusercontent.com/tkdtaylor/dep-scan/main/install.sh | bash`
 
-[Unreleased]: https://github.com/tkdtaylor/dep-scan/compare/v1.2.0...HEAD
+[Unreleased]: https://github.com/tkdtaylor/dep-scan/compare/v1.3.0...HEAD
+[1.3.0]: https://github.com/tkdtaylor/dep-scan/compare/v1.2.1...v1.3.0
+[1.2.1]: https://github.com/tkdtaylor/dep-scan/compare/v1.2.0...v1.2.1
 [1.2.0]: https://github.com/tkdtaylor/dep-scan/releases/tag/v1.2.0
 [1.1.1]: https://github.com/tkdtaylor/dep-scan/releases/tag/v1.1.1
 [1.0.0]: https://github.com/tkdtaylor/dep-scan/releases/tag/v1.0.0
