@@ -1003,8 +1003,12 @@ mod tests {
     // lookup time (REQ-047-03).
     #[test]
     fn t047_03_cache_new_on_directory_returns_err() {
-        // /tmp is always a directory; SQLite cannot open it as a DB file.
-        let result = Cache::new(Path::new("/tmp"));
+        // A directory path cannot be opened as a SQLite DB file on any platform.
+        // Use a real temp directory rather than a hardcoded "/tmp" so the test is
+        // cross-platform: on Windows "/tmp" does not exist, so SQLite would happily
+        // create a new DB file there and construction would erroneously succeed.
+        let dir = tempfile::tempdir().unwrap();
+        let result = Cache::new(dir.path());
         assert!(
             result.is_err(),
             "T-047-03: Cache::new on a directory path must return Err (SQLite error surfaces at \
