@@ -1,0 +1,8 @@
+# Byte-exact recorded upstream responses.
+#
+# The Go checksum-database signed note is verified by computing an Ed25519
+# signature over the note text's *exact bytes*, including its LF line endings.
+# Git's autocrlf would rewrite LF -> CRLF on Windows checkout, corrupting the
+# signed text so verification fails (tc_110_02 / tc_110_03). Treat the fixture
+# as binary so it is never EOL-converted on any platform. See task 110.
+tests/fixtures/go_sumdb_real/** -text
