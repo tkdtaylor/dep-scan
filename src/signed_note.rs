@@ -20,7 +20,7 @@
 //!
 //! | Ecosystem | Signing key | Sig bytes | Key-hash formula |
 //! |-----------|-------------|-----------|------------------|
-//! | Go sumdb  | Ed25519     | 64 bytes  | `sha256("hash:1:" + name + "\n" + (0x01 || raw_ed25519_pubkey))[:4]` |
+//! | Go sumdb  | Ed25519     | 64 bytes  | `sha256(name + "\n" + (0x01 || raw_ed25519_pubkey))[:4]` (Go `note.keyHash`, no prefix) |
 //! | Rekor     | ECDSA P-256 | DER (~70 bytes) | `sha256(SPKI_DER)[:4]` |
 //!
 //! This module exposes:
@@ -196,14 +196,31 @@ pub fn parse(signed_note: &str) -> Result<ParsedNote<'_>, String> {
 // Ed25519 verifier (used by go_sumdb — task 034)
 // ---------------------------------------------------------------------------
 
+/// Derive the 4-byte key-id for an Ed25519 sumdb key, matching Go's
+/// `note.keyHash`: `SHA256(key_name + "\n" + key_bytes)[:4]`.
+///
+/// `key_bytes` is the 33-byte `0x01 || raw_ed25519_pubkey` form.  There is
+/// **no** `"hash:1:"` prefix — adding one yields a key-id that never matches
+/// the real `sum.golang.org` signature line (see task 110).
+fn ed25519_key_id(key_name: &str, key_bytes: &[u8]) -> [u8; 4] {
+    let mut hasher = Sha256::new();
+    hasher.update(key_name.as_bytes());
+    hasher.update(b"\n");
+    hasher.update(key_bytes);
+    let digest = hasher.finalize();
+    let mut id = [0u8; 4];
+    id.copy_from_slice(&digest[..4]);
+    id
+}
+
 /// Verify a signed note against an Ed25519 key in Go's sumdb key string
 /// format (`<key-name>+<key-id-hex>+<base64-key>`).
 ///
 /// `key_str` decodes as 33 bytes: a 0x01 algorithm marker followed by the
 /// 32-byte raw Ed25519 public key.
 ///
-/// The key-hash format is sumdb-specific:
-/// `sha256("hash:1:" + key_name + "\n" + 33-byte-key-bytes)[:4]`.
+/// The key-hash format is Go's `note.keyHash`:
+/// `sha256(key_name + "\n" + 33-byte-key-bytes)[:4]` — no prefix.
 pub fn verify_ed25519(signed_note: &str, key_str: &str) -> NoteVerifyOutcome {
     let key_parts: Vec<&str> = key_str.splitn(3, '+').collect();
     if key_parts.len() != 3 {
@@ -245,13 +262,8 @@ pub fn verify_ed25519(signed_note: &str, key_str: &str) -> NoteVerifyOutcome {
         }
     };
 
-    // sumdb key-id: SHA256("hash:1:" || name || "\n" || key_bytes)[:4]
-    let mut hasher = Sha256::new();
-    hasher.update(b"hash:1:");
-    hasher.update(key_name.as_bytes());
-    hasher.update(b"\n");
-    hasher.update(&key_bytes);
-    let expected_key_id = &hasher.finalize()[..4];
+    let expected_key_id = ed25519_key_id(key_name, &key_bytes);
+    let expected_key_id = &expected_key_id[..];
 
     let parsed = match parse(signed_note) {
         Ok(p) => p,
@@ -443,8 +455,8 @@ mod tests {
         let mut key_bytes = vec![0x01u8];
         key_bytes.extend_from_slice(verifying_key.as_bytes());
         let key_name = "test-key";
+        // Go note.keyHash: SHA256(name + "\n" + key_bytes)[:4] (no "hash:1:" prefix).
         let mut hasher = Sha256::new();
-        hasher.update(b"hash:1:");
         hasher.update(key_name.as_bytes());
         hasher.update(b"\n");
         hasher.update(&key_bytes);
@@ -740,8 +752,8 @@ mod tests {
             let verifying_key = signing_key.verifying_key();
             let mut key_bytes = vec![0x01u8];
             key_bytes.extend_from_slice(verifying_key.as_bytes());
+            // Go note.keyHash: SHA256(name + "\n" + key_bytes)[:4] (no prefix).
             let mut hasher = Sha256::new();
-            hasher.update(b"hash:1:");
             hasher.update(key_name.as_bytes());
             hasher.update(b"\n");
             hasher.update(&key_bytes);
@@ -843,8 +855,8 @@ mod tests {
         let verifying_key = signing_key.verifying_key();
         let mut key_bytes = vec![0x01u8];
         key_bytes.extend_from_slice(verifying_key.as_bytes());
+        // Go note.keyHash: SHA256(name + "\n" + key_bytes)[:4] (no prefix).
         let mut hasher = Sha256::new();
-        hasher.update(b"hash:1:");
         hasher.update(key_name.as_bytes());
         hasher.update(b"\n");
         hasher.update(&key_bytes);
@@ -1865,4 +1877,63 @@ mod tests {
     // T-063-13: `cargo test`, `cargo clippy --all-targets -- -D warnings`, and
     // `cargo fmt --check` all pass.  This is a CI gate requirement verified by
     // the pre-commit checklist; no runtime assertion is needed.
+
+    // -----------------------------------------------------------------------
+    // TC-110-01: Ed25519 key-id derivation matches Go note.keyHash
+    // (independent ground truth — hard-coded literal, NOT recomputed)
+    // -----------------------------------------------------------------------
+
+    /// The real pinned sum.golang.org key string.  The `033de0ae` field is the
+    /// genuine key-id Google publishes; it is our independent ground truth.
+    const REAL_SUMDB_KEY_STR: &str =
+        "sum.golang.org+033de0ae+Ac4zctda0e5eza+HJyk9SxEdh+s3Ux18htTTAD8OuAn8";
+
+    #[test]
+    fn tc_110_01_ed25519_key_id_matches_go_note_keyhash() {
+        // Decode the real pinned key the same way the verifier does.
+        let parts: Vec<&str> = REAL_SUMDB_KEY_STR.splitn(3, '+').collect();
+        assert_eq!(parts.len(), 3, "TC-110-01: key string has 3 fields");
+        let key_name = parts[0];
+        let key_bytes = base64::engine::general_purpose::STANDARD
+            .decode(parts[2])
+            .expect("TC-110-01: decode pinned key base64");
+
+        // Derive via the production code path.
+        let derived = ed25519_key_id(key_name, &key_bytes);
+
+        // Independent ground truth: the literal 033de0ae from the key string.
+        // This MUST be a hard-coded literal, not recomputed — that is what
+        // catches a re-introduced "hash:1:" prefix (which would yield 9f6cb724).
+        assert_eq!(
+            derived,
+            [0x03, 0x3d, 0xe0, 0xae],
+            "TC-110-01: key-id must be 033de0ae (Go note.keyHash); a 'hash:1:' \
+             prefix would yield 9f6cb724"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // TC-110-02: real recorded sum.golang.org note verifies as Valid
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn tc_110_02_real_sumdb_note_verifies_valid() {
+        // Genuine, recorded sum.golang.org lookup response (real Ed25519
+        // signature). The lookup body has the module hashes, a blank line, then
+        // the signed tree-head note. The signed note begins at "go.sum database
+        // tree" — that is what verify_ed25519 must be given.
+        let lookup = include_str!("../tests/fixtures/go_sumdb_real/uuid_v1.6.0_lookup.txt");
+        let signed_note = lookup
+            .split_once("\n\ngo.sum database tree")
+            .map(|(_, rest)| format!("go.sum database tree{rest}"))
+            .expect("TC-110-02: fixture must contain a signed tree-head note");
+
+        let outcome = verify_ed25519(&signed_note, REAL_SUMDB_KEY_STR);
+        assert_eq!(
+            outcome,
+            NoteVerifyOutcome::Valid,
+            "TC-110-02: the real sum.golang.org note must verify against the \
+             pinned key; got {outcome:?}"
+        );
+    }
 }

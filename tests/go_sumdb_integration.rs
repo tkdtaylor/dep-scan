@@ -499,3 +499,84 @@ async fn t034_22_non_go_registries_unaffected() {
         .code(0) // all enabled policies pass; npm provenance is disabled in test config
         .stdout(predicate::str::contains("go_sumdb: pass")); // go_sumdb is Pass for npm
 }
+
+// ---------------------------------------------------------------------------
+// TC-110-04: CLI scan of a real go.sum (github.com/google/uuid v1.6.0) is green
+//
+// Regression for task 110: the Ed25519 key-id derivation had a spurious
+// "hash:1:" prefix, so the verifier never matched the real sum.golang.org
+// signature line and BLOCKed every real Go module.  This test feeds the
+// genuine, recorded sum.golang.org lookup response (real Ed25519 signature)
+// through the full binary and asserts the go_sumdb policy passes (exit 0).
+//
+// The fixture is the captured real response; the test is offline/deterministic
+// via wiremock (no network).
+// ---------------------------------------------------------------------------
+
+/// The genuine recorded sum.golang.org lookup response for
+/// github.com/google/uuid@v1.6.0 (real Ed25519 signature).
+const REAL_UUID_LOOKUP: &str = include_str!("fixtures/go_sumdb_real/uuid_v1.6.0_lookup.txt");
+
+#[tokio::test]
+async fn tc_110_04_cli_real_go_sum_is_green() {
+    let proxy_server = MockServer::start().await;
+    let sumdb_server = MockServer::start().await;
+    let tmp = TempDir::new().unwrap();
+    let cache_path = tmp.path().join("cache.db");
+    let config = write_go_sumdb_config(
+        &proxy_server.uri(),
+        &sumdb_server.uri(),
+        cache_path.to_str().unwrap(),
+        true,  // check_go_sumdb = true (the default)
+        false, // require_go_sumdb = false
+    );
+
+    let version = "v1.6.0";
+
+    // Go proxy: list (skipped for pinned versions, but mount for safety).
+    Mock::given(method("GET"))
+        .and(path("/github.com/google/uuid/@v/list"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(proxy_list_body(version)))
+        .mount(&proxy_server)
+        .await;
+
+    // Go proxy: info (publish-time metadata).
+    Mock::given(method("GET"))
+        .and(path("/github.com/google/uuid/@v/v1.6.0.info"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(proxy_info_body(version)))
+        .mount(&proxy_server)
+        .await;
+
+    // sumdb: the REAL recorded lookup response with a genuine Ed25519 signature.
+    Mock::given(method("GET"))
+        .and(path("/lookup/github.com/google/uuid@v1.6.0"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(REAL_UUID_LOOKUP))
+        .mount(&sumdb_server)
+        .await;
+
+    // Write a real go.sum lockfile containing the uuid module.
+    let lockfile = tmp.path().join("go.sum");
+    std::fs::write(
+        &lockfile,
+        "github.com/google/uuid v1.6.0 h1:NIvaJDMOsjHA8n1jAhLSgzrAzy1Hgr+hNrb57e+94F0=\n\
+         github.com/google/uuid v1.6.0/go.mod h1:TIyPZe4MgqvfeYDBFedMoGGpEw/LqOeaOT+nhxU+yHo=\n",
+    )
+    .expect("write go.sum");
+
+    // TC-110-04 / AC-4: real go.sum scan → go_sumdb pass, exit 0.
+    dep_scan()
+        .args([
+            "--config",
+            config.path().to_str().unwrap(),
+            "check",
+            "--registry",
+            "go",
+            "--lockfile",
+            lockfile.to_str().unwrap(),
+            "--lockfile-type",
+            "go",
+        ])
+        .assert()
+        .code(0)
+        .stdout(predicate::str::contains("go_sumdb: pass"));
+}
