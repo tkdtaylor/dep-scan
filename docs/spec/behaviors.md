@@ -1,7 +1,7 @@
 # Behaviors
 
 **Project:** dep-scan
-**Last updated:** 2026-06-11 (v1.2.2 — B-098: policy pipeline on fetched git trees, task 098)
+**Last updated:** 2026-06-17 (task 110 — B-019 sumdb key-id uses Go note.keyHash, no `hash:1:` prefix)
 
 What the system does, observably. Each behavior describes a triggering condition, the system's response, and any externally-visible side effects. This is the "you can verify this from outside the process" view.
 
@@ -207,6 +207,7 @@ For each DSSE-signed attestation bundle, the following steps run in order in [`s
   - Boundary detection uses a **single-pass walk from the front** (task 044). MUST NOT use `rfind("\n\n")` — brittle against blank lines in note bodies. **References:** [F-017](fitness-functions.md#f-017).
   - `note_text` MUST be non-empty. Zero-byte body ⇒ `Err("signed note has empty note_text: …")` — before any signature-iteration loop runs (task 063, [F-014](fitness-functions.md#f-014)). The error type is `String`, not an enum; the message names the policy that caught it.
 - **Verify contract:**
+  - **Key-id derivation (per ecosystem):** the 4-byte key-id a signature line must match is ecosystem-specific. Ed25519/sumdb uses Go's `note.keyHash` = `SHA256(key_name + "\n" + key_bytes)[:4]` (`key_bytes` = `0x01 || raw_ed25519_pubkey`); there is **no** `"hash:1:"` prefix — adding one yields a key-id (`9f6cb724`) that never matches the real `sum.golang.org` line (`033de0ae`) and BLOCKs every real Go module (task 110). Rekor/ECDSA uses `SHA256(SPKI_DER)[:4]` (no name) — a deliberately different scheme; the two MUST NOT be unified.
   - Iterates across **all** signature lines (task 043). A non-matching `key_id` MUST `continue` to the next signature line — not return `Invalid`. This closes false-rejections during Rekor key-rotation windows. **References:** [F-016](fitness-functions.md#f-016).
   - Returns `Ok(ParsedNote<'_>)` on the first verifying signature. Returns `Err(NoteVerifyOutcome::…)` when none verify.
 - **Trust-root precedence:** verifier receives roots as an explicit argument. P-09/P-10 pass the pinned Rekor key; P-11 passes the pinned `sum.golang.org` key. No global state.

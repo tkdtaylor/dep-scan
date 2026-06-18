@@ -36,9 +36,9 @@
 //! 4. Verify: `Ed25519.Verify(public_key, note_text, signature[4..])`.
 //!
 //! The 4-byte key-id is the first 4 bytes of
-//! `SHA256("hash:1:" || key-name || "\n" || key-bytes)`, used to identify
-//! which key signed the note.  We verify it matches our pinned key before
-//! accepting the signature.
+//! `SHA256(key-name || "\n" || key-bytes)` (Go's `note.keyHash` — no `"hash:1:"`
+//! prefix; see task 110), used to identify which key signed the note.  We verify
+//! it matches our pinned key before accepting the signature.
 //!
 //! ## Policy outcomes
 //!
@@ -563,6 +563,11 @@ mod tests {
     // T-034-06, T-034-07, T-034-08 require a real signed note.
     // We use ed25519-dalek to sign the note in the test.
 
+    // TC-110-05: this synthetic-note helper builds its key-id with the CORRECTED
+    // Go note.keyHash derivation (no "hash:1:" prefix — see task 110). Before the
+    // fix it shared the bug with the verifier, so the negative tests (t034_07/08)
+    // passed for the wrong reason; they now fail because of a genuinely-absent
+    // matching signature, not a self-consistent prefix.
     fn generate_test_key_and_signed_note(note_text: &str) -> (String, String) {
         use base64::Engine as _;
         use ed25519_dalek::{Signer as _, SigningKey};
@@ -576,10 +581,10 @@ mod tests {
         let mut key_bytes = vec![0x01u8];
         key_bytes.extend_from_slice(verifying_key.as_bytes());
 
-        // Compute key ID: SHA256("hash:1:" || "test-key" || "\n" || key_bytes)[..4]
+        // Compute key ID per Go note.keyHash: SHA256("test-key" || "\n" || key_bytes)[..4]
+        // (no "hash:1:" prefix — see task 110).
         let key_name = "test-key";
         let mut hasher = Sha256::new();
-        hasher.update(b"hash:1:");
         hasher.update(key_name.as_bytes());
         hasher.update(b"\n");
         hasher.update(&key_bytes);
@@ -621,6 +626,29 @@ mod tests {
             SumDbVerifyOutcome::Valid,
             "T-034-06: valid signature should be accepted, got {:?}",
             outcome
+        );
+    }
+
+    // ── TC-110-03: legitimate module passes through the policy (real fixture) ──
+
+    #[test]
+    fn tc_110_03_real_module_passes_policy_with_real_verifier() {
+        // Genuine recorded sum.golang.org lookup response for
+        // github.com/google/uuid@v1.6.0 (real Ed25519 signature). Parse it into a
+        // SumDbEntry and run it through GoSumDbPolicy with the REAL verifier
+        // (pinned sum.golang.org key) — must Pass under the corrected derivation.
+        let body = include_str!("../../tests/fixtures/go_sumdb_real/uuid_v1.6.0_lookup.txt");
+        let entry = parse_lookup_response(200, body, "github.com/google/uuid", "v1.6.0")
+            .expect("TC-110-03: real fixture must parse")
+            .expect("TC-110-03: real fixture is an entry, not a 404");
+
+        let policy = GoSumDbPolicy::new(false, Arc::new(RealSumDbVerifier));
+        let ctx = make_ctx_with_result("github.com/google/uuid", Some(GoSumDbResult::Entry(entry)));
+        let result = policy.evaluate(&ctx);
+        assert_eq!(
+            result,
+            PolicyResult::Pass,
+            "TC-110-03: a legitimate module's real signed tree head must Pass; got {result:?}"
         );
     }
 
@@ -873,4 +901,8 @@ mod tests {
             result
         );
     }
+
+    // TC-110-06: `cargo test`, `cargo clippy --all-targets -- -D warnings`, and
+    // `cargo fmt --check` all pass. This is a CI/pre-commit gate requirement
+    // verified by the build pipeline; no runtime assertion is needed here.
 }
