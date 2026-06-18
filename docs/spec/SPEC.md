@@ -1,7 +1,7 @@
 # dep-scan — Authoritative Spec
 
 **Project:** dep-scan
-**Last updated:** 2026-05-22 (v1.2.0)
+**Last updated:** 2026-06-17 (v1.3.1 — task 110, B-019 go_sumdb key-id fix)
 
 ## What this directory is
 
@@ -57,7 +57,7 @@ The remaining files (architecture, configuration) are deep-dives for the people 
 
 ## Versioning and stability
 
-The spec is versioned alongside the dep-scan release tag. The current spec is **v1.2.0**. Breaking spec changes (e.g. changing a `Block` policy to `Warn`, dropping a CLI flag, changing the cache decision matrix) MUST increment the major or minor version per [SemVer](https://semver.org/spec/v2.0.0.html). Adding new flags, new policies, or new env vars in a backwards-compatible way is a patch or minor bump.
+The spec is versioned alongside the dep-scan release tag. The current spec is **v1.3.1**. Breaking spec changes (e.g. changing a `Block` policy to `Warn`, dropping a CLI flag, changing the cache decision matrix) MUST increment the major or minor version per [SemVer](https://semver.org/spec/v2.0.0.html). Adding new flags, new policies, or new env vars in a backwards-compatible way is a patch or minor bump.
 
 ## System invariants (one-line summary)
 

@@ -139,6 +139,7 @@ mistake" failure: the verifier must be pinned to an **independent** ground truth
 
 ## Downstream note
 
-agent-builder is consuming `dep-scan` as a blocking gate step and is currently unblocked only by
-disabling `check_go_sumdb`. Once this is fixed and released, agent-builder can re-enable the check
-(its in-box gate calls `dep-scan check --registry go --lockfile go.sum --lockfile-type go`).
+agent-builder is consuming `dep-scan` as a blocking gate step and had been unblocked only by
+disabling `check_go_sumdb`. This fix is merged and ships in **v1.3.1**; once agent-builder picks
+up v1.3.1 it can re-enable the check (its in-box gate calls
+`dep-scan check --registry go --lockfile go.sum --lockfile-type go`).

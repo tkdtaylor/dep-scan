@@ -5,6 +5,25 @@ All notable changes to dep-scan are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.1] — 2026-06-17
+
+A patch release fixing a high-severity false-positive in Go checksum-database
+verification. No new features; backward-compatible. MSRV unchanged (1.88).
+
+### Fixed
+
+- **`go_sumdb` key-id derivation** (task 110) — the Ed25519 signed-note
+  verifier derived the expected key-id with a spurious `"hash:1:"` prefix, so
+  the computed value never matched the real `sum.golang.org` key-id
+  (`033de0ae`). With `check_go_sumdb = true` (the default), this made
+  `dep-scan check --registry go` **BLOCK every real Go module** with
+  `no signature line found for key 'sum.golang.org'`. The derivation now
+  matches Go's `note.keyHash` (`SHA256(name + "\n" + key)[:4]`, no prefix).
+  A regression test pins the derivation to the independent ground-truth key-id
+  and verifies a real recorded `sum.golang.org` response (offline fixture), so
+  the prefix cannot be reintroduced unnoticed. The Rekor/ECDSA P-256 key-id
+  path uses a different (correct) scheme and was audited and left unchanged.
+
 ## [1.3.0] — 2026-06-13
 
 A feature release adding three major capabilities: standards-based
@@ -434,7 +453,8 @@ before installation and gates the install on the verdict.
   by a `sha256sums.txt`.
 - Install script: `curl -fsSL https://raw.githubusercontent.com/tkdtaylor/dep-scan/main/install.sh | bash`
 
-[Unreleased]: https://github.com/tkdtaylor/dep-scan/compare/v1.3.0...HEAD
+[Unreleased]: https://github.com/tkdtaylor/dep-scan/compare/v1.3.1...HEAD
+[1.3.1]: https://github.com/tkdtaylor/dep-scan/compare/v1.3.0...v1.3.1
 [1.3.0]: https://github.com/tkdtaylor/dep-scan/compare/v1.2.1...v1.3.0
 [1.2.1]: https://github.com/tkdtaylor/dep-scan/compare/v1.2.0...v1.2.1
 [1.2.0]: https://github.com/tkdtaylor/dep-scan/releases/tag/v1.2.0

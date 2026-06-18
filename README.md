@@ -22,7 +22,7 @@ Every release artifact is signed with [sigstore](https://sigstore.dev) keyless O
 If you have [cosign](https://github.com/sigstore/cosign) installed you can verify before running:
 
 ```bash
-VERSION=v1.3.0
+VERSION=v1.3.1
 ARTIFACT=dep-scan-${VERSION}-x86_64-unknown-linux-gnu.tar.gz
 
 cosign verify-blob \

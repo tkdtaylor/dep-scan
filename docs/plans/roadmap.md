@@ -1,7 +1,7 @@
 # Roadmap
 
 **Project:** dep-scan
-**Last updated:** 2026-05-22
+**Last updated:** 2026-06-17
 
 ## Completed milestones
 
@@ -97,6 +97,21 @@ during the v1.2.0 prep audit. See [CHANGELOG § 1.2.0](../../CHANGELOG.md).
 - [x] `rusqlite` 0.31 → 0.39 (tasks 057)
 - [x] `x509-parser` 0.16 → 0.18.1 (task 058)
 - Deferred: `reqwest` 0.12 → 0.13 (task 056) — blocked on cross-compile cmake requirement
+
+### v1.3.0 — Interchange, VCS deps, transitive scanning (2026-06-13)
+
+Feature release; all changes additive and backward-compatible (MSRV 1.88).
+See [CHANGELOG § 1.3.0](../../CHANGELOG.md).
+
+- [x] Standards-based interchange output: OSV `--format`, CycloneDX/SPDX SBOM, VEX, DSSE-signed statements, keyless/offline signing, statement freshness, pubkey export (ADR 005/006/007, tasks 083–089)
+- [x] First-class git/VCS dependency handling with a sandboxed read-only fetch client (ADR 008, tasks 090–098)
+- [x] Recursive transitive dependency scanning with bounded fetch pool + node budget, fail-closed (ADR 009, tasks 099–108)
+
+### v1.3.1 — go_sumdb verification fix (2026-06-17)
+
+Patch release. See [CHANGELOG § 1.3.1](../../CHANGELOG.md).
+
+- [x] Fix `go_sumdb` Ed25519 key-id derivation (dropped spurious `hash:1:` prefix) that false-BLOCKed every real Go module under the default `check_go_sumdb = true` (task 110)
 
 ---
 
