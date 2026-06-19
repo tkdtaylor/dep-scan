@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! Go checksum database (sum.golang.org) signature verification policy (task 034).
 //!
 //! ## What this does

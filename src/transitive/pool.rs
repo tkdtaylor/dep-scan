@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! Bounded git sub-tree fetch pool (ADR 009 Decision 3b mitigation 4, task 105
 //! REQ-105-01/02/06/07).
 //!

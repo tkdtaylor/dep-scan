@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! Public-key export for consumers (task 089).
 //!
 //! Provides `export_pubkey`: reads the operator's private signing key from

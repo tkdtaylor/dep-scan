@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 /// Integration tests for task 061 — Verbose-gate parse_tlog_entries diagnostic.
 ///
 /// T-061-10: dep-scan check pkg --registry npm (no --verbose) with a malformed

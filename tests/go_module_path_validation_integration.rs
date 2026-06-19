@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! Integration tests for Go module path validation (task 041, H-5 finding).
 //!
 //! Covers T-041-21 through T-041-24 from the test spec:

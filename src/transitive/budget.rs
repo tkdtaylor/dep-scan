@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! Per-scan node budget — the `max_total_nodes` safety ceiling (ADR 009
 //! Decision 3b mitigation 5, task 105 REQ-105-03/04/05/07).
 //!

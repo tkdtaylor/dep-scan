@@ -25,5 +25,5 @@ sections, CONTRIBUTING (DCO), `.github/FUNDING.yml` + `dco.yml`.
 
 ## Acceptance criteria
 
-- [ ] SPDX header (`// SPDX-License-Identifier: Apache-2.0`) on every first-party `.rs`
-- [ ] Relicense pushed
+- [x] SPDX header (`// SPDX-License-Identifier: Apache-2.0`) on every first-party `.rs`
+- [ ] Relicense pushed — still awaits the user (push deferred until public/private visibility confirmed)

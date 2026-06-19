@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 /// Integration tests for task 030 — content hash verification on cache hit.
 ///
 /// These tests use assert_cmd + wiremock to run the full binary against a

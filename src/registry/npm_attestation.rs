@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! npm provenance attestation client.
 //!
 //! Fetches and parses sigstore attestation bundles from the npm registry

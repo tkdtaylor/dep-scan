@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! Concrete [`NodeScanner`] that routes by [`NodeId`] variant — ADR 009 piece 3b
 //! (task 103, REQ-103-03/04).
 //!

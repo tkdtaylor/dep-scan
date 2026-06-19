@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // These functions are the public API for the VCS fetch client (task 096).
 // They are not yet called from main.rs because the fetch client has not been
 // implemented — suppress dead_code lint until task 096 wires them in.

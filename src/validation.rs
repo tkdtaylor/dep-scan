@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! Package name validation — guards against CLI flag injection.
 //!
 //! Any token supplied as a package name that begins with `-` is categorically

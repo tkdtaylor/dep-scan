@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! VEX (Vulnerability Exploitability eXchange) emission — OpenVEX format.
 //!
 //! Implements presence-only VEX output for dep-scan's `--format vex` path.

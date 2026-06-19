@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! Go checksum database lookup client (task 034).
 //!
 //! Fetches the signed lookup response from `sum.golang.org/lookup/<module>@<version>`

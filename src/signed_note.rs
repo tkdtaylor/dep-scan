@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! Shared signed-note parser + verifier (task 036).
 //!
 //! A "signed note" is a plain-text, append-only manifest with one or more

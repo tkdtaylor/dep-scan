@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! End-to-end integration tests for the transitive scan path wiring (task 108,
 //! ADR 009 capstone).
 //!

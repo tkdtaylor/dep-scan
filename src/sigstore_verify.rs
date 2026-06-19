@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! Sigstore DSSE bundle signature verification helper.
 //!
 //! This module implements verification of sigstore bundles that use the DSSE

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 /// Integration tests for task 078 — Lockfile scanner uses pinned versions.
 ///
 /// These tests verify that when a lockfile is used, the scanner passes the

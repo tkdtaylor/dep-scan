@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 pub mod age;
 pub mod dependency_confusion;
 pub mod go_sumdb;

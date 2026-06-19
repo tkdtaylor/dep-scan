@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! npm provenance attestation policy (task 032).
 //!
 //! Evaluates npm packages against their sigstore provenance attestations.

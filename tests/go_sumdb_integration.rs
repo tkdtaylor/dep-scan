@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 /// Integration tests for task 034 — Go checksum database Ed25519 signature verification.
 ///
 /// Uses assert_cmd + wiremock to test the full binary against mocked Go module

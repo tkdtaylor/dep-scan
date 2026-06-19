@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! Concrete [`EdgeProvider`] implementations — ADR 009 piece 3b (task 103).
 //!
 //! Task 102 defines the abstract [`EdgeProvider`] trait the pure DFS engine

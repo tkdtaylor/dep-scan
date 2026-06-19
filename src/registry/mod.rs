@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 pub mod crates;
 pub mod go;
 pub mod go_sumdb;

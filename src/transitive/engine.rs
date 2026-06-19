@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! Pure DFS engine for transitive dependency walking (ADR 009 Decision 2a/2b).
 //!
 //! This module is deliberately I/O-free. It walks an abstract dependency graph

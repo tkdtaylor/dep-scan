@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 #![cfg(unix)]
 /// Integration tests for task 031 — pip --require-hashes passthrough.
 ///

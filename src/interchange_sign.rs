@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! DSSE envelope signing for downstream-bound interchange output (task 086).
 //!
 //! ADR 006 Q4 + Q8 resolve that dep-scan signs the machine-readable

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! Transitive scan orchestration — the capstone entry point (ADR 009, task 108).
 //!
 //! This is the single seam `run_check` (`src/main.rs`) calls when

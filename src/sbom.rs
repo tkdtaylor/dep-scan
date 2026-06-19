@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! SBOM (Software Bill of Materials) rendering.
 //!
 //! Implements CycloneDX 1.4+ JSON and SPDX 2.3+ JSON output formats for

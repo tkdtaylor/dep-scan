@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 /// Integration tests for task 040 — Reject SHA-1 content hashes as cache trust gates for npm.
 ///
 /// These tests cover:

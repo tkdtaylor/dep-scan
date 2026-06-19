@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! Task 089 — process-level integration tests for `dep-scan signing export-pubkey`.
 //!
 //! T-089-17: `dep-scan signing export-pubkey` with a valid key → exit 0, stdout

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! Task 087 — fail-closed behavior for signed interchange output at the binary
 //! level (T-087-15) plus the offline operator-key happy path (T-087-16) and the
 //! `--allow-unsigned` escape hatch.

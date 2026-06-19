@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! Manifest edge reader for fetched git sub-trees — ADR 009 Decision 1, manifest-fallback.
 //!
 //! This module implements the "manifest-fallback" half of the lockfile-first strategy:

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 /// Integration tests for task 032 — npm provenance attestation verification.
 ///
 /// Uses assert_cmd + wiremock to test the full binary against mocked npm

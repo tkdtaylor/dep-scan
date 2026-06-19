@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 #![cfg(unix)]
 /// Integration tests for task 042 — TempReqFile symlink / predictable-name hardening.
 ///

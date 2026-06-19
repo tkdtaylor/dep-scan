@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 /// Integration tests for task 055 — Sigstore re-verification audit on install path (L-9).
 ///
 /// These tests verify that when `--verbose` is passed, the install path emits a

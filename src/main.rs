@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 mod cache;
 mod cli;
 mod config;

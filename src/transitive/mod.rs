@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! Transitive dependency resolution (ADR 009).
 //!
 //! Task 102 provides the **pure algorithmic core** of the transitive walker: a

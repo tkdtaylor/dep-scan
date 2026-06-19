@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 /// Edit distance engine for typosquatting detection.
 ///
 /// Implements Levenshtein distance from scratch (no external crate) and provides

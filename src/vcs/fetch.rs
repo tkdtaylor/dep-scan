@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! Sandboxed, read-only VCS (git) fetch client — ADR 008 piece 2 (task 096).
 //!
 //! This module is dep-scan's **first network fetch of raw third-party source

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 /// Integration tests for task 047 — Cache I/O error surfacing.
 ///
 /// These tests verify that cache lookup errors and constructor errors are

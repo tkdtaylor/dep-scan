@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! End-to-end integration tests for git-sourced dependency scanning.
 //!
 //! T-093-09: exit code is non-zero when a git dep is present (warn-is-non-zero).

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 /// Integration tests for task 054 — cache DB privacy hardening (L-7).
 ///
 /// These tests verify that the cache DB file created by the dep-scan binary

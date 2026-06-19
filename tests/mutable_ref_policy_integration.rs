@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! End-to-end integration tests for the mutable-ref policy (task 094).
 //!
 //! T-094-21: Mutable-ref warn appears in `--format json` output.

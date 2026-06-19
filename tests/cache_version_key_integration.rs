@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 /// Integration and unit tests for task 038 — use resolved version as cache key
 /// instead of the literal string "latest".
 ///

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 /// Integration tests for task 053 — Scrub user-visible error output (L-6).
 ///
 /// These tests verify that the top-level error handler in `main()` gates the

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! End-to-end non-regression test for the [transitive] config block (task 107).
 //!
 //! T-107-14: [transitive] enabled=false produces stdout and exit code that are

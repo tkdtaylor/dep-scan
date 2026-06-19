@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! PyPI provenance attestation client (PEP 740 / PEP 691).
 //!
 //! Fetches and parses sigstore attestation bundles from PyPI's Simple Index

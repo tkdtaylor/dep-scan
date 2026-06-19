@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! PyPI provenance attestation policy (task 033 — PEP 740).
 //!
 //! Evaluates PyPI packages against their sigstore provenance attestations

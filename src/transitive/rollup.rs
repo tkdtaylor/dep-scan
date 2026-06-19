@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! Transitive verdict rollup (ADR 009 piece 4 — Decision 2c, task 104).
 //!
 //! The pure DFS engine (task 102) walks the dependency tree in post-order and
