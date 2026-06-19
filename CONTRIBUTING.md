@@ -63,6 +63,13 @@ and the task tracker in
 
 Do not start writing code before the task file exists.
 
+## Licensing and the DCO
+
+Code contributions are licensed under Apache-2.0 (inbound=outbound, §5). We use
+the Developer Certificate of Origin (DCO) instead of a CLA — sign off commits
+with `git commit -s` (appends `Signed-off-by:`); a CI check enforces it. No CLA
+required.
+
 ## Reporting security issues
 
 Do **not** open a public issue for security vulnerabilities. See

@@ -5,6 +5,7 @@ A cross-platform CLI tool that intercepts and scans every dependency before inst
 Local-first, fast, open source. Single Rust binary with no runtime dependencies.
 
 [![CI](https://github.com/tkdtaylor/dep-scan/actions/workflows/ci.yml/badge.svg)](https://github.com/tkdtaylor/dep-scan/actions/workflows/ci.yml)
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 
 ## Install
 
@@ -761,15 +762,27 @@ See [docs/architecture/overview.md](docs/architecture/overview.md) for system de
 See [SECURITY.md](SECURITY.md) for the vulnerability disclosure policy and
 how to report security issues in dep-scan itself.
 
-## Contributing
-
-See [CONTRIBUTING.md](CONTRIBUTING.md) for the build/test workflow, commit
-conventions, and how to propose new features.
-
 ## Code of conduct
 
 See [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md).
 
 ## License
 
-MIT
+dep-scan is licensed under the **Apache License 2.0** — free to use, modify, and distribute, including in commercial and proprietary products. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
+
+## Enterprise Support
+
+Need hardened deployments, integration help, or a support SLA? **Commercial support and consulting are available.**
+
+📧 Contact **[tools@taylorguard.me](mailto:tools@taylorguard.me)**
+
+## Sponsorship
+
+dep-scan is independent, open-source security tooling. If it saves you time or risk, consider sponsoring continued development:
+
+- 💜 [GitHub Sponsors](https://github.com/sponsors/tkdtaylor)
+<!-- - 🤝 [Open Collective](https://opencollective.com/dep-scan)  (uncomment once the collective exists) -->
+
+## Contributing
+
+Contributions are welcome and become part of the project under Apache-2.0. See [CONTRIBUTING.md](CONTRIBUTING.md). We use the **Developer Certificate of Origin (DCO)** — sign off your commits with `git commit -s`. No CLA required.
