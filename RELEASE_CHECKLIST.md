@@ -2,7 +2,7 @@
 
 Use this checklist every time a dep-scan release is cut. It exists because
 the v1.2.0 rollback exposed the gap — see
-[`docs/architecture/agent-rules.md`](docs/architecture/agent-rules.md) for
+[`docs/agent-rules.md`](docs/agent-rules.md) for
 the retro.
 
 ---
@@ -57,7 +57,7 @@ something equivalent to:
 Prior statements such as "keep going", "ship it", "fix them all", or "looks
 good" do **not** constitute authorization to tag. If there is any ambiguity,
 ask. This gate exists because of the v1.2.0 incident; see
-[`docs/architecture/agent-rules.md`](docs/architecture/agent-rules.md).
+[`docs/agent-rules.md`](docs/agent-rules.md).
 
 ---
 
@@ -123,4 +123,4 @@ git push origin :refs/tags/vX.Y.Z
   git push origin main
   ```
 - Document what went wrong: add a note to the CHANGELOG or a new section in
-  `docs/architecture/agent-rules.md`.
+  `docs/agent-rules.md`.

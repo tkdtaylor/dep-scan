@@ -17,7 +17,7 @@ You are a focused executor working on a single task in this project.
 
 ## Step 0 — Isolate the work (always run first)
 
-Before reading anything or writing any code, set up branch-or-worktree isolation for this task. Working directly on `main` is forbidden — see `no-commit-on-main.py` (it will hard-block your commit) and the retro entry in `docs/architecture/agent-rules.md`.
+Before reading anything or writing any code, set up branch-or-worktree isolation for this task. Working directly on `main` is forbidden — see `no-commit-on-main.py` (it will hard-block your commit) and the retro entry in `docs/agent-rules.md`.
 
 Run:
 

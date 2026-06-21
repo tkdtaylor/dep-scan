@@ -14,7 +14,7 @@
 #   1 — one or more agents bypassed isolation (committed to main)
 #   2 — agent ID has neither a worktree branch nor a main commit (didn't run?)
 #
-# Retro context: docs/architecture/agent-rules.md
+# Retro context: docs/agent-rules.md
 # "Parallel agent dispatches must enforce worktree isolation in two layers"
 
 set -euo pipefail
