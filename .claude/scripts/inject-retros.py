@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""SessionStart hook — inject relevant Failure-mode entries from CLAUDE.md
-when a session starts on a project that has an active task.
+"""SessionStart hook — inject relevant Failure-mode entries from the
+project briefing when a session starts on a project that has an active task.
 
-The "Failure modes" section in CLAUDE.md grows over a project's lifetime
+The "Failure modes" section in AGENTS.md / CLAUDE.md / docs/agent-rules.md
+grows over a project's lifetime
 with project-specific retros. Loading every retro into every session wastes
 tokens; the agent ignores ones that don't apply to the current work. This
 hook reads the active task spec, keyword-matches against retro headings,
@@ -101,9 +102,8 @@ def main():
         sys.exit(0)
 
     # Look for retros in the canonical briefing (AGENTS.md), the Claude layer
-    # (CLAUDE.md), and the full retro log (docs/agent-rules.md) — the latter is
-    # where projects keep the growing retro log, with essentials inlined into
-    # AGENTS.md.
+    # (CLAUDE.md), and the dedicated retro log (docs/agent-rules.md — where
+    # projects accumulate retros once the briefing gets too large).
     sources = [
         project / "AGENTS.md",
         project / "CLAUDE.md",

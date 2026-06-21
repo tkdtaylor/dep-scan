@@ -84,9 +84,22 @@ for lock in "${sessions_dir}"/*.lock; do
     active=$(( active + 1 ))
 done
 
-# Determine the default branch (prefer `main`, fall back to `master` or HEAD).
+# Determine the base branch task branches are cut from.
+# TASK_BASE_BRANCH (if set and existing) overrides default-branch discovery — the
+# /autopilot integration-branch flow sets it so tasks branch off the integration
+# branch instead of main. Unset → discover the default branch as usual.
 default_branch=""
+if [[ -n "${TASK_BASE_BRANCH:-}" ]]; then
+    if git show-ref --verify --quiet "refs/heads/${TASK_BASE_BRANCH}"; then
+        default_branch="${TASK_BASE_BRANCH}"
+    else
+        echo "start-task: TASK_BASE_BRANCH=${TASK_BASE_BRANCH} set but that branch does not exist" >&2
+        exit 2
+    fi
+fi
+# Prefer `main`, fall back to `master`/`trunk` or HEAD.
 for candidate in main master trunk; do
+    [[ -n "${default_branch}" ]] && break
     if git show-ref --verify --quiet "refs/heads/${candidate}"; then
         default_branch="${candidate}"
         break

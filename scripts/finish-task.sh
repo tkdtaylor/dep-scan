@@ -61,9 +61,20 @@ g() { git -C "$main_root" "$@"; }
 
 WORKTREE_ABS="${main_root}/${WORKTREE_REL}"
 
-# Determine the default branch.
+# Determine the merge target. TASK_BASE_BRANCH (if set and existing) overrides the
+# default branch — the /autopilot integration-branch flow sets it so each task
+# merges into the integration branch, not main. Unset → merge into the default branch.
 default_branch=""
+if [[ -n "${TASK_BASE_BRANCH:-}" ]]; then
+    if g show-ref --verify --quiet "refs/heads/${TASK_BASE_BRANCH}"; then
+        default_branch="${TASK_BASE_BRANCH}"
+    else
+        echo "finish-task: TASK_BASE_BRANCH=${TASK_BASE_BRANCH} set but that branch does not exist" >&2
+        exit 2
+    fi
+fi
 for cand in main master trunk; do
+    [[ -n "$default_branch" ]] && break
     if g show-ref --verify --quiet "refs/heads/${cand}"; then default_branch="$cand"; break; fi
 done
 [[ -n "$default_branch" ]] || { echo "finish-task: cannot determine default branch (no main/master/trunk)" >&2; exit 2; }

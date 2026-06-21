@@ -1,15 +1,30 @@
 # Backlog playbook
 
-Shared procedure for the `/backlog-*` slash commands. Each command sets two parameters and then follows this file:
+Shared procedure for the `/backlog-*` and `/autopilot` slash commands. Each command sets a few parameters and then follows this file:
 
 - **mode** — `sequential` (one task-executor at a time) or `parallel` (independent tasks concurrently, in worktrees)
 - **posture** — `supervised` (surface blockers for the user before starting) or `autonomous` (research/reason, decide, proceed)
+- **plan** — `off` (default; work only the existing backlog — the `/backlog-*` commands) or `on` (run **Phase 0** first to author tasks from the roadmap/goal when the backlog doesn't cover it — `/autopilot`)
+- **advance** — `per-task` (default; `finish-task.sh` merges each task into the default branch) or `integration` (all tasks land on one **integration branch**; one PR to the default branch at the end — `/autopilot`)
 
 **Optional argument (all commands): `--local`** (alias `--no-push`) — commit and merge each task **locally**, do not push after each task. Default: follow the project's `CLAUDE.md` commit/push rules.
 
 *Why this exists:* many projects run GitHub Actions on push. Pushing after every task in a multi-task run re-triggers the whole CI suite once per task, burning Actions minutes for no added signal. `--local` keeps the work entirely local during the run. At the **end** of the run, offer a single `git push` of the accumulated commits so CI runs **once** over the batch — unless the user asked for no push at all. Never auto-push mid-run under `--local`.
 
-The three phases below run for every variant. Only Phase 2 branches on posture and Phase 3 branches on mode.
+Phase 0 runs only when `plan=on`. The three core phases run for every variant: Phase 2 branches on posture, Phase 3 branches on mode + advance.
+
+---
+
+## Phase 0 — Plan (only when `plan=on`)
+
+Turns a roadmap or high-level goal into an executable backlog when one isn't already there. Same analytical rigor as triage — but it *authors* tasks rather than ordering existing ones.
+
+1. **Establish the goal.** Read `docs/plans/roadmap.md`; weight any goal/scope text passed in `$ARGUMENTS` above the roadmap. Read `docs/spec/SPEC.md` and skim the codebase (architecture overview, entry points, existing source) so the plan reflects the *current* state, not a greenfield assumption.
+2. **Coverage check.** List the READY tasks in `docs/tasks/backlog/`. Decide whether they already cover the next increment toward the goal. If they do → skip to Phase 1 (nothing to plan). If the repo has tasks but they don't reach the goal, plan only the *gap*.
+3. **Decompose.** For the next increment, author well-scoped task files + paired test specs via the `task-planner` agent — one responsibility per task, dependency-ordered, next sequential `NNN`, test-spec-before-code. Don't plan the entire goal in one shot if it's large; plan a coherent increment and rely on the re-plan loop (below) for the rest.
+4. **Record.** Commit the new tasks (`[allow-main]` if on the default branch) so the plan is traceable, then proceed to Phase 1.
+
+**Posture:** `autonomous` plans and proceeds without a checkpoint. `supervised` presents the proposed task list and waits for approval before Phase 1.
 
 ---
 
@@ -55,6 +70,19 @@ Emit a **triage summary**: the ordered/leveled plan, the dependency graph, the R
 
 Skipped tasks are always listed in the final summary — never buried.
 
+**Keep the executor moving (autonomous posture) — this is the orchestrator's core job.** A dispatched `task-executor` (or `task-planner`) sub-agent will often, instead of finishing, defer: ask a clarifying question, present options and wait, declare partial/early "done", hedge (*"I'd suggest…"*, *"do you want me to…"*, *"let me know how to proceed"*), or refuse a benign step pending confirmation. These are model quirks, **not** real blockers. In autonomous posture the orchestrator does **not** forward them to the user — it absorbs the deference and drives the work forward:
+
+1. **Treat any question / options / confirmation request as a decision for the orchestrator to make.** Research it (codebase, `docs/spec/`, framework docs, WebSearch) and/or reason it through against the goal, spec, and conventions; pick the option most consistent with them (prefer the executor's own recommendation when sound). Record an ADR for any non-trivial choice.
+2. **Re-dispatch the same task** with the decision supplied and an explicit instruction: *proceed to completion, do not stop to ask again, make reasonable default choices for anything minor and note them in your report.* Point it at the branch/files already in progress so work isn't redone.
+3. **Detect false stops.** "Done" with acceptance criteria unmet, the gate not run, or the test spec unaddressed is **not** done — re-dispatch with the specific gap. Only genuinely external needs — credentials, a third party, or an irreversible product/business call — are real blockers (→ SKIPPED-blocked, surfaced at the end). Style, naming, library choice, decidable-but-ambiguous scope, "should I also…" are the orchestrator's to decide and continue.
+4. **Bound it.** Cap re-dispatches per task (2–3). If it still won't converge, escalate the model tier (`architect`/`code-reviewer`) or mark **SKIPPED-low-confidence** — never spin forever, and never lower the confidence bar just to force a pass.
+
+The model doing a task tends to defer to a human; the agent running the loop exists to *be* that human — decide, answer, and keep it moving — so a long unattended run actually finishes instead of stalling on the first question.
+
+**Advance-policy setup (do once, before dispatching any task):**
+- `advance=per-task` (default) → tasks merge into the default branch as the steps below describe. Nothing extra to set up.
+- `advance=integration` → before the first task, create an integration branch off the default branch — `git checkout <default> && git checkout -b autopilot/<goal-slug>` (derive the slug from the goal; keep it stable for the whole run) — and **export `TASK_BASE_BRANCH=autopilot/<goal-slug>`** for every `start-task.sh`/`finish-task.sh` call in this phase. That makes each task branch *off* and `finish-task` merge *into* the integration branch, so the default branch is never touched mid-run. **Always call `finish-task.sh` with `--local` under this policy** (the integration branch is pushed once, at the end). The end-of-run PR step is in the final-summary section.
+
 ### mode = sequential
 
 For each READY task in priority + dependency order:
@@ -77,13 +105,18 @@ For each READY task in priority + dependency order:
 
 ---
 
+## Re-plan loop (only when `plan=on`)
+
+After Phase 3 drains the READY set, re-run Phase 0's coverage check against the goal. If executable work remains toward the goal and isn't blocked, plan the next increment (author the next tasks) and loop back through Phases 1–3. Stop when the goal is satisfied, or only blocked / low-confidence work remains, or **two consecutive plan rounds add nothing executable** (the bound — never spin). Each round's new tasks land on the same integration branch under `advance=integration`.
+
 ## Final summary (always)
 
 - **Completed** — task NNN, commit SHA, highest verification level reached (L1–L6).
 - **Skipped / blocked** — task NNN, reason (blocked / low-confidence), and for autonomous the decision recorded (ADR path).
 - **Decisions** — ADRs written (autonomous) or decision blocks still awaiting the user (supervised).
-- **New tasks identified** during triage but not yet created, if any.
-- **Push** — under `--local`, offer a single `git push` of all accumulated commits now (one CI run over the whole batch), unless the user asked for no push at all.
+- **New tasks** — for `plan=on`, the tasks authored in Phase 0 / re-plan rounds and their outcomes; for `/backlog-*`, tasks identified during triage but not created.
+- **Integration PR** (`advance=integration`) — push the integration branch and open **one PR** to the default branch (`gh pr create --base <default> --head autopilot/<goal-slug> --fill`, body = the completed/skipped summary); report its URL. **Do not merge it** — the human reviews. Under `--local` **or when the repo has no remote**, skip the PR and report the integration branch name + `git log <default>..autopilot/<goal-slug>` instead. **Never merge the integration branch into the default branch yourself — not even with no remote.** Auto-merging to the default branch is the exact review gate this advance policy exists to preserve; leave the merge to the human (they merge, or open the PR once a remote exists).
+- **Push** (`advance=per-task`) — under `--local`, offer a single `git push` of all accumulated commits now (one CI run over the whole batch), unless the user asked for no push at all.
 
 Then run a **closure sweep** to confirm nothing leaked:
 
