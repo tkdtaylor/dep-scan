@@ -7,6 +7,17 @@ Local-first, fast, open source. Single Rust binary with no runtime dependencies.
 [![CI](https://github.com/tkdtaylor/dep-scan/actions/workflows/ci.yml/badge.svg)](https://github.com/tkdtaylor/dep-scan/actions/workflows/ci.yml)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 
+## Scope
+
+**What dep-scan does:** supply-chain / dependency CVE scanning with reachability analysis; emits SARIF, CycloneDX/SPDX SBOMs, and CVSS/VEX.
+
+**What it does *not* do (and which sibling owns it instead):**
+- Detecting malicious *code logic* — backdoors, droppers, obfuscated payloads → **code-scanner**
+- Isolating or executing untrusted code → **exec-sandbox**
+- Runtime prompt / output / tool-call defense → **armor**
+
+`dep-scan` is one block in a composable secure-agent ecosystem — each block is standalone and independently usable, and composes with its siblings over published contracts rather than absorbing their responsibilities (no central "god object").
+
 ## Install
 
 ```bash
@@ -781,7 +792,6 @@ Need hardened deployments, integration help, or a support SLA? **Commercial supp
 dep-scan is independent, open-source security tooling. If it saves you time or risk, consider sponsoring continued development:
 
 - 💜 [GitHub Sponsors](https://github.com/sponsors/tkdtaylor)
-<!-- - 🤝 [Open Collective](https://opencollective.com/dep-scan)  (uncomment once the collective exists) -->
 
 ## Contributing
 
