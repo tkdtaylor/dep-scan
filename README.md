@@ -30,8 +30,7 @@ cargo install --locked --git https://github.com/tkdtaylor/dep-scan.git
 
 ### Optional: verify the download with cosign
 
-Every release artifact is signed with [sigstore](https://sigstore.dev) keyless OIDC signing.
-If you have [cosign](https://github.com/sigstore/cosign) installed you can verify before running:
+Every release artifact is signed with [sigstore](https://sigstore.dev) keyless OIDC signing. If you have [cosign](https://github.com/sigstore/cosign) installed you can verify before running:
 
 ```bash
 VERSION=v1.3.1
@@ -45,16 +44,11 @@ cosign verify-blob \
   "${ARTIFACT}"
 ```
 
-The `.sig` and `.crt` companion files are published alongside each binary in the
-[GitHub Release](https://github.com/tkdtaylor/dep-scan/releases). Verification is optional —
-the existing `sha256sums.txt` check is unaffected.
+The `.sig` and `.crt` companion files are published alongside each binary in the [GitHub Release](https://github.com/tkdtaylor/dep-scan/releases). Verification is optional — the existing `sha256sums.txt` check is unaffected.
 
 ### SBOM
 
-Each release also ships a [CycloneDX](https://cyclonedx.org/) SBOM
-(`dep-scan.cdx.json`) listing every direct and transitive Rust dependency.
-Download it from the release assets to audit dep-scan's own supply chain with
-Trivy, Grype, or Dependency-Track.
+Each release also ships a [CycloneDX](https://cyclonedx.org/) SBOM (`dep-scan.cdx.json`) listing every direct and transitive Rust dependency. Download it from the release assets to audit dep-scan's own supply chain with Trivy, Grype, or Dependency-Track.
 
 ## Quick start
 
@@ -109,9 +103,7 @@ dep-scan runs **12 security policies** against every package:
 
 ### Dogfood policy
 
-dep-scan's CI scans its own `Cargo.lock` on every push. When dep-scan reports a
-block verdict on one of its own transitive dependencies, the maintainer has
-three options:
+dep-scan's CI scans its own `Cargo.lock` on every push. When dep-scan reports a block verdict on one of its own transitive dependencies, the maintainer has three options:
 
 1. **Fix the root cause in code** — correct response for false positives (e.g. the
    `version_check` typosquat false-positive, fixed by adjusting heuristics).
@@ -121,11 +113,7 @@ three options:
    audited maintainer rotation), record the justification in
    `.dep-scan-dogfood-allowlist.toml`.
 
-The file `.dep-scan-dogfood-allowlist.toml` at the repo root is CI metadata,
-not a dep-scan feature. dep-scan itself still reports every block; the
-`scripts/dogfood-gate.py` gate reads the allowlist and downgrades matched
-blocks from `::error::` (build failure) to `::warning::` (logged but not
-failing). Unmatched blocks still fail the build.
+The file `.dep-scan-dogfood-allowlist.toml` at the repo root is CI metadata, not a dep-scan feature. dep-scan itself still reports every block; the `scripts/dogfood-gate.py` gate reads the allowlist and downgrades matched blocks from `::error::` (build failure) to `::warning::` (logged but not failing). Unmatched blocks still fail the build.
 
 **Allowlist entry fields:**
 
@@ -138,13 +126,9 @@ failing). Unmatched blocks still fail the build.
 | `version` | no | Exact-match version string; omit to match any version |
 | `expires` | no | ISO date after which the entry is inert; use for transient blocks |
 
-**When to use `expires`:** Always set it for age-policy blocks — those resolve
-naturally once the package is >48h old. Set it ~48-72h after the block was
-first observed. For investigated maintainer changes, `expires` is optional but
-recommended to ensure entries get periodically reviewed.
+**When to use `expires`:** Always set it for age-policy blocks — those resolve naturally once the package is >48h old. Set it ~48-72h after the block was first observed. For investigated maintainer changes, `expires` is optional but recommended to ensure entries get periodically reviewed.
 
-**Rule: never allowlist a verdict you haven't actually investigated.** An
-unexplained allowlist entry is indistinguishable from negligence.
+**Rule: never allowlist a verdict you haven't actually investigated.** An unexplained allowlist entry is indistinguishable from negligence.
 
 ### Cache integrity (always on)
 
@@ -183,15 +167,7 @@ See [ADR 003](docs/architecture/decisions/003-content-hash-cache-integrity.md) f
 
 ### Signed interchange output
 
-The machine-readable interchange formats (`osv`, `cyclonedx`, `spdx`, `vex`) are
-**DSSE-signed by default**, once per run over the whole result set. dep-scan signs
-either with a sigstore keyless identity (when `[signing] fulcio_url`/`rekor_url`/`oidc_token`
-are configured and the network is reachable) or with an offline operator key
-(`[signing] key_path`, a PEM PKCS#8 Ed25519 key). With no signing key configured on
-the offline path, a signed-format request **fails closed** — nothing is written to
-stdout. Pass `--allow-unsigned` to emit the raw payload with an explicit
-`"_dep_scan_unsigned": true` marker instead. The `native` and `json` paths are never
-signed.
+The machine-readable interchange formats (`osv`, `cyclonedx`, `spdx`, `vex`) are **DSSE-signed by default**, once per run over the whole result set. dep-scan signs either with a sigstore keyless identity (when `[signing] fulcio_url`/`rekor_url`/`oidc_token` are configured and the network is reachable) or with an offline operator key (`[signing] key_path`, a PEM PKCS#8 Ed25519 key). With no signing key configured on the offline path, a signed-format request **fails closed** — nothing is written to stdout. Pass `--allow-unsigned` to emit the raw payload with an explicit `"_dep_scan_unsigned": true` marker instead. The `native` and `json` paths are never signed.
 
 Consumers verify against the operator's public key, which you export with:
 
@@ -208,10 +184,7 @@ dep-scan config init    # creates .dep-scan.toml in current directory
 dep-scan config show    # prints effective configuration
 ```
 
-Example `.dep-scan.toml`. The annotated comments below are explanatory
-only — `dep-scan config init` writes the same keys with the same default
-values, but without the comments (and with the multi-line array layout
-`toml::to_string_pretty` produces).
+Example `.dep-scan.toml`. The annotated comments below are explanatory only — `dep-scan config init` writes the same keys with the same default values, but without the comments (and with the multi-line array layout `toml::to_string_pretty` produces).
 
 ```toml
 min_package_age_hours = 48
@@ -411,13 +384,7 @@ dep-scan install express --registry npm --verbose
 # → [audit] express@5.0.1 hash=sha512:… verdict=pass sigstore_reverified=false (L-9)  # npm example
 ```
 
-The `--verbose` audit line (v1.2.0) records exactly what version + content
-hash the wrapped package manager is about to fetch, and explicitly notes
-that sigstore provenance is verified only at scan time — not re-run between
-scan-pass and `npm/cargo/go install` (the documented TOCTOU gap in
-[ADR 003](docs/architecture/decisions/003-content-hash-cache-integrity.md)).
-For pip the audit line also confirms the sha256 was re-checked between
-scan-pass and `pip install --require-hashes`.
+The `--verbose` audit line (v1.2.0) records exactly what version + content hash the wrapped package manager is about to fetch, and explicitly notes that sigstore provenance is verified only at scan time — not re-run between scan-pass and `npm/cargo/go install` (the documented TOCTOU gap in [ADR 003](docs/architecture/decisions/003-content-hash-cache-integrity.md)). For pip the audit line also confirms the sha256 was re-checked between scan-pass and `pip install --require-hashes`.
 
 `--registry` accepts `npm`, `pypi`, `crates`, or `go`. `--force` proceeds with the install even when policies block — use it sparingly. Without `--force`, a policy violation aborts before the package manager runs.
 
@@ -752,9 +719,14 @@ cargo clippy            # lint
 cargo fmt --check       # check formatting
 ```
 
-## Architecture
+## Documentation
 
-See [docs/architecture/overview.md](docs/architecture/overview.md) for system design and [docs/architecture/decisions/](docs/architecture/decisions/) for ADRs:
+- [docs/architecture/overview.md](docs/architecture/overview.md) — system design and component breakdown
+- [docs/architecture/diagrams.md](docs/architecture/diagrams.md) — C4 context/container diagrams and runtime flows
+- [docs/spec/SPEC.md](docs/spec/SPEC.md) — authoritative current-state spec (behaviors, data model, interfaces, configuration)
+- [docs/plans/roadmap.md](docs/plans/roadmap.md) — shipped milestones and planned work
+
+Architecture decisions are recorded as ADRs in [docs/architecture/decisions/](docs/architecture/decisions/):
 
 - [ADR 001](docs/architecture/decisions/001-language-choice.md) — Rust as implementation language
 - [ADR 002](docs/architecture/decisions/002-detection-strategy.md) — v0.2 detection strategy and external data sources
@@ -770,8 +742,7 @@ See [docs/architecture/overview.md](docs/architecture/overview.md) for system de
 
 ## Security
 
-See [SECURITY.md](SECURITY.md) for the vulnerability disclosure policy and
-how to report security issues in dep-scan itself.
+See [SECURITY.md](SECURITY.md) for the vulnerability disclosure policy and how to report security issues in dep-scan itself.
 
 ## Code of conduct
 

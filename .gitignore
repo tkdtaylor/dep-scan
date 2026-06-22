@@ -9,6 +9,8 @@ target/
 .claude/worktrees/
 .claude/sessions/
 .claude/settings.local.json
+# Per-session checkpoint marker (written by the checkpoint hook)
+.claude/.last-checkpoint
 codescan-reports/
 
 # Python bytecode — also emitted by .claude/scripts/ hooks
