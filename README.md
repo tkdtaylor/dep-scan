@@ -12,9 +12,9 @@ Local-first, fast, open source. Single Rust binary with no runtime dependencies.
 **What dep-scan does:** supply-chain / dependency CVE scanning with reachability analysis; emits SARIF, CycloneDX/SPDX SBOMs, and CVSS/VEX.
 
 **What it does *not* do (and which sibling owns it instead):**
-- Detecting malicious *code logic* — backdoors, droppers, obfuscated payloads → **code-scanner**
-- Isolating or executing untrusted code → **exec-sandbox**
-- Runtime prompt / output / tool-call defense → **armor**
+- Detecting malicious *code logic* — backdoors, droppers, obfuscated payloads → **[code-scanner](https://github.com/tkdtaylor/code-scanner)**
+- Isolating or executing untrusted code → **exec-sandbox** (Coming soon)
+- Runtime prompt / output / tool-call defense → **[armor](https://github.com/tkdtaylor/armor)**
 
 `dep-scan` is one block in a composable secure-agent ecosystem — each block is standalone and independently usable, and composes with its siblings over published contracts rather than absorbing their responsibilities (no central "god object").
 
