@@ -188,12 +188,12 @@ sequenceDiagram
     sig->>roots: 5. Fulcio chain walk against fulcio-roots/*.der
     roots-->>sig: chain ok
     sig->>sig: 6. extract public key from leaf
-    sig->>sig: 7. DSSE signature verify [ECDSA P-256 over PAE]
-    sig->>snote: 8. parse + verify_ecdsa_p256 [inclusion proof + signed checkpoint]
-    snote-->>sig: ParsedNote [reused, no second parse]
+    sig->>sig: 7. DSSE signature verify (ECDSA P-256 over PAE)
+    sig->>snote: 8. parse + verify_ecdsa_p256 (inclusion proof + signed checkpoint)
+    snote-->>sig: ParsedNote (reused, no second parse)
     sig->>roots: verify Rekor signature against rekor-roots/rekor.pub
     roots-->>sig: signature ok
-    sig->>sig: 9. integratedTime ∈ [notBefore, notAfter] of leaf cert
+    sig->>sig: 9. integratedTime ∈ (notBefore, notAfter) of leaf cert
     sig->>sig: 10. extract first URI SAN as identity
     sig->>sig: 11. structural Fulcio OID check (belt-and-braces, LAST)
     sig-->>pol: Ok(provenance_identity)
@@ -213,12 +213,12 @@ flowchart TD
     FetchReg --> Sha1{Cached starts with sha1:?}
     Sha1 -->|Yes| Scan
     Sha1 -->|No| Compare{cached vs registry}
-    Compare -->|"Some(a) == Some(a)"| Honor[Honor cached verdict]
-    Compare -->|"Some(a) != Some(b)"| Invalidate1[Invalidate + re-scan]
-    Compare -->|"Some(a) vs None"| Invalidate2[Invalidate + re-scan]
-    Compare -->|"None vs Some(b)"| ReScan1["Legacy row, upgrade + re-scan"]
-    Compare -->|"None vs None"| ReScan2["Both-None: never honor, re-scan"]
-    Compare -->|"Fetch fails"| ReScan3[Re-scan, treat as failure-to-verify]
+    Compare -->|cached == registry| Honor[Honor cached verdict]
+    Compare -->|cached != registry| Invalidate1[Invalidate + re-scan]
+    Compare -->|cached set, registry None| Invalidate2[Invalidate + re-scan]
+    Compare -->|cached None, registry set| ReScan1["Legacy row, upgrade + re-scan"]
+    Compare -->|both None| ReScan2["Both-None: never honor, re-scan"]
+    Compare -->|fetch fails| ReScan3[Re-scan, treat as failure-to-verify]
     Scan --> Write[Write cache row]
     Honor --> Done[Use verdict]
     Invalidate1 --> Scan
