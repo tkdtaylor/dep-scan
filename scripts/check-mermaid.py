@@ -18,10 +18,14 @@ Patterns flagged (inside ```mermaid fences only):
   - A reserved keyword used as a participant/actor id (`box`, `note`, `end`, `loop`,
     `alt`, `opt`, `par`, `rect`, `class`, `state`, `activate`, `deactivate`, …).
   - An inline `%%` comment — Mermaid comments must be on their own line.
-  - Parentheses inside an unquoted flowchart edge label `|...|` — wrap it in quotes.
+  - Parentheses inside a flowchart edge label `|...|`. GitHub does NOT honor `"…"`
+    quotes inside pipe labels, so quoting does not help — remove/rephrase the parens.
+  - Square brackets `[` `]` in a sequenceDiagram message or note. GitHub parses `[`
+    as syntax, not message text, and fails — drop them or use `(` `)`.
 
 The fix is almost always: replace `;` with `,`/" and ", rename the participant id,
-move the `%%` to its own line, or quote the edge label `-->|"a (b)"|`.
+move the `%%` to its own line, drop the parens from an edge label, or swap `[..]`
+for `(..)` in a sequence message.
 """
 from __future__ import annotations
 
@@ -41,6 +45,24 @@ RESERVED_PARTICIPANT_IDS = {
 _part_re = re.compile(r"^\s*(?:participant|actor)\s+([A-Za-z_][\w-]*)\b", re.IGNORECASE)
 _entity_re = re.compile(r"&(?:[a-zA-Z]+|#\d+);")
 _edge_label_re = re.compile(r"\|([^|]*)\|")
+
+# A sequenceDiagram message (`A->>B: text`) or a note/loop/alt/opt with trailing
+# text after a `:`. Sequence arrows: -> --> ->> -->> -x --x -) --) and the
+# bidirectional <<->> / <<-->>. We only need the text after the first `:`.
+_seq_arrow_re = re.compile(r"(?:<<-?-?>>|--?>>?|--?x|--?\))")
+_seq_msg_re = re.compile(r"^\s*\S.*?" + _seq_arrow_re.pattern + r".*?:\s*(?P<msg>.*)$")
+_seq_note_re = re.compile(r"^\s*(?:note|loop|alt|opt|par|rect|critical|break)\b.*?:\s*(?P<msg>.*)$",
+                          re.IGNORECASE)
+
+
+def block_kind(body: list[str]) -> str:
+    """First non-blank, non-comment body line names the diagram kind (lowercased)."""
+    for raw in body:
+        s = raw.strip()
+        if not s or s.startswith("%%"):
+            continue
+        return s.split()[0].lower()
+    return ""
 
 
 def find_blocks(text: str):
@@ -63,6 +85,8 @@ def find_blocks(text: str):
 
 def lint_block(start_line: int, body: list[str]):
     issues = []
+    kind = block_kind(body)
+    is_sequence = kind in ("sequencediagram",)
     for offset, raw in enumerate(body):
         lineno = start_line + offset
         line = raw.rstrip("\n")
@@ -93,12 +117,24 @@ def lint_block(start_line: int, body: list[str]):
         if m and m.group(1).lower() in RESERVED_PARTICIPANT_IDS:
             issues.append((lineno, f"`{m.group(1)}` is a reserved Mermaid keyword — rename this participant id", line))
 
-        # Parentheses inside an unquoted flowchart edge label |...|.
-        for em in _edge_label_re.finditer(line):
-            label = em.group(1).strip()
-            if ("(" in label or ")" in label) and not (label.startswith('"') and label.endswith('"')):
-                issues.append((lineno, 'parentheses in an unquoted edge label — wrap it: -->|"…"|', line))
-                break
+        # Parentheses inside a flowchart edge label |...|. GitHub does NOT honor
+        # `"…"` quoting inside pipe labels, so a quoted label with parens still
+        # fails — flag regardless of quotes; the fix is to remove/rephrase them.
+        if not is_sequence:
+            for em in _edge_label_re.finditer(line):
+                label = em.group(1).strip()
+                if "(" in label or ")" in label:
+                    issues.append((lineno, "parentheses in an edge label break GitHub "
+                                   "(quotes are not honored here) — remove or rephrase them", line))
+                    break
+
+        # Square brackets in a sequenceDiagram message/note — GitHub parses `[` as
+        # syntax, not text, and fails. (Brackets are legal node syntax elsewhere.)
+        if is_sequence:
+            m = _seq_msg_re.match(line) or _seq_note_re.match(line)
+            if m and ("[" in m.group("msg") or "]" in m.group("msg")):
+                issues.append((lineno, "`[`/`]` in a sequence message break GitHub's "
+                               "parser — drop them or use `(`/`)`", line))
     return issues
 
 
