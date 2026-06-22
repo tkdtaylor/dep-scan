@@ -84,6 +84,27 @@ dep-scan's own commitments are captured in ADRs 005 and 006 and are authoritativ
 
 ## Data flow
 
+The high-level path for `dep-scan install`; the annotated text below it is the
+authoritative step-by-step reference.
+
+```mermaid
+flowchart TD
+    Run["dep-scan install express --registry npm"] --> Validate["Validate inputs<br/>fail-closed: reject -flag names, Go path/version grammar"]
+    Validate --> Check["run_check<br/>same path as dep-scan check"]
+    Check --> Config[Load config: .dep-scan.toml + env + flags]
+    Config --> Fetch["Fetch registry metadata<br/>resolve version, e.g. 5.0.1"]
+    Fetch --> Cache{Cache lookup<br/>name, resolved version, registry}
+    Cache -->|hit, hash matches| Honor[Honor cached verdict]
+    Cache -->|miss / differ / sha1 / either-None| Policy["Policy pipeline<br/>age, scripts, obfuscation, maintainer,<br/>typosquat, OSV, popularity, dep-confusion, provenance"]
+    Policy --> Verify["Provenance verify<br/>npm/PyPI: Fulcio + DSSE + Rekor; Go: go_sumdb"]
+    Verify --> Write["Cache result<br/>npm sha1 NULLed on pass/warn"]
+    Write --> Format[Format output: table or JSON]
+    Honor --> Format
+    Format --> Gate{Verdict}
+    Gate -->|pass, exit 0| Exec["Scan-and-exec package manager<br/>pip uses --require-hashes to close TOCTOU"]
+    Gate -->|warn/block, exit 1| Abort[Abort before package manager runs]
+```
+
 ```
 User runs: dep-scan install express --registry npm
   → Validate inputs (fail-closed before any network or subprocess call):
