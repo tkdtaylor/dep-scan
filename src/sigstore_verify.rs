@@ -1881,6 +1881,7 @@ mod static_audit {
         // so we don't accidentally pick up a stray code comment elsewhere.
         let header: String = src
             .lines()
+            .skip_while(|l| !l.starts_with("//!"))
             .take_while(|l| l.starts_with("//!") || l.is_empty())
             .collect::<Vec<_>>()
             .join("\n");
@@ -2523,6 +2524,7 @@ mod rekor_tests {
         // "Rekor verification is NOT performed" wording from task 035.
         let header: String = src
             .lines()
+            .skip_while(|l| !l.starts_with("//!"))
             .take_while(|l| l.starts_with("//!") || l.is_empty())
             .collect::<Vec<_>>()
             .join("\n");
