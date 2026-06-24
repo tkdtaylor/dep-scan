@@ -73,6 +73,22 @@ justification = "Transient age block — serde_json publishes a new patch every 
 opened_at = "2026-05-22"
 expires = "2026-05-25"
 
+[[allow]]
+package = "quinn-proto"
+version = "0.11.15"
+policy = "age"
+justification = "Transient age block — quinn-proto 0.11.15 is the patched release for RUSTSEC-2026-0185 (remote memory exhaustion, severity 7.5). We bumped to it from 0.11.14 specifically to clear that vulnerability, so the package is unavoidably < 48h old at scan time (~43h). Maintained by the quinn-rs org. The age floor and the vuln fix are in direct tension here; the security fix wins. Block resolves once the package is >48h old (≈2026-06-24 10:00 UTC)."
+opened_at = "2026-06-24"
+expires = "2026-06-27"
+
+[[allow]]
+package = "memmap2"
+version = "0.9.11"
+policy = "age"
+justification = "Transient age block — memmap2 0.9.11 is the patched release for RUSTSEC-2026-0186 (unchecked pointer offset / unsoundness). We bumped to it from 0.9.10 specifically to clear that advisory, so the package is unavoidably < 48h old at scan time (~37h). Maintained by Andrew Gallant (BurntSushi) et al. Security fix takes precedence over the age floor. Block resolves once the package is >48h old (≈2026-06-24 16:00 UTC)."
+opened_at = "2026-06-24"
+expires = "2026-06-27"
+
 # ---------------------------------------------------------------------------
 # Maintainer-change blocks (investigated)
 # ---------------------------------------------------------------------------
