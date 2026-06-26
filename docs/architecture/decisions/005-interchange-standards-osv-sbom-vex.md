@@ -91,5 +91,5 @@ subject of [ADR 006](006-runtime-statement-integrity.md).
 - [ADR 006](006-runtime-statement-integrity.md) — runtime statement integrity (signing the flowing statements)
 - Task 011 — OSV.dev integration (consume side)
 - Task 069 — CycloneDX SBOM per release
-- Ecosystem standards table: `interface-contracts.md` §1a — maintained in the **external** secure-agent
+- Ecosystem standards table: the shared interface-contracts reference §1a — maintained in the
   **external** secure-agent planning hub, not in this repository
