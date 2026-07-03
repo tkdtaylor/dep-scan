@@ -9,7 +9,7 @@ Local-first, fast, open source. Single Rust binary with no runtime dependencies.
 
 ## Scope
 
-**What dep-scan does:** supply-chain / dependency CVE scanning with reachability analysis; emits SARIF, CycloneDX/SPDX SBOMs, and CVSS/VEX.
+**What dep-scan does:** supply-chain / dependency CVE scanning; emits CycloneDX/SPDX SBOMs, OSV-backed vulnerability findings, and CVSS/VEX statements.
 
 **What it does *not* do (and which sibling owns it instead):**
 - Detecting malicious *code logic* — backdoors, droppers, obfuscated payloads → **[code-scanner](https://github.com/tkdtaylor/code-scanner)**
