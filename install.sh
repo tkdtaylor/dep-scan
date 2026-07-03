@@ -28,9 +28,13 @@ cleanup() {
 }
 trap cleanup EXIT
 
+NO_VERIFY=false
+PIN_VERSION=""
 for arg in "$@"; do
   case "$arg" in
     --dry-run) DRY_RUN=true ;;
+    --no-verify) NO_VERIFY=true ;;
+    --version=*) PIN_VERSION="${arg#--version=}" ;;
   esac
 done
 
@@ -88,12 +92,17 @@ main() {
 
   echo "Detected platform: ${os}/${arch} (${target})"
 
-  version="$(get_latest_version)"
-  if [ -z "$version" ]; then
-    echo "Error: could not determine latest version" >&2
-    exit 1
+  if [ -n "$PIN_VERSION" ]; then
+    version="$PIN_VERSION"
+    echo "Pinned version: ${version}"
+  else
+    version="$(get_latest_version)"
+    if [ -z "$version" ]; then
+      echo "Error: could not determine latest version" >&2
+      exit 1
+    fi
+    echo "Latest version: ${version}"
   fi
-  echo "Latest version: ${version}"
 
   if [ "$os" = "windows" ]; then
     ext="zip"
@@ -131,8 +140,12 @@ main() {
     grep "$filename" sha256sums.txt | sha256sum -c --quiet
   elif command -v shasum >/dev/null 2>&1; then
     grep "$filename" sha256sums.txt | shasum -a 256 -c --quiet
+  elif [ "$NO_VERIFY" = true ]; then
+    echo "Warning: checksum verification SKIPPED (--no-verify; no sha256sum/shasum found)"
   else
-    echo "Warning: could not verify checksum (sha256sum/shasum not found)"
+    echo "Error: cannot verify the download — neither sha256sum nor shasum is installed." >&2
+    echo "Install one of them, or re-run with --no-verify to accept an unverified binary." >&2
+    exit 1
   fi
   cd - >/dev/null
 
