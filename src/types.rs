@@ -70,6 +70,12 @@ pub struct ScanContext {
     /// When set, the provenance policy must surface this as an error rather
     /// than silently treating it as "no attestations".
     pub npm_attestation_fetch_error: Option<String>,
+    /// Network or parse error that occurred while querying OSV.dev, if any.
+    ///
+    /// When set, the vulnerability policy must surface it (warn at minimum) —
+    /// an empty vulnerability list from a failed lookup must never read as
+    /// "no known vulnerabilities".
+    pub osv_fetch_error: Option<String>,
     /// Pre-fetched PyPI provenance attestation bundle (task 033 — PEP 740).
     ///
     /// `None` means the provenance URL was not queried (e.g. non-PyPI package
@@ -106,6 +112,7 @@ impl ScanContext {
             git_source: None,
             npm_attestations: None,
             npm_attestation_fetch_error: None,
+            osv_fetch_error: None,
             pypi_attestation: None,
             pypi_provenance_fetch_error: None,
             provenance_identity: None,
@@ -396,6 +403,7 @@ mod tests {
             git_source: None,
             npm_attestations: None,
             npm_attestation_fetch_error: None,
+            osv_fetch_error: None,
             pypi_attestation: None,
             pypi_provenance_fetch_error: None,
             provenance_identity: None,

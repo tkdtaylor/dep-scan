@@ -117,8 +117,12 @@ Each policy implements the trait in [`src/policy/mod.rs`](../../src/policy/mod.r
 
 - Queries OSV.dev with `(ecosystem, name, version)`. Ecosystem mapping: `npm → npm`, `PyPI → PyPI`, `crates → crates.io`, `go → Go`.
 - **Block** on any hit. Reason lists the OSV ID + severity if surfaced.
-- **Pass** on empty results.
-- A non-200 OSV response MUST NOT be silently swallowed.
+- **Pass** on empty results from a successful query.
+- A failed OSV lookup (network error, non-200, parse failure) is recorded on the
+  scan context (`osv_fetch_error`) and the policy returns **Warn** at minimum:
+  "vulnerability status is UNKNOWN, not clean" — an empty result from a failed
+  fetch never reads as a Pass. The failure is also printed to stderr
+  unconditionally (not gated on `--verbose`).
 
 ### B-011: Policy P-06 (`maintainer_change`) — warn/block on identity drift
 

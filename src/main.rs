@@ -1476,9 +1476,8 @@ async fn run_check(
                         }
                     }
                     Err(e) => {
-                        if verbose {
-                            eprintln!("Warning: OSV lookup failed for {pkg_name}: {e:#}");
-                        }
+                        eprintln!("Warning: OSV lookup failed for {pkg_name}: {e:#}");
+                        ctx.osv_fetch_error = Some(format!("{e:#}"));
                     }
                 }
             } else {
@@ -1492,9 +1491,8 @@ async fn run_check(
                         ctx.vulnerabilities = vulns;
                     }
                     Err(e) => {
-                        if verbose {
-                            eprintln!("Warning: OSV lookup failed for {pkg_name}: {e:#}");
-                        }
+                        eprintln!("Warning: OSV lookup failed for {pkg_name}: {e:#}");
+                        ctx.osv_fetch_error = Some(format!("{e:#}"));
                     }
                 }
             }
