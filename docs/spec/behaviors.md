@@ -1,7 +1,7 @@
 # Behaviors
 
 **Project:** dep-scan
-**Last updated:** 2026-06-17 (task 110 — B-019 sumdb key-id uses Go note.keyHash, no `hash:1:` prefix)
+**Last updated:** 2026-07-12 (task 112: B-112 cached-verdict attribution gate, cross-referenced from B-020)
 
 What the system does, observably. Each behavior describes a triggering condition, the system's response, and any externally-visible side effects. This is the "you can verify this from outside the process" view.
 
@@ -225,7 +225,7 @@ For each DSSE-signed attestation bundle, the following steps run in order in [`s
 - **Trigger:** Any cache lookup for `(name, version, registry)` returns a row.
 - **Response:** Apply the decision matrix in [data-model.md § Cache decision matrix](data-model.md#cache-decision-matrix). Honor or invalidate accordingly. There is **no flag** to skip this check.
 - **Side effects:** Invalidated rows are deleted; re-scan triggers a full pipeline run.
-- **References:** [F-002](fitness-functions.md#f-002), [F-007](fitness-functions.md#f-007), [F-008](fitness-functions.md#f-008), task 030.
+- **References:** [F-002](fitness-functions.md#f-002), [F-007](fitness-functions.md#f-007), [F-008](fitness-functions.md#f-008), task 030. A row that passes this gate must still pass the attribution gate (B-112) before it is honored as a top-level hit.
 
 ### B-021: Cache write after every scan
 
@@ -245,6 +245,16 @@ For each DSSE-signed attestation bundle, the following steps run in order in [`s
 - **Trigger:** `Cache::lookup` returns an `Err` (DB locked, schema corruption, I/O).
 - **Response:** Surface the error to stderr. Fail-open is preserved — the scan continues as if cache miss — but the failure is visible.
 - **References:** [F-023](fitness-functions.md#f-023), task 047.
+
+### B-112: Cached verdict attribution
+
+- **Trigger:** A cache lookup for `(name, version, registry)` (registry path) or `(name, commit_sha, "git")` (flat-git path) passes the B-020 content-hash gate.
+- **Response:** The row is honored as a top-level hit ONLY when it additionally carries full, internally-consistent attribution: `dep_scan_version` present, `policies_json` present and parses to `Vec<PolicyDetail>`, and re-aggregating those policies reproduces the row's stored `result`. Any failure is treated exactly like a content-hash miss: fall through to the existing re-scan path (no explicit invalidate; the re-scan's `INSERT OR REPLACE` upgrades the row in place). See the [attribution gate table](data-model.md#attribution-gate-task-112-stacks-on-top-of-the-content-hash-gate) in data-model.md.
+- **Output shape:** An honored hit emits the real resolved version (not a placeholder), the recomputed `age_hours`, the stored `policies` array, the recomputed aggregate `reason`, and an additive `cache: { hit: true, scanned_at, dep_scan_version }` object (copied verbatim from the row). The literal strings `"cached"` (as a `version`) and `"cached result"` (as a `reason`) no longer appear anywhere in output. Fresh scans are unaffected: the `cache` key is omitted entirely (additive-only contract, REQ-112-05).
+- **Writes:** `Cache::insert`/`insert_git` stamp `dep_scan_version` internally from `env!("CARGO_PKG_VERSION")` (never a caller-supplied parameter). The flat registry write site and the flat git write site pass the serialized `Vec<PolicyDetail>` used for that verdict's aggregation; the transitive edge-scan git write site (task 106/108, `src/transitive/scanner.rs`) does the same. Other internal writes (e.g. the digest-refresh write in `src/transitive/scan.rs`) pass `None` when no details vec is naturally in scope.
+- **Scope:** The task-106 transitive verdict-reuse gate (bare `Verdict`, not a `CheckResult`) is unchanged and carries no attribution requirement. This behavior applies only to the two top-level `CheckResult`-producing cache-hit paths.
+- **Side effects:** None beyond the normal re-scan write path; a miss on this gate never invalidates the row explicitly.
+- **References:** [data-model.md § scanned_packages](data-model.md#entity-scanned_packages), [interfaces.md § Cache provenance](interfaces.md#cache-provenance-cache-object-task-112), [F-028](fitness-functions.md#f-028), B-020, B-021, B-097, task 112.
 
 ### B-097: Git-source cache integration
 

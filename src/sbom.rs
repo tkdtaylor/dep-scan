@@ -266,6 +266,7 @@ mod tests {
             reason: None,
             policies: vec![],
             vulns,
+            cache: None,
         }
     }
 

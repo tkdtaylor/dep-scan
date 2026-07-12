@@ -43,10 +43,13 @@ content_hash         TEXT   yes        <algo>:<hex> — see Content-hash rules; 
 provenance_identity  TEXT   yes        Verified OIDC subject (npm/PyPI) or "sum.golang.org" (Go)
 source_kind          TEXT   yes        "git" for git-sourced rows (task 097); NULL for registry and legacy rows
 subtree_digest       TEXT   yes        sha256:<hex> fingerprint of the (child NodeId, child verdict) set a transitive verdict depended on (task 106); NULL for flat-scan and legacy rows
+dep_scan_version     TEXT   yes        CARGO_PKG_VERSION of the dep-scan binary that wrote this row (task 112); NULL for rows written before this column existed
+policies_json        TEXT   yes        serde_json-serialized Vec<PolicyDetail> the verdict was aggregated from (task 112); NULL for rows written before this column existed, or for internal writes with no details vec in scope
 ```
 
 - **Identity:** composite primary key `(name, version, registry)`. Git-sourced rows use the slot `registry = "git"` with `version = commit_sha` (task 097); the `"git"` slot does not collide with any `RegistryType` string.
 - **Git source cacheability (task 097):** only **pinned commit SHAs** are cached — an immutable SHA uniquely identifies the fetched tree. **Mutable refs** (branch/tag/short-hash/empty, per `classify_ref` task 094) are **never** written; every scan re-fetches. Git rows are gated by the same content-hash decision matrix below: a missing/`sha1:`/mismatched `content_hash` forces a re-fetch (fail-closed).
+- **Attribution (task 112):** `dep_scan_version` is stamped internally by `Cache::insert`/`insert_git` from `env!("CARGO_PKG_VERSION")` (never a caller-supplied parameter, so it cannot be spoofed at a call site). A top-level cache hit (registry or flat-git path) additionally requires `dep_scan_version` present, `policies_json` present and parseable, and the re-aggregated `policies_json` to match the stored `result`: see [Cache decision matrix](#cache-decision-matrix) below. The task-106 transitive verdict-reuse gate is unchanged and carries no attribution requirement.
 - **Lifecycle:** rows are written after every scan (B-021). Invalidated and re-written on content-hash mismatch. Deleted only via cache file removal or manual SQL.
 - **Relationships:** none — flat table.
 - **Indexes:** primary key index covers all current lookup patterns. No secondary indexes.
@@ -76,6 +79,7 @@ Migration history:
 - Task 032: added `provenance_identity TEXT NULL`.
 - Task 097: added `source_kind TEXT NULL` (`"git"` for git-sourced rows, NULL for registry/legacy rows). Existing registry rows remain valid with no backfill.
 - Task 106: added `subtree_digest TEXT NULL` (ADR 009 Decision 4). A `sha256:<hex>` digest over the sorted, length-framed set of `(child NodeId, child verdict)` pairs a transitive verdict depended on. NULL for flat-scan and legacy rows (no backfill). A cached **transitive** row is a Hit only if **both** the content-hash gate (B-020) **and** the recomputed `subtree_digest` match the stored values; either mismatch → re-scan (fail-closed). NULL `subtree_digest` rows are flat-scan entries — the subtree-digest gate is skipped and the content-hash gate alone applies, preserving pre-106 behaviour.
+- Task 112: added `dep_scan_version TEXT NULL` and `policies_json TEXT NULL` (cached-verdict attribution, B-112). NULL for legacy rows, no backfill. A top-level cache hit additionally requires both columns present, `policies_json` parseable, and the re-aggregated result to match the stored `result`; any failure is a MISS, fail-closed, and the re-scan upgrades the row in place.
 
 ---
 
@@ -122,6 +126,20 @@ Every cache lookup compares the stored `content_hash` to the registry's currentl
 | `Some(a)` | fetch fails | Re-scan (network, parse, version-not-found, malformed) |
 
 > `--force` on `install` bypasses *verdicts* but MUST NOT bypass content-hash verification ([F-002](fitness-functions.md#f-002)). A user who chooses `--force` after a `block` still only gets to install the bytes the verification matrix would have consulted.
+
+### Attribution gate (task 112, stacks on top of the content-hash gate)
+
+"Honor cached verdict" above is necessary but not sufficient for a top-level (registry or flat-git) cache hit: the row must ALSO carry full, internally-consistent attribution. This gate is checked only when the content-hash gate above already resolved to "Honor cached verdict":
+
+| `dep_scan_version` | `policies_json` | Re-aggregated result vs. stored `result` | Action |
+|---------------------|------------------|-------------------------------------------|--------|
+| `Some(_)` | `Some(_)`, parses | Matches | **Hit**: attributed, real version + policies + `cache` object emitted |
+| `None` | _any_ | n/a | Miss: fall through to re-scan (no invalidate; upgrades the row) |
+| _any_ | `None` | n/a | Miss: fall through to re-scan (no invalidate; upgrades the row) |
+| `Some(_)` | `Some(_)`, unparseable | n/a | Miss: fall through to re-scan (fail-closed on corrupt attribution) |
+| `Some(_)` | `Some(_)`, parses | Disagrees | Miss: fall through to re-scan (tamper/corruption guard, a stale or tampered verdict is never served) |
+
+The task-106 subtree-digest gate (for transitive rows) and this attribution gate are independent: subtree-digest applies to the transitive verdict-reuse path (unattributed by design, task 106 unchanged); attribution applies to the top-level registry and flat-git cache-hit paths (task 112).
 
 ---
 

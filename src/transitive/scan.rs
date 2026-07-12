@@ -897,12 +897,15 @@ fn write_subtree_digests<E: EdgeProvider, S: NodeScanner>(
             if let Ok(Some(entry)) = cache.lookup(name, ref_, "git")
                 && let Some(content_hash) = entry.content_hash.as_deref()
             {
+                // No policy_details vec is naturally in scope on this digest-
+                // refresh write path (task 112 call-site guidance): pass None.
                 let _ = cache.insert_git(
                     name,
                     ref_,
                     verdict_str(verdict),
                     Some(content_hash),
                     Some(&digest),
+                    None,
                 );
             }
         }
@@ -1444,6 +1447,7 @@ mod tests {
                 "pass",
                 Some("sha256:deadbeef"),
                 Some(&clean_digest),
+                None,
             )
             .unwrap();
 
@@ -1510,6 +1514,7 @@ mod tests {
             reason: None,
             policies: vec![],
             vulns: vec![],
+            cache: None,
         }];
         // The exact flat-table bytes the production helper emits.
         let flat = crate::render_native(&results);

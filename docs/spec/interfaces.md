@@ -105,26 +105,66 @@ Header columns: exactly `Package`, `Version`, `Age`, `Result` in that order. Per
 
 ### JSON output schema
 
+When transitive scanning is disabled (the default), `--format json` emits a **bare pretty-printed array** of package objects, not a wrapper object. This is the real emitted shape (`render_results` `Json` arm, `src/main.rs`; the wrapper-object shape this block previously documented was never what the binary produced, corrected in task 112):
+
+```json
+[
+  {
+    "package": "expresss",
+    "version": "0.0.0",
+    "registry": "npm",
+    "age_hours": 85259,
+    "result": "warn",
+    "reason": "Package 'expresss' is similar to popular package 'express' (distance: 0.12)",
+    "policies": [
+      { "policy_name": "age", "result": "pass", "reason": null },
+      { "policy_name": "typosquatting", "result": "warn", "reason": "..." }
+    ]
+  }
+]
+```
+
+Fields:
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `package` | string | Package name |
+| `version` | string | The real resolved version (never a placeholder, even on a cache hit: see the `cache` object below) |
+| `registry` | string | `npm` \| `pypi` \| `crates` \| `go` \| `git` |
+| `age_hours` | number \| null | Hours since publish, when known |
+| `result` | string | Aggregate verdict: `pass` \| `warn` \| `block` |
+| `reason` | string \| null | Aggregate reason: any `block` first, then any `warn`, else `null` |
+| `policies` | array | Per-policy `{policy_name, result, reason}` objects, `result` exactly one of `pass`/`warn`/`block` |
+| `vulns` | array | OSV-format vulnerability findings; **omitted entirely when empty** |
+| `cache` | object | **Additive, optional** (task 112): present ONLY on an attributed cache hit; see below |
+
+#### Cache provenance (`cache` object, task 112)
+
+An honored cache hit (registry or pinned-SHA git path) adds a `cache` object; a fresh scan omits the key entirely (`#[serde(skip_serializing_if = "Option::is_none")]`, so pre-112 fresh output is byte-for-byte unchanged):
+
 ```json
 {
-  "scanned_at": "2026-05-22T12:00:00Z",
-  "packages": [
-    {
-      "name": "expresss",
-      "version": "0.0.0",
-      "registry": "npm",
-      "published_at": "...",
-      "downloads": null,
-      "result": "warn",
-      "reason": "Package 'expresss' is similar to popular package 'express' (distance: 0.12)",
-      "policies": [
-        { "policy_name": "age", "result": "pass", "reason": null },
-        { "policy_name": "typosquatting", "result": "warn", "reason": "..." }
-      ]
-    }
-  ]
+  "package": "left-pad",
+  "version": "1.3.0",
+  "registry": "npm",
+  "age_hours": 87600,
+  "result": "block",
+  "reason": "Install script contains suspicious command: curl",
+  "policies": [
+    { "policy_name": "age", "result": "pass", "reason": null },
+    { "policy_name": "install_scripts", "result": "block", "reason": "Install script contains suspicious command: curl" }
+  ],
+  "cache": {
+    "hit": true,
+    "scanned_at": "2026-07-10T08:15:00Z",
+    "dep_scan_version": "1.3.1"
+  }
 }
 ```
+
+`cache.hit` is always `true` when present (the key's presence itself signals a hit). `cache.scanned_at` and `cache.dep_scan_version` are copied verbatim from the cache row that produced the verdict, not the currently-running binary. A cache row that lacks either `dep_scan_version` or `policies_json`, has unparseable `policies_json`, or whose stored `policies` disagree with its stored `result`, is treated as a MISS and re-scanned (fail-closed): it is never served, and the row is upgraded in place by the re-scan.
+
+**Migration note:** releases before task 112 emitted `"version": "cached"` and an empty `"policies": []` array on a cache hit, with `"reason": "cached result"`. That shape was never part of the documented contract (this block always specified real fields; the literal `"cached"` was a bug, not a stability guarantee). Consumers that matched the string `"cached"` must switch to checking `cache.hit` instead.
 
 Per-policy and aggregate `result` values are exactly one of `"pass"`, `"warn"`, `"block"`. The aggregate `reason` mirrors the worst-case policy's reason (any `block` first, then any `warn`, else `null`).
 
@@ -172,6 +212,7 @@ Under `--verbose`, `dep-scan install` emits one line per package, immediately be
 | Global flags | Stable |
 | Exit code semantics (0 / 1 / 2) | **Stable — relied on by CI** |
 | JSON top-level shape | Stable; additive only |
+| `cache` object presence (task 112) | Additive, optional; present only on cache hits |
 | Per-policy `result` values | Stable: exactly `pass`, `warn`, `block` |
 | Table column count + order | Stable |
 | Per-policy line format | Stable: `  <name>: <verdict>[ — <reason>]` |
