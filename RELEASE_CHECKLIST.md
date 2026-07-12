@@ -33,15 +33,19 @@ Update these files, then commit as a single `chore: cut vX.Y.Z` commit.
 1. **`Cargo.toml`** — bump `version = "X.Y.Z"`.
 2. **`CHANGELOG.md`** — add a `## [X.Y.Z] — YYYY-MM-DD` section with all
    changes since the last release. Update the diff-link at the bottom.
-3. **Test count** — get the authoritative number and paste it into the
+3. **`PINNED_VERSION`**: bump to `vX.Y.Z` (the tag being cut). `cargo test`
+   fails if it diverges from `Cargo.toml` (`tests/version_pin_integration.rs`
+   lockstep gate), so a forgotten bump fails this same gate before the tag
+   is ever pushed.
+4. **Test count** — get the authoritative number and paste it into the
    CHANGELOG "Stats" block:
    ```bash
    cargo test 2>&1 | grep "test result:" | awk '{s+=$4} END {print s}'
    ```
-4. **`Cargo.lock`** — will auto-update on the next `cargo build`; stage it.
-5. Commit:
+5. **`Cargo.lock`** — will auto-update on the next `cargo build`; stage it.
+6. Commit:
    ```bash
-   git add Cargo.toml Cargo.lock CHANGELOG.md
+   git add Cargo.toml Cargo.lock CHANGELOG.md PINNED_VERSION
    git commit -m "chore: cut vX.Y.Z"
    ```
 

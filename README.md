@@ -23,6 +23,7 @@ Apache-2.0 licensed.
 - [Quick start](#quick-start)
 - [How it works](#how-it-works)
 - [Supported ecosystems](#supported-ecosystems)
+- [Version pinning for consumers](#version-pinning-for-consumers)
 - [Develop locally](#develop-locally)
 - [Tech stack](#tech-stack)
 - [Sponsorship](#sponsorship)
@@ -86,6 +87,33 @@ network key download is permitted.
 
 For detailed policy descriptions, configuration, setup walkthroughs, and output format
 reference, see [docs/usage.md](docs/usage.md).
+
+## Version pinning for consumers
+
+`PINNED_VERSION` at the repo root holds the single release tag consumers should install: format `vX.Y.Z` plus a trailing newline, updated in the same commit as every release version bump. Fetch it from the raw URL:
+
+```
+https://raw.githubusercontent.com/tkdtaylor/dep-scan/main/PINNED_VERSION
+```
+
+Docker consumers (code-scanner, reverse-engineer) install exactly the pinned release:
+
+```dockerfile
+RUN set -eux; \
+    PIN="$(curl -fsSL https://raw.githubusercontent.com/tkdtaylor/dep-scan/main/PINNED_VERSION)"; \
+    curl -fsSL https://raw.githubusercontent.com/tkdtaylor/dep-scan/main/install.sh \
+      | INSTALL_DIR=/usr/local/bin bash -s -- --version="${PIN}"
+```
+
+Host installs check drift:
+
+```bash
+pin="$(curl -fsSL https://raw.githubusercontent.com/tkdtaylor/dep-scan/main/PINNED_VERSION)"
+local="v$(dep-scan --version | awk '{print $2}')"
+[ "$pin" = "$local" ] || echo "dep-scan version drift: local ${local}, pinned ${pin}"
+```
+
+The pin file rides on GitHub main-branch integrity; binary integrity is enforced downstream by `install.sh`'s existing sha256sums verification and cosign-signed releases. The pin is a coordination channel, not a trust root.
 
 ## Develop locally
 
