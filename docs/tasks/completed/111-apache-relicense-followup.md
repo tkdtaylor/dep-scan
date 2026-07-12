@@ -26,4 +26,8 @@ sections, CONTRIBUTING (DCO), `.github/FUNDING.yml` + `dco.yml`.
 ## Acceptance criteria
 
 - [x] SPDX header (`// SPDX-License-Identifier: Apache-2.0`) on every first-party `.rs`
-- [ ] Relicense pushed — still awaits the user (push deferred until public/private visibility confirmed)
+- [x] Relicense pushed: `085d020` confirmed reachable from `origin/main` (`git merge-base --is-ancestor 085d020 origin/main`); repo is public on GitHub
+
+## Closeout note
+
+Both items were already done ahead of this task file being closed: SPDX headers landed in `d603d74` (repaired in `d0c778d`), and the relicense commit is confirmed on the public `origin/main`. This closeout adds `tests/spdx_header_integration.rs` as a durable regression guard (no prior test enforced the header) and a paired test spec, since the task predates the paired-spec convention. See `docs/tasks/test-specs/111-apache-relicense-followup-test-spec.md`.
