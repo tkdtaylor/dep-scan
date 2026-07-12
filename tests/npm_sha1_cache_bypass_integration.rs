@@ -62,7 +62,12 @@ min_downloads = 0
     f
 }
 
-/// Pre-populate the SQLite cache with a single row (directly via SQLite, bypassing dep-scan).
+/// Pre-populate the SQLite cache with a single row (directly via SQLite,
+/// bypassing dep-scan), lacking task-112 attribution (`dep_scan_version`/
+/// `policies_json` both NULL). Tests that assert a genuine
+/// `"cache hit (verified)"` must use [`seed_cache_attributed`] instead: an
+/// unattributed row is, by design, always a miss (fail-closed, REQ-112-03)
+/// and gets upgraded in place on re-scan.
 fn seed_cache(
     db_path: &str,
     name: &str,
@@ -92,6 +97,55 @@ fn seed_cache(
         rusqlite::params![name, version, registry, result, content_hash],
     )
     .expect("seed cache row");
+}
+
+/// Pre-populate the SQLite cache with a fully task-112-attributed row: sets
+/// `dep_scan_version` (to the running binary's own version) and
+/// `policies_json` (a single-policy array whose aggregate matches `result`,
+/// consistent with this file's config, which enables only `check_min_age`).
+/// Use this for any test that asserts `"cache hit (verified)"` in stderr.
+fn seed_cache_attributed(
+    db_path: &str,
+    name: &str,
+    version: &str,
+    registry: &str,
+    result: &str,
+    content_hash: Option<&str>,
+) {
+    let conn = Connection::open(db_path).expect("open seed db");
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS scanned_packages (
+            name                TEXT NOT NULL,
+            version             TEXT NOT NULL,
+            registry            TEXT NOT NULL,
+            result              TEXT NOT NULL,
+            scanned_at          TEXT NOT NULL,
+            content_hash        TEXT,
+            provenance_identity TEXT,
+            source_kind         TEXT,
+            subtree_digest      TEXT,
+            dep_scan_version    TEXT,
+            policies_json       TEXT,
+            PRIMARY KEY (name, version, registry)
+        );",
+    )
+    .expect("create table");
+    let policies_json = format!(r#"[{{"policy_name":"age","result":"{result}","reason":null}}]"#);
+    conn.execute(
+        "INSERT OR REPLACE INTO scanned_packages
+         (name, version, registry, result, scanned_at, content_hash, dep_scan_version, policies_json)
+         VALUES (?1, ?2, ?3, ?4, datetime('now'), ?5, ?6, ?7)",
+        rusqlite::params![
+            name,
+            version,
+            registry,
+            result,
+            content_hash,
+            env!("CARGO_PKG_VERSION"),
+            policies_json
+        ],
+    )
+    .expect("seed attributed cache row");
 }
 
 /// Read content_hash from the SQLite cache.
@@ -530,8 +584,9 @@ async fn sha512_cache_short_circuit_unaffected() {
     let db_path = tmp.path().join("cache.db");
     let db_str = db_path.to_str().unwrap();
 
-    // Pre-populate with sha512 hash.
-    seed_cache(
+    // Pre-populate with sha512 hash, fully attributed (task 112) so it is
+    // honored as a genuine hit.
+    seed_cache_attributed(
         db_str,
         "sha512-normal-pkg",
         "1.0.0",

@@ -45,6 +45,18 @@ pub struct CacheEntry {
     /// `Some(_)` for transitive rows, including the deterministic
     /// empty-child-set digest (a leaf scanned transitively).
     pub subtree_digest: Option<String>,
+    /// The `CARGO_PKG_VERSION` of the dep-scan binary that wrote this row
+    /// (task 112, cached-verdict attribution). `None` for rows written before
+    /// this column existed (legacy rows, no backfill).
+    pub dep_scan_version: Option<String>,
+    /// `serde_json`-serialized `Vec<PolicyDetail>` the verdict was aggregated
+    /// from (task 112). `None` for rows written before this column existed,
+    /// or for internal writes (e.g. transitive edge-scan caching) that have
+    /// no policy-details vec in scope. A row with `dep_scan_version` or
+    /// `policies_json` missing is never served as a top-level cache hit
+    /// (fail-closed: see the attribution gate at the `main.rs` cache-hit call
+    /// sites).
+    pub policies_json: Option<String>,
 }
 
 /// Compute the task-106 subtree digest (ADR 009 Decision 4) over a set of
@@ -273,6 +285,23 @@ impl Cache {
             conn.execute_batch("ALTER TABLE scanned_packages ADD COLUMN subtree_digest TEXT;")?;
         }
 
+        // Additive migrations (task 112): add dep_scan_version + policies_json.
+        //
+        // Cached-verdict attribution: a cache hit must carry the same full
+        // attribution as a fresh scan (real version, full policies array, the
+        // dep-scan version that produced it) or it is treated as a miss and
+        // re-scanned (fail-closed). Additive and nullable, exactly like the
+        // migrations above: added only when absent (idempotent), legacy rows
+        // read back NULL with no backfill, and a NULL value on either column
+        // means the row lacks attribution and is never served as a top-level
+        // hit (see the attribution gate at the `main.rs` cache-hit call sites).
+        if !existing_columns.iter().any(|n| n == "dep_scan_version") {
+            conn.execute_batch("ALTER TABLE scanned_packages ADD COLUMN dep_scan_version TEXT;")?;
+        }
+        if !existing_columns.iter().any(|n| n == "policies_json") {
+            conn.execute_batch("ALTER TABLE scanned_packages ADD COLUMN policies_json TEXT;")?;
+        }
+
         Ok(Self { conn })
     }
 
@@ -288,7 +317,7 @@ impl Cache {
     pub fn lookup(&self, name: &str, version: &str, registry: &str) -> Result<Option<CacheEntry>> {
         let mut stmt = self.conn.prepare(
             "SELECT result, scanned_at, content_hash, provenance_identity, source_kind,
-                    subtree_digest
+                    subtree_digest, dep_scan_version, policies_json
              FROM scanned_packages
              WHERE name = ?1 AND version = ?2 AND registry = ?3",
         )?;
@@ -301,6 +330,8 @@ impl Cache {
                 provenance_identity: row.get(3)?,
                 source_kind: row.get(4)?,
                 subtree_digest: row.get(5)?,
+                dep_scan_version: row.get(6)?,
+                policies_json: row.get(7)?,
             })
         })?;
 
@@ -325,10 +356,18 @@ impl Cache {
     /// fingerprint of the child verdicts a transitive scan depended on
     /// (`compute_subtree_digest`), or `None` for a flat (non-transitive) scan.
     /// Callers that pass `None` write NULL, preserving the pre-106 flat-scan
-    /// behaviour (REQ-106-04/05 — backwards-compatible).
+    /// behaviour (REQ-106-04/05, backwards-compatible).
+    ///
+    /// `policies_json` (task 112) is `serde_json::to_string` of the
+    /// `Vec<PolicyDetail>` the verdict was aggregated from, or `None` when no
+    /// details vec is naturally in scope at the call site. `dep_scan_version`
+    /// is NOT a parameter: it is stamped internally from
+    /// `env!("CARGO_PKG_VERSION")` so it cannot be spoofed at a call site
+    /// (REQ-112-02, same precedent as `src/sbom.rs` and `src/config.rs`).
     // The cache row genuinely has this many independent columns (name, version,
-    // registry, result, content_hash, provenance_identity, subtree_digest);
-    // bundling them into a struct would not improve clarity at the call sites.
+    // registry, result, content_hash, provenance_identity, subtree_digest,
+    // policies_json); bundling them into a struct would not improve clarity at
+    // the call sites.
     #[allow(clippy::too_many_arguments)]
     pub fn insert(
         &self,
@@ -339,14 +378,16 @@ impl Cache {
         content_hash: Option<&str>,
         provenance_identity: Option<&str>,
         subtree_digest: Option<&str>,
+        policies_json: Option<&str>,
     ) -> Result<()> {
         let scanned_at = Utc::now().to_rfc3339();
+        let dep_scan_version = env!("CARGO_PKG_VERSION");
         // Registry-sourced rows carry source_kind = NULL (matches legacy rows).
         self.conn.execute(
             "INSERT OR REPLACE INTO scanned_packages
              (name, version, registry, result, scanned_at, content_hash, provenance_identity,
-              source_kind, subtree_digest)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, ?8)",
+              source_kind, subtree_digest, dep_scan_version, policies_json)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, ?8, ?9, ?10)",
             rusqlite::params![
                 name,
                 version,
@@ -355,7 +396,9 @@ impl Cache {
                 scanned_at,
                 content_hash,
                 provenance_identity,
-                subtree_digest
+                subtree_digest,
+                dep_scan_version,
+                policies_json
             ],
         )?;
         Ok(())
@@ -380,6 +423,10 @@ impl Cache {
     /// fingerprint of the child verdicts a transitive git scan depended on, or
     /// `None` for a flat git scan. Passing `None` writes NULL (backwards-
     /// compatible with the pre-106 flat git arm).
+    ///
+    /// `policies_json` (task 112) mirrors [`Cache::insert`]: the serialized
+    /// `Vec<PolicyDetail>` the verdict was aggregated from, or `None`.
+    /// `dep_scan_version` is stamped internally, not a parameter (REQ-112-02).
     pub fn insert_git(
         &self,
         name: &str,
@@ -387,20 +434,24 @@ impl Cache {
         result: &str,
         content_hash: Option<&str>,
         subtree_digest: Option<&str>,
+        policies_json: Option<&str>,
     ) -> Result<()> {
         let scanned_at = Utc::now().to_rfc3339();
+        let dep_scan_version = env!("CARGO_PKG_VERSION");
         self.conn.execute(
             "INSERT OR REPLACE INTO scanned_packages
              (name, version, registry, result, scanned_at, content_hash, provenance_identity,
-              source_kind, subtree_digest)
-             VALUES (?1, ?2, 'git', ?3, ?4, ?5, NULL, 'git', ?6)",
+              source_kind, subtree_digest, dep_scan_version, policies_json)
+             VALUES (?1, ?2, 'git', ?3, ?4, ?5, NULL, 'git', ?6, ?7, ?8)",
             rusqlite::params![
                 name,
                 commit_sha,
                 result,
                 scanned_at,
                 content_hash,
-                subtree_digest
+                subtree_digest,
+                dep_scan_version,
+                policies_json
             ],
         )?;
         Ok(())
@@ -485,7 +536,7 @@ mod tests {
     fn insert_and_lookup() {
         let cache = Cache::in_memory().unwrap();
         cache
-            .insert("lodash", "4.17.21", "npm", "pass", None, None, None)
+            .insert("lodash", "4.17.21", "npm", "pass", None, None, None, None)
             .unwrap();
 
         let entry = cache.lookup("lodash", "4.17.21", "npm").unwrap();
@@ -506,10 +557,10 @@ mod tests {
     fn insert_upserts_on_conflict() {
         let cache = Cache::in_memory().unwrap();
         cache
-            .insert("lodash", "4.17.21", "npm", "pass", None, None, None)
+            .insert("lodash", "4.17.21", "npm", "pass", None, None, None, None)
             .unwrap();
         cache
-            .insert("lodash", "4.17.21", "npm", "block", None, None, None)
+            .insert("lodash", "4.17.21", "npm", "block", None, None, None, None)
             .unwrap();
 
         let entry = cache.lookup("lodash", "4.17.21", "npm").unwrap().unwrap();
@@ -521,7 +572,7 @@ mod tests {
     fn invalidate_removes_entry() {
         let cache = Cache::in_memory().unwrap();
         cache
-            .insert("lodash", "4.17.21", "npm", "pass", None, None, None)
+            .insert("lodash", "4.17.21", "npm", "pass", None, None, None, None)
             .unwrap();
         cache.invalidate("lodash", "4.17.21", "npm").unwrap();
 
@@ -545,13 +596,13 @@ mod tests {
     fn clear_removes_all_entries() {
         let cache = Cache::in_memory().unwrap();
         cache
-            .insert("a", "1.0", "npm", "pass", None, None, None)
+            .insert("a", "1.0", "npm", "pass", None, None, None, None)
             .unwrap();
         cache
-            .insert("b", "2.0", "pypi", "block", None, None, None)
+            .insert("b", "2.0", "pypi", "block", None, None, None, None)
             .unwrap();
         cache
-            .insert("c", "3.0", "cargo", "warn", None, None, None)
+            .insert("c", "3.0", "cargo", "warn", None, None, None, None)
             .unwrap();
 
         cache.clear().unwrap();
@@ -566,10 +617,10 @@ mod tests {
     fn different_registries_are_distinct() {
         let cache = Cache::in_memory().unwrap();
         cache
-            .insert("foo", "1.0", "npm", "pass", None, None, None)
+            .insert("foo", "1.0", "npm", "pass", None, None, None, None)
             .unwrap();
         cache
-            .insert("foo", "1.0", "pypi", "block", None, None, None)
+            .insert("foo", "1.0", "pypi", "block", None, None, None, None)
             .unwrap();
 
         let npm_entry = cache.lookup("foo", "1.0", "npm").unwrap().unwrap();
@@ -589,7 +640,7 @@ mod tests {
         {
             let cache = Cache::new(&db_path).unwrap();
             cache
-                .insert("lodash", "4.17.21", "npm", "pass", None, None, None)
+                .insert("lodash", "4.17.21", "npm", "pass", None, None, None, None)
                 .unwrap();
         }
         // Cache is dropped here, connection closed.
@@ -647,7 +698,7 @@ mod tests {
         let cache = Cache::in_memory().unwrap();
         let before = Utc::now();
         cache
-            .insert("lodash", "4.17.21", "npm", "pass", None, None, None)
+            .insert("lodash", "4.17.21", "npm", "pass", None, None, None, None)
             .unwrap();
         let after = Utc::now();
 
@@ -764,6 +815,7 @@ mod tests {
                 Some("sha512:abcdef1234567890"),
                 None,
                 None,
+                None,
             )
             .unwrap();
 
@@ -782,7 +834,7 @@ mod tests {
     fn insert_none_content_hash_stores_null() {
         let cache = Cache::in_memory().unwrap();
         cache
-            .insert("lodash", "4.17.21", "npm", "pass", None, None, None)
+            .insert("lodash", "4.17.21", "npm", "pass", None, None, None, None)
             .unwrap();
 
         let entry = cache
@@ -847,6 +899,7 @@ mod tests {
                 Some("sha256:aaaa"),
                 None,
                 None,
+                None,
             )
             .unwrap();
         cache
@@ -856,6 +909,7 @@ mod tests {
                 "npm",
                 "pass",
                 Some("sha256:bbbb"),
+                None,
                 None,
                 None,
             )
@@ -979,7 +1033,7 @@ mod tests {
     fn t047_02_lookup_after_insert_returns_ok_some() {
         let cache = Cache::in_memory().expect("T-047-02: in_memory cache should succeed");
         cache
-            .insert("pkg", "1.0.0", "npm", "pass", None, None, None)
+            .insert("pkg", "1.0.0", "npm", "pass", None, None, None, None)
             .expect("T-047-02: insert should succeed");
         let result = cache.lookup("pkg", "1.0.0", "npm");
         assert!(
@@ -1030,6 +1084,7 @@ mod tests {
                 "pass",
                 Some("sha512:abcdef"),
                 Some(identity),
+                None,
                 None,
             )
             .unwrap();
@@ -1185,7 +1240,7 @@ mod tests {
         let db_path = dir.path().join("wal_rw.db");
         let cache = Cache::new(&db_path).expect("T-054-07: Cache::new should succeed");
         cache
-            .insert("pkg", "1.0.0", "npm", "pass", None, None, None)
+            .insert("pkg", "1.0.0", "npm", "pass", None, None, None, None)
             .expect("T-054-07: insert should succeed");
         let entry = cache
             .lookup("pkg", "1.0.0", "npm")
@@ -1258,7 +1313,7 @@ mod tests {
     fn t057_04_insert_and_lookup_result() {
         let cache = Cache::in_memory().unwrap();
         cache
-            .insert("pkg", "1.0.0", "npm", "pass", None, None, None)
+            .insert("pkg", "1.0.0", "npm", "pass", None, None, None, None)
             .expect("T-057-04: insert should succeed under rusqlite 0.39");
         let entry = cache
             .lookup("pkg", "1.0.0", "npm")
@@ -1279,10 +1334,10 @@ mod tests {
     fn t057_05_upsert_updates_row() {
         let cache = Cache::in_memory().unwrap();
         cache
-            .insert("pkg", "1.0.0", "npm", "pass", None, None, None)
+            .insert("pkg", "1.0.0", "npm", "pass", None, None, None, None)
             .unwrap();
         cache
-            .insert("pkg", "1.0.0", "npm", "block", None, None, None)
+            .insert("pkg", "1.0.0", "npm", "block", None, None, None, None)
             .unwrap();
         let entry = cache.lookup("pkg", "1.0.0", "npm").unwrap().unwrap();
         assert_eq!(
@@ -1296,7 +1351,7 @@ mod tests {
     fn t057_06_invalidate_removes_row() {
         let cache = Cache::in_memory().unwrap();
         cache
-            .insert("pkg", "1.0.0", "npm", "pass", None, None, None)
+            .insert("pkg", "1.0.0", "npm", "pass", None, None, None, None)
             .unwrap();
         cache.invalidate("pkg", "1.0.0", "npm").unwrap();
         let entry = cache.lookup("pkg", "1.0.0", "npm").unwrap();
@@ -1320,6 +1375,7 @@ mod tests {
                 Some("sha512:abcdef1234567890"),
                 None,
                 None,
+                None,
             )
             .expect("T-057-07: insert with content_hash must succeed");
         let entry = cache.lookup("pkg", "1.0.0", "npm").unwrap().unwrap();
@@ -1337,7 +1393,16 @@ mod tests {
         let cache = Cache::in_memory().unwrap();
         let identity = "https://github.com/example/.github/workflows/release.yml@refs/tags/v1";
         cache
-            .insert("pkg", "1.0.0", "npm", "pass", None, Some(identity), None)
+            .insert(
+                "pkg",
+                "1.0.0",
+                "npm",
+                "pass",
+                None,
+                Some(identity),
+                None,
+                None,
+            )
             .expect("T-057-08: insert with provenance_identity must succeed");
         let entry = cache.lookup("pkg", "1.0.0", "npm").unwrap().unwrap();
         assert_eq!(
@@ -1354,7 +1419,7 @@ mod tests {
         let cache = Cache::in_memory().unwrap();
         // SHA-1 packages store content_hash = None (NULL) per task 040
         cache
-            .insert("pkg", "1.0.0", "npm", "pass", None, None, None)
+            .insert("pkg", "1.0.0", "npm", "pass", None, None, None, None)
             .expect("T-057-09: insert with None content_hash must succeed");
         let entry = cache.lookup("pkg", "1.0.0", "npm").unwrap().unwrap();
         assert_eq!(
@@ -1377,6 +1442,7 @@ mod tests {
                 Some("sha512:aaaa"),
                 None,
                 None,
+                None,
             )
             .unwrap();
         cache
@@ -1386,6 +1452,7 @@ mod tests {
                 "npm",
                 "pass",
                 Some("sha512:bbbb"),
+                None,
                 None,
                 None,
             )
@@ -1686,7 +1753,7 @@ mod tests {
         let db_path = dir.path().join("t059_11.db");
         let cache = Cache::new(&db_path).expect("T-059-11: Cache::new should succeed");
         cache
-            .insert("mylib", "2.0.0", "crates", "pass", None, None, None)
+            .insert("mylib", "2.0.0", "crates", "pass", None, None, None, None)
             .expect("T-059-11: insert should succeed");
         let entry = cache
             .lookup("mylib", "2.0.0", "crates")
@@ -1730,7 +1797,14 @@ mod tests {
     fn t097_01_insert_git_keys_by_name_sha_git() {
         let cache = Cache::in_memory().unwrap();
         cache
-            .insert_git("pkg-name", SHA1_PIN, "pass", Some("sha256:deadbeef"), None)
+            .insert_git(
+                "pkg-name",
+                SHA1_PIN,
+                "pass",
+                Some("sha256:deadbeef"),
+                None,
+                None,
+            )
             .unwrap();
 
         let entry = cache
@@ -1758,10 +1832,11 @@ mod tests {
                 Some("sha256:aaaa"),
                 None,
                 None,
+                None,
             )
             .unwrap();
         cache
-            .insert_git("foo", SHA1_PIN, "pass", Some("sha256:bbbb"), None)
+            .insert_git("foo", SHA1_PIN, "pass", Some("sha256:bbbb"), None, None)
             .unwrap();
 
         let crates_entry = cache.lookup("foo", SHA1_PIN, "crates").unwrap().unwrap();
@@ -1841,7 +1916,7 @@ mod tests {
         {
             let cache = Cache::new(&db_path).unwrap();
             cache
-                .insert_git("g", SHA1_PIN, "warn", Some("sha256:cafe"), None)
+                .insert_git("g", SHA1_PIN, "warn", Some("sha256:cafe"), None, None)
                 .unwrap();
         }
         // Second open must not error (no duplicate source_kind column).
@@ -1925,10 +2000,10 @@ mod tests {
     fn t097_08c_insert_git_upserts() {
         let cache = Cache::in_memory().unwrap();
         cache
-            .insert_git("p", SHA1_PIN, "pass", Some("sha256:1111"), None)
+            .insert_git("p", SHA1_PIN, "pass", Some("sha256:1111"), None, None)
             .unwrap();
         cache
-            .insert_git("p", SHA1_PIN, "block", Some("sha256:2222"), None)
+            .insert_git("p", SHA1_PIN, "block", Some("sha256:2222"), None, None)
             .unwrap();
         let entry = cache.lookup("p", SHA1_PIN, "git").unwrap().unwrap();
         assert_eq!(entry.result, "block");
@@ -1940,7 +2015,7 @@ mod tests {
     fn t097_08d_registry_insert_has_null_source_kind() {
         let cache = Cache::in_memory().unwrap();
         cache
-            .insert("pkg", "1.0.0", "npm", "pass", None, None, None)
+            .insert("pkg", "1.0.0", "npm", "pass", None, None, None, None)
             .unwrap();
         let entry = cache.lookup("pkg", "1.0.0", "npm").unwrap().unwrap();
         assert_eq!(
@@ -2093,7 +2168,7 @@ mod tests {
         let cache = Cache::in_memory().unwrap();
         // insert_git with None subtree_digest models a pre-106 / flat git row.
         cache
-            .insert_git("pkg", SHA1_PIN, "pass", Some("sha256:deadbeef"), None)
+            .insert_git("pkg", SHA1_PIN, "pass", Some("sha256:deadbeef"), None, None)
             .unwrap();
         let entry = cache
             .lookup("pkg", SHA1_PIN, "git")
@@ -2238,6 +2313,7 @@ mod tests {
                 Some("sha512:abcd"),
                 None,
                 Some(&digest),
+                None,
             )
             .unwrap();
         let entry = cache.lookup("parent", "2.0.0", "npm").unwrap().unwrap();
@@ -2260,6 +2336,7 @@ mod tests {
                 "warn",
                 Some("sha256:cafe"),
                 Some(&digest),
+                None,
             )
             .unwrap();
         let entry = cache.lookup("parent", SHA1_PIN, "git").unwrap().unwrap();
@@ -2281,6 +2358,7 @@ mod tests {
                 "npm",
                 "pass",
                 Some("sha512:abcd"),
+                None,
                 None,
                 None,
             )
@@ -2338,5 +2416,241 @@ mod tests {
         // content-hash gate: matching hash → Hit, mismatching hash → Miss.
         assert!(is_hit(Some("sha256:aaa"), Some("sha256:aaa"), None, None));
         assert!(!is_hit(Some("sha256:aaa"), Some("sha256:bbb"), None, None));
+    }
+
+    // ── T-112 tests — cached-verdict attribution (dep_scan_version + policies_json) ──
+
+    // T-112-01: Migration adds `dep_scan_version` column when absent.
+    #[test]
+    fn t112_01_migration_adds_dep_scan_version_column() {
+        let cache = Cache::in_memory().unwrap();
+        let mut stmt = cache
+            .conn
+            .prepare("PRAGMA table_info(scanned_packages)")
+            .unwrap();
+        let found = stmt
+            .query_map([], |row| {
+                let name: String = row.get(1)?;
+                Ok(name)
+            })
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .any(|n| n == "dep_scan_version");
+        assert!(
+            found,
+            "T-112-01: dep_scan_version column should exist on a fresh DB"
+        );
+    }
+
+    // T-112-02: Migration adds `policies_json` column when absent.
+    #[test]
+    fn t112_02_migration_adds_policies_json_column() {
+        let cache = Cache::in_memory().unwrap();
+        let mut stmt = cache
+            .conn
+            .prepare("PRAGMA table_info(scanned_packages)")
+            .unwrap();
+        let found = stmt
+            .query_map([], |row| {
+                let name: String = row.get(1)?;
+                Ok(name)
+            })
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .any(|n| n == "policies_json");
+        assert!(
+            found,
+            "T-112-02: policies_json column should exist on a fresh DB"
+        );
+    }
+
+    // T-112-03: Migration is idempotent: open, drop, re-open, no duplicate-column
+    // error, and each new column appears exactly once.
+    #[test]
+    fn t112_03_migration_is_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("t112_03.db");
+
+        {
+            let _ = Cache::new(&db_path).expect("T-112-03: first open should succeed");
+        }
+        let cache =
+            Cache::new(&db_path).expect("T-112-03: second open should not error on re-migration");
+
+        let mut stmt = cache
+            .conn
+            .prepare("PRAGMA table_info(scanned_packages)")
+            .unwrap();
+        let names: Vec<String> = stmt
+            .query_map([], |row| {
+                let name: String = row.get(1)?;
+                Ok(name)
+            })
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .collect();
+        assert_eq!(
+            names.iter().filter(|n| *n == "dep_scan_version").count(),
+            1,
+            "T-112-03: dep_scan_version must appear exactly once"
+        );
+        assert_eq!(
+            names.iter().filter(|n| *n == "policies_json").count(),
+            1,
+            "T-112-03: policies_json must appear exactly once"
+        );
+    }
+
+    // T-112-04: Legacy rows (inserted via raw SQL naming only pre-112 columns)
+    // read None for both new attribution fields.
+    #[test]
+    fn t112_04_legacy_rows_read_none_for_attribution_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("t112_04.db");
+
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE scanned_packages (
+                    name                TEXT NOT NULL,
+                    version             TEXT NOT NULL,
+                    registry            TEXT NOT NULL,
+                    result              TEXT NOT NULL,
+                    scanned_at          TEXT NOT NULL,
+                    content_hash        TEXT,
+                    provenance_identity TEXT,
+                    source_kind         TEXT,
+                    subtree_digest      TEXT,
+                    PRIMARY KEY (name, version, registry)
+                );",
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO scanned_packages
+                 (name, version, registry, result, scanned_at)
+                 VALUES ('legacy-pkg', '1.0.0', 'npm', 'pass', '2024-01-01T00:00:00Z')",
+                [],
+            )
+            .unwrap();
+        }
+
+        let cache = Cache::new(&db_path).expect("T-112-04: migration should succeed");
+        let entry = cache
+            .lookup("legacy-pkg", "1.0.0", "npm")
+            .unwrap()
+            .expect("T-112-04: legacy row should still exist");
+        assert_eq!(
+            entry.dep_scan_version, None,
+            "T-112-04: legacy row dep_scan_version must be None"
+        );
+        assert_eq!(
+            entry.policies_json, None,
+            "T-112-04: legacy row policies_json must be None"
+        );
+    }
+
+    // T-112-05: `insert` stamps the running binary's version, read via the env
+    // macro (not a hardcoded literal), so this test survives version bumps.
+    #[test]
+    fn t112_05_insert_stamps_running_binary_version() {
+        let cache = Cache::in_memory().unwrap();
+        cache
+            .insert("pkg", "1.0.0", "npm", "pass", None, None, None, None)
+            .unwrap();
+        let entry = cache.lookup("pkg", "1.0.0", "npm").unwrap().unwrap();
+        assert_eq!(
+            entry.dep_scan_version,
+            Some(env!("CARGO_PKG_VERSION").to_string()),
+            "T-112-05: dep_scan_version must equal the running binary's CARGO_PKG_VERSION"
+        );
+    }
+
+    // T-112-06: `insert` round-trips `policies_json` byte-equal, and the read-back
+    // value re-parses to the original Vec<PolicyDetail> (requires Deserialize).
+    #[test]
+    fn t112_06_insert_roundtrips_policies_json() {
+        use crate::policy::PolicyDetail;
+
+        let details = vec![
+            PolicyDetail {
+                policy_name: "age".to_string(),
+                result: "pass".to_string(),
+                reason: None,
+            },
+            PolicyDetail {
+                policy_name: "typosquatting".to_string(),
+                result: "warn".to_string(),
+                reason: Some("close to 'express'".to_string()),
+            },
+        ];
+        let json = serde_json::to_string(&details).unwrap();
+
+        let cache = Cache::in_memory().unwrap();
+        cache
+            .insert("pkg", "1.0.0", "npm", "pass", None, None, None, Some(&json))
+            .unwrap();
+        let entry = cache.lookup("pkg", "1.0.0", "npm").unwrap().unwrap();
+
+        assert_eq!(
+            entry.policies_json,
+            Some(json),
+            "T-112-06: policies_json must round-trip byte-equal"
+        );
+        let reparsed: Vec<PolicyDetail> =
+            serde_json::from_str(entry.policies_json.as_deref().unwrap()).unwrap();
+        assert_eq!(
+            reparsed, details,
+            "T-112-06: the read-back policies_json must re-parse to the original Vec<PolicyDetail>"
+        );
+    }
+
+    // T-112-07: `insert` with `None` policies_json writes NULL.
+    #[test]
+    fn t112_07_insert_none_policies_json_writes_null() {
+        let cache = Cache::in_memory().unwrap();
+        cache
+            .insert("pkg", "1.0.0", "npm", "pass", None, None, None, None)
+            .unwrap();
+        let entry = cache.lookup("pkg", "1.0.0", "npm").unwrap().unwrap();
+        assert_eq!(
+            entry.policies_json, None,
+            "T-112-07: None policies_json must be stored as NULL"
+        );
+    }
+
+    // T-112-08: `insert_git` writes both attribution fields.
+    #[test]
+    fn t112_08_insert_git_writes_both_attribution_fields() {
+        use crate::policy::PolicyDetail;
+
+        let details = vec![PolicyDetail {
+            policy_name: "install_scripts".to_string(),
+            result: "block".to_string(),
+            reason: Some("suspicious postinstall".to_string()),
+        }];
+        let json = serde_json::to_string(&details).unwrap();
+
+        let cache = Cache::in_memory().unwrap();
+        cache
+            .insert_git(
+                "pkg",
+                SHA1_PIN,
+                "block",
+                Some("sha256:deadbeef"),
+                None,
+                Some(&json),
+            )
+            .unwrap();
+        let entry = cache.lookup("pkg", SHA1_PIN, "git").unwrap().unwrap();
+        assert_eq!(
+            entry.dep_scan_version,
+            Some(env!("CARGO_PKG_VERSION").to_string()),
+            "T-112-08: insert_git must stamp dep_scan_version"
+        );
+        assert_eq!(
+            entry.policies_json,
+            Some(json),
+            "T-112-08: insert_git must round-trip policies_json exactly"
+        );
     }
 }

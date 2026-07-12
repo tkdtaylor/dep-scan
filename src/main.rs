@@ -130,6 +130,41 @@ fn verify_hash(cached: Option<&str>, registry: Option<&str>) -> HashVerifyDecisi
     }
 }
 
+/// Task 112 (REQ-112-03): attribution gate for a cache hit, fail-closed.
+///
+/// A cache row is honored as a top-level hit ONLY when it carries full,
+/// internally-consistent attribution:
+///   1. `dep_scan_version` is present (the row was written post-112),
+///   2. `policies_json` is present AND parses to `Vec<PolicyDetail>`,
+///   3. re-aggregating the parsed policies reproduces the row's stored
+///      `result` (tamper/corruption guard).
+///
+/// Any failure returns `None`: the caller treats this exactly like a
+/// task-030 content-hash miss, falling through to the existing re-scan path,
+/// which upgrades the row via `INSERT OR REPLACE` (no explicit invalidate).
+/// This gate is applied ON TOP OF the pre-existing task-030 content-hash gate
+/// (and, for git rows, the task-097 `decide_git_cache_action` gate); both
+/// must pass for a hit.
+fn attributed_cache_hit(entry: &cache::CacheEntry) -> Option<(Vec<PolicyDetail>, CacheProvenance)> {
+    let dep_scan_version = entry.dep_scan_version.as_deref()?;
+    let policies_json = entry.policies_json.as_deref()?;
+    let parsed: Vec<PolicyDetail> = serde_json::from_str(policies_json).ok()?;
+    let (agg_result, _agg_reason) = policy::aggregate_results(&parsed);
+    if agg_result != entry.result {
+        // Stored result disagrees with what the stored policies actually
+        // aggregate to: treat as tampered/corrupt, never serve it.
+        return None;
+    }
+    Some((
+        parsed,
+        CacheProvenance {
+            hit: true,
+            scanned_at: entry.scanned_at.clone(),
+            dep_scan_version: dep_scan_version.to_string(),
+        },
+    ))
+}
+
 /// Abstraction over the VCS fetch client so the git-dep cache flow can be
 /// unit-tested with a spy/stub fetcher (T-097-02/04/09/11) without performing
 /// real network I/O.  The production implementation is [`vcs::fetch::VcsFetcher`].
@@ -308,6 +343,21 @@ impl PackageRef {
     }
 }
 
+/// Cached-verdict provenance (task 112): attached to a `CheckResult` ONLY on an
+/// attributed cache hit. Fresh results carry `cache: None`, which `serde` skips
+/// entirely (REQ-112-05, additive-only contract: pre-112 fresh output is
+/// byte-for-byte unchanged).
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub(crate) struct CacheProvenance {
+    pub(crate) hit: bool,
+    /// RFC 3339 timestamp copied verbatim from the cache row's `scanned_at`.
+    pub(crate) scanned_at: String,
+    /// The dep-scan version that produced (wrote) the cached verdict, read
+    /// from the ROW (`entry.dep_scan_version`): never re-stamped from the
+    /// currently-running binary's version at read time.
+    pub(crate) dep_scan_version: String,
+}
+
 /// The result of checking a single package, suitable for JSON serialization.
 #[derive(Debug, Serialize)]
 pub(crate) struct CheckResult {
@@ -321,6 +371,11 @@ pub(crate) struct CheckResult {
     /// Vulnerabilities found during the scan; used by the OSV render path.
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub(crate) vulns: Vec<VulnerabilityInfo>,
+    /// Cached-verdict provenance (task 112). `None` on every fresh result (the
+    /// key is omitted entirely, `#[serde(skip_serializing_if = "Option::is_none")]`)
+    /// and `Some(_)` only on an honored, fully-attributed cache hit.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) cache: Option<CacheProvenance>,
 }
 
 /// Map a `RegistryType` to the OSV ecosystem string for use in OSV-format output.
@@ -1028,7 +1083,13 @@ async fn run_check(
                 // and treated as a miss → full re-fetch (REQ-097-05, mirrors the
                 // registry path's REQ-047-01/02), never a silent pass or a hard
                 // abort.  Mutable refs skip the lookup entirely.
-                let git_cache_hit: Option<String> = if ref_kind
+                // Task 112: the attribution gate is applied ON TOP OF the
+                // existing task-030/097 content-hash gate below. `git_cache_hit`
+                // now carries the parsed policies array + provenance, not just
+                // the bare result string — an attribution miss falls through to
+                // the fetch + full-pipeline path exactly like a content-hash
+                // miss (no explicit invalidate; the re-scan upgrades the row).
+                let git_cache_hit: Option<(Vec<PolicyDetail>, CacheProvenance)> = if ref_kind
                     == policy::mutable_ref::RefKind::Pinned
                 {
                     match cache.lookup(&pkg_ref.name, &ref_, "git") {
@@ -1042,7 +1103,21 @@ async fn run_check(
                             let cached_hash = entry.as_ref().and_then(|e| e.content_hash.clone());
                             match decide_git_cache_action(&ref_kind, lookup, cached_hash.as_deref())
                             {
-                                GitCacheAction::Hit(result) => Some(result),
+                                GitCacheAction::Hit(_) => {
+                                    let entry = entry.expect("Hit implies lookup returned Some");
+                                    match attributed_cache_hit(&entry) {
+                                        Some((parsed, provenance)) => Some((parsed, provenance)),
+                                        None => {
+                                            if verbose {
+                                                eprintln!(
+                                                    "cache entry for {} lacks attribution (pre-112 row); re-scanning",
+                                                    pkg_ref.name
+                                                );
+                                            }
+                                            None
+                                        }
+                                    }
+                                }
                                 GitCacheAction::Fetch => None,
                             }
                         }
@@ -1058,23 +1133,37 @@ async fn run_check(
                     None
                 };
 
-                if let Some(cached_result) = git_cache_hit {
-                    // Verified pinned-SHA cache hit: reuse the stored verdict
-                    // without calling the fetcher (T-097-02/09).
-                    if cached_result == "warn" || cached_result == "block" {
+                if let Some((parsed_policies, provenance)) = git_cache_hit {
+                    // Verified, attributed pinned-SHA cache hit: reuse the
+                    // stored verdict without calling the fetcher (T-097-02/09).
+                    if verbose {
+                        eprintln!(
+                            "cache hit (verified) for {}: scanned_at {} by dep-scan {}",
+                            pkg_ref.name, provenance.scanned_at, provenance.dep_scan_version
+                        );
+                    }
+                    let (agg_result, agg_reason) = policy::aggregate_results(&parsed_policies);
+                    if agg_result == "warn" || agg_result == "block" {
                         has_failure = true;
                     }
+                    let reason = match agg_reason {
+                        Some(msg) => format!(
+                            "git-sourced dependency: url={url}, ref={ref_} — {msg} (cached, pinned commit)"
+                        ),
+                        None => format!(
+                            "git-sourced dependency: url={url}, ref={ref_} — cached result (pinned commit), no policy violations"
+                        ),
+                    };
                     results.push(CheckResult {
                         package: pkg_ref.name.clone(),
                         version: ref_.clone(),
                         registry: "git".to_string(),
                         age_hours: None,
-                        result: cached_result,
-                        reason: Some(format!(
-                            "git-sourced dependency: url={url}, ref={ref_} — cached result (pinned commit)"
-                        )),
-                        policies: vec![mutable_ref_detail],
+                        result: agg_result,
+                        reason: Some(reason),
+                        policies: parsed_policies,
                         vulns: vec![],
+                        cache: Some(provenance),
                     });
                     continue;
                 }
@@ -1166,12 +1255,18 @@ async fn run_check(
                     // Flat git scan — no transitive children recorded, so
                     // subtree_digest = None (task 106; the flat-scan gate is
                     // content-hash only).
+                    // Attribution (task 112): serialize the SAME policies vec
+                    // used for this verdict so a future cache hit can be
+                    // attributed. Best-effort like the insert itself — a
+                    // serialization failure just means no attribution stored.
+                    let policies_json = serde_json::to_string(&git_policy_details).ok();
                     let _ = cache.insert_git(
                         &pkg_ref.name,
                         &ref_,
                         &result_str,
                         Some(&content_hash),
                         None,
+                        policies_json.as_deref(),
                     );
                 }
 
@@ -1187,6 +1282,7 @@ async fn run_check(
                     reason,
                     policies: git_policy_details,
                     vulns: vec![],
+                    cache: None,
                 });
                 continue;
             }
@@ -1267,27 +1363,53 @@ async fn run_check(
                     entry.content_hash.as_deref(),
                     fresh_meta.content_hash.as_deref(),
                 );
-                if decision == HashVerifyDecision::HonorCache {
+                if decision == HashVerifyDecision::HonorCache
+                    && let Some((parsed_policies, provenance)) = attributed_cache_hit(&entry)
+                {
+                    // Task 112 (REQ-112-04): attributed hit. Emit the REAL
+                    // resolved version, the recomputed age_hours from fresh
+                    // metadata, the stored policies array, and the recomputed
+                    // aggregate reason: not the literal "cached"/"cached
+                    // result" this replaces.
                     if verbose {
-                        eprintln!("cache hit (verified) for {pkg_name}");
+                        eprintln!(
+                            "cache hit (verified) for {pkg_name}: scanned_at {} by dep-scan {}",
+                            provenance.scanned_at, provenance.dep_scan_version
+                        );
                     }
-                    // Reconstruct result from cache — hash matches, verdict is trustworthy.
-                    let cached_result = entry.result.clone();
-                    let is_failure = cached_result == "block" || cached_result == "warn";
+                    let (agg_result, agg_reason) = policy::aggregate_results(&parsed_policies);
+                    let is_failure = agg_result == "block" || agg_result == "warn";
                     if is_failure {
                         has_failure = true;
                     }
                     results.push(CheckResult {
                         package: pkg_name.clone(),
-                        version: "cached".to_string(),
+                        version: resolved_version.clone(),
                         registry: reg_str.clone(),
-                        age_hours: None,
-                        result: cached_result,
-                        reason: Some("cached result".to_string()),
-                        policies: vec![],
+                        age_hours: fresh_meta
+                            .published_at
+                            .map(|t| (Utc::now() - t).num_hours()),
+                        result: agg_result,
+                        reason: agg_reason,
+                        policies: parsed_policies,
                         vulns: vec![],
+                        cache: Some(provenance),
                     });
                     continue;
+                } else if decision == HashVerifyDecision::HonorCache {
+                    // Task 112: content hash matched but attribution did not
+                    // (pre-112 row, or corrupt/tampered policies_json). Fall
+                    // through to a full re-scan exactly like a hash mismatch,
+                    // but do NOT invalidate — the row is not tampered, merely
+                    // unattributed, and the re-scan's `INSERT OR REPLACE`
+                    // upgrades it in place (no explicit invalidate needed).
+                    if verbose {
+                        eprintln!(
+                            "cache entry for {pkg_name} lacks attribution (pre-112 row); re-scanning"
+                        );
+                    }
+                    // `fetch_result` is already the fresh metadata; the full scan below
+                    // will reuse it without making an extra network call.
                 } else {
                     // Hash mismatch (or both None, or sha1-prefixed) — fall through to re-scan.
                     //
@@ -1329,6 +1451,7 @@ async fn run_check(
                     reason: Some(format!("{e}")),
                     policies: vec![],
                     vulns: vec![],
+                    cache: None,
                 });
                 continue;
             }
@@ -1577,6 +1700,10 @@ async fn run_check(
         } else {
             metadata.content_hash.as_deref()
         };
+        // Attribution (task 112): serialize the SAME policy_details vec that fed
+        // aggregate_results above, so a future cache hit can be attributed to
+        // this exact verdict. Best-effort like the insert itself.
+        let policies_json = serde_json::to_string(&policy_details).ok();
         let _ = cache.insert(
             pkg_name,
             &metadata.version,
@@ -1587,6 +1714,7 @@ async fn run_check(
             // Flat registry scan — no transitive children, subtree_digest = None
             // (task 106; flat-scan gate is content-hash only).
             None,
+            policies_json.as_deref(),
         );
 
         results.push(CheckResult {
@@ -1598,6 +1726,7 @@ async fn run_check(
             reason,
             policies: policy_details,
             vulns: ctx.vulnerabilities.clone(),
+            cache: None,
         });
     }
 
@@ -2943,6 +3072,7 @@ mod tests {
             reason: None,
             policies: vec![],
             vulns,
+            cache: None,
         }
     }
 
@@ -4115,6 +4245,7 @@ mod tests {
             reason: Some(message),
             policies: vec![],
             vulns: vec![],
+            cache: None,
         }
     }
 
@@ -4504,7 +4635,7 @@ mod tests {
         // Store only pinned SHAs.
         if ref_kind == policy::mutable_ref::RefKind::Pinned {
             let content_hash = git_tree_content_hash(&tree);
-            let _ = cache.insert_git(name, ref_, &result_str, Some(&content_hash), None);
+            let _ = cache.insert_git(name, ref_, &result_str, Some(&content_hash), None, None);
         }
         result_str
     }
@@ -4638,7 +4769,7 @@ mod tests {
         // Tamper: clear the integrity hash on the cached row (simulates an
         // attacker editing the SQLite row to break the verdict↔tree binding).
         cache
-            .insert_git("pkg", T097_SHA, "pass", None, None)
+            .insert_git("pkg", T097_SHA, "pass", None, None, None)
             .unwrap();
 
         // Next scan must NOT honor the tampered row — it re-fetches.
@@ -5250,6 +5381,7 @@ mod tests {
             reason,
             policies: details,
             vulns: vec![],
+            cache: None,
         }
     }
 

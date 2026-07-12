@@ -1,7 +1,7 @@
 # Fitness functions
 
 **Status:** Authoritative — code MUST conform.
-**Last updated:** 2026-06-12 (F-027 policy count → 12; clarified the two non-`cargo test` gates)
+**Last updated:** 2026-07-12 (F-028: cached-verdict attribution, task 112)
 
 A **fitness function** is a security invariant that the codebase MUST
 maintain across releases. Most rows below are a contract pinned by at
@@ -49,6 +49,7 @@ silently broken (fix the code) — **never** to delete the test.
 | **F-025** | User-visible error output MUST scrub the anyhow chain by default. The full chain is gated behind `--verbose`. | warn | 053 | T-053-* (`tests/error_output_scrubbing_integration.rs`) |
 | **F-026** | The verbose audit log line at the install boundary MUST name the locked version + hash and MUST note that sigstore is not re-verified between scan-pass and `exec` (except for pip via `--require-hashes`). | warn | 055 | T-055-* (`tests/sigstore_install_path_audit_integration.rs`) |
 | **F-027** | The twelve policies (eleven registry policies + `mutable_ref`; `vcs_host` is a function-based gate, not a `Policy` impl) are the complete set. Adding or removing a policy requires updating `policies.md`, the README policy table, and the overview's "Twelve policies in total" count in the same PR. | warn | (CLAUDE.md "Common rationalizations") | Manual drift audit (the cp-fix-drift / project-audit number-citation layer) |
+| **F-028** | A cached verdict MUST NOT be served without full attribution (real resolved version, per-policy `policies` array, the dep-scan version that produced it). A row missing `dep_scan_version`, missing/unparseable `policies_json`, or whose re-aggregated policies disagree with the stored `result`, MUST be treated as a miss and re-scanned, never served. | block | 112 | T-112-09..13 in `tests/cache_attribution_integration.rs` + `src/main.rs::attributed_cache_hit` |
 
 ## Severity meanings
 

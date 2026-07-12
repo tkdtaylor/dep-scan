@@ -60,10 +60,14 @@ min_downloads = 0
     f
 }
 
-/// Pre-populate the SQLite cache with a single row.
+/// Pre-populate the SQLite cache with a single row lacking task-112 attribution
+/// (`dep_scan_version`/`policies_json` both NULL).
 ///
 /// This bypasses the dep-scan binary so we can test specific DB states
-/// (e.g. mismatched hash, NULL hash, stale result).
+/// (e.g. mismatched hash, NULL hash, stale result). Tests that assert a
+/// genuine `"cache hit (verified)"` must use [`seed_cache_attributed`]
+/// instead: an unattributed row is, by design, always a miss (fail-closed,
+/// REQ-112-03) and gets upgraded in place on re-scan.
 fn seed_cache(
     db_path: &str,
     name: &str,
@@ -92,6 +96,56 @@ fn seed_cache(
         rusqlite::params![name, version, registry, result, content_hash],
     )
     .expect("seed cache row");
+}
+
+/// Pre-populate the SQLite cache with a fully task-112-attributed row: sets
+/// `dep_scan_version` (to the running binary's own version) and
+/// `policies_json` (a single-policy array whose aggregate matches `result`,
+/// consistent with `write_config`'s policy set (only `check_min_age` is
+/// enabled, so `"age"` is the only contributing policy). Use this for any
+/// test that asserts `"cache hit (verified)"` in stderr.
+fn seed_cache_attributed(
+    db_path: &str,
+    name: &str,
+    version: &str,
+    registry: &str,
+    result: &str,
+    content_hash: Option<&str>,
+) {
+    let conn = Connection::open(db_path).expect("open seed db");
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS scanned_packages (
+            name                TEXT NOT NULL,
+            version             TEXT NOT NULL,
+            registry            TEXT NOT NULL,
+            result              TEXT NOT NULL,
+            scanned_at          TEXT NOT NULL,
+            content_hash        TEXT,
+            provenance_identity TEXT,
+            source_kind         TEXT,
+            subtree_digest      TEXT,
+            dep_scan_version    TEXT,
+            policies_json       TEXT,
+            PRIMARY KEY (name, version, registry)
+        );",
+    )
+    .expect("create table");
+    let policies_json = format!(r#"[{{"policy_name":"age","result":"{result}","reason":null}}]"#);
+    conn.execute(
+        "INSERT OR REPLACE INTO scanned_packages
+         (name, version, registry, result, scanned_at, content_hash, dep_scan_version, policies_json)
+         VALUES (?1, ?2, ?3, ?4, datetime('now'), ?5, ?6, ?7)",
+        rusqlite::params![
+            name,
+            version,
+            registry,
+            result,
+            content_hash,
+            env!("CARGO_PKG_VERSION"),
+            policies_json
+        ],
+    )
+    .expect("seed attributed cache row");
 }
 
 /// Read the content_hash stored in the cache for a package.
@@ -210,7 +264,7 @@ async fn cache_hit_with_matching_hash_skips_rescan() {
     let db_path = tmp.path().join("cache.db");
     let db_str = db_path.to_str().unwrap();
 
-    seed_cache(
+    seed_cache_attributed(
         db_str,
         "verify-hit-pkg",
         "1.0.0", // resolved version from registry, not "latest" (task 038)
@@ -718,7 +772,7 @@ async fn uppercase_sri_prefix_still_produces_cache_hit() {
     let db_str = db_path.to_str().unwrap();
 
     // T-046-13: seed cache with lowercase prefix hash
-    seed_cache(
+    seed_cache_attributed(
         db_str,
         "verify-case-pkg",
         "1.0.0",

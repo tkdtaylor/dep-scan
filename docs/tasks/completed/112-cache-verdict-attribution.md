@@ -204,26 +204,30 @@ interfaces.md (schema block corrected + `cache` object + migration note), data-m
 
 ## Acceptance criteria
 
-- [ ] Migration adds both columns when absent (T-112-01, T-112-02)
-- [ ] Migration idempotent (T-112-03)
-- [ ] Legacy rows read NULL for both (T-112-04)
-- [ ] insert stamps `env!("CARGO_PKG_VERSION")` (T-112-05)
-- [ ] policies_json round-trips byte-equal and re-parses (T-112-06)
-- [ ] insert with None writes NULL (T-112-07)
-- [ ] insert_git writes both fields (T-112-08)
-- [ ] Attributed hit emits the exact after-JSON shape, provenance from the ROW not env! (T-112-09)
-- [ ] NULL dep_scan_version → miss → row upgraded → second run hits (T-112-10)
-- [ ] NULL policies_json → miss (T-112-11)
-- [ ] Unparseable policies_json → miss, no panic (T-112-12)
-- [ ] result/policies inconsistency → miss, tampered pass never served (T-112-13)
-- [ ] Fresh output has no `cache` key (T-112-14)
-- [ ] Fresh-vs-cached round-trip equality on policies/result/reason/version (T-112-15)
-- [ ] Exit codes unchanged for cached block/pass (T-112-16)
-- [ ] Native table shows real version, no "cached" (T-112-17)
-- [ ] Git pinned-SHA hit attributed (T-112-18)
-- [ ] T-009-05 fixture upgraded, still one metadata call (T-112-19)
-- [ ] Four spec files updated in the same commit (T-112-20)
-- [ ] `cargo test` exits 0, clippy clean (`-D warnings`), fmt clean (T-112-21)
+- [x] Migration adds both columns when absent (T-112-01, T-112-02)
+- [x] Migration idempotent (T-112-03)
+- [x] Legacy rows read NULL for both (T-112-04)
+- [x] insert stamps `env!("CARGO_PKG_VERSION")` (T-112-05)
+- [x] policies_json round-trips byte-equal and re-parses (T-112-06)
+- [x] insert with None writes NULL (T-112-07)
+- [x] insert_git writes both fields (T-112-08)
+- [x] Attributed hit emits the exact after-JSON shape, provenance from the ROW not env! (T-112-09)
+- [x] NULL dep_scan_version → miss → row upgraded → second run hits (T-112-10)
+- [x] NULL policies_json → miss (T-112-11)
+- [x] Unparseable policies_json → miss, no panic (T-112-12)
+- [x] result/policies inconsistency → miss, tampered pass never served (T-112-13)
+- [x] Fresh output has no `cache` key (T-112-14)
+- [x] Fresh-vs-cached round-trip equality on policies/result/reason/version (T-112-15)
+- [x] Exit codes unchanged for cached block/pass (T-112-16)
+- [x] Native table shows real version, no "cached" (T-112-17)
+- [x] Git pinned-SHA hit attributed (T-112-18)
+- [x] T-009-05 fixture upgraded, still one metadata call (T-112-19)
+- [x] Four spec files updated in the same commit (T-112-20)
+- [x] `cargo test` exits 0, clippy clean (`-D warnings`), fmt clean (T-112-21)
+
+## Closeout note
+
+Implemented as specified. One deviation from the Verification plan: the "manual runtime observation" bullet suggested `cargo run -- check left-pad --registry npm --format json` against the real npm registry; skipped in favor of the wiremock-backed `tests/cache_attribution_integration.rs` suite (T-112-09/15 run the real compiled binary via `assert_cmd`), which is real-binary live-path evidence without violating the repo boundary against unconsented network calls during development. T-112-13's tamper-guard assertion was mutation-tested (the `aggregate_result != entry.result` comparison in `attributed_cache_hit` was temporarily deleted; the test failed as expected, confirmed the fix, reverted) before commit. Fixing the attribution gate also surfaced three pre-existing test fixtures elsewhere in the suite (`tests/cache_version_key_integration.rs`, `tests/hash_verify_integration.rs`, `tests/npm_sha1_cache_bypass_integration.rs`) that seeded unattributed cache rows and asserted a hit; each gained a `seed_cache_attributed` helper alongside the existing `seed_cache` (kept for rows that deliberately test miss/legacy behavior).
 
 ## Verification plan
 

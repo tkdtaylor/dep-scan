@@ -279,20 +279,29 @@ async fn cache_hit_skips_registry_query() {
     let cache_path = tmp.path().join("cache.db");
     let config = write_config(&server.uri(), cache_path.to_str().unwrap());
 
-    // Pre-populate the cache with a known content_hash.
+    // Pre-populate the cache with a known content_hash AND, since task 112, full
+    // attribution (dep_scan_version + policies_json): an unattributed row is a
+    // fail-closed MISS under the task-112 gate, which would break this test's
+    // `.expect(1)` (T-112-19: the fixture must upgrade to still exercise a hit).
     // "sha512-AAEC" → bytes [0x00,0x01,0x02] → dep-scan normalized: "sha512:000102"
     let hash = "sha512:000102";
+    let policies_json = r#"[{"policy_name":"age","result":"pass","reason":null}]"#;
     {
         let cache = rusqlite::Connection::open(&cache_path).unwrap();
         cache
             .execute_batch(
                 "CREATE TABLE IF NOT EXISTS scanned_packages (
-                    name         TEXT NOT NULL,
-                    version      TEXT NOT NULL,
-                    registry     TEXT NOT NULL,
-                    result       TEXT NOT NULL,
-                    scanned_at   TEXT NOT NULL,
-                    content_hash TEXT,
+                    name                TEXT NOT NULL,
+                    version             TEXT NOT NULL,
+                    registry            TEXT NOT NULL,
+                    result              TEXT NOT NULL,
+                    scanned_at          TEXT NOT NULL,
+                    content_hash        TEXT,
+                    provenance_identity TEXT,
+                    source_kind         TEXT,
+                    subtree_digest      TEXT,
+                    dep_scan_version    TEXT,
+                    policies_json       TEXT,
                     PRIMARY KEY (name, version, registry)
                 );",
             )
@@ -300,9 +309,10 @@ async fn cache_hit_skips_registry_query() {
         cache
             .execute(
                 "INSERT INTO scanned_packages
-                 (name, version, registry, result, scanned_at, content_hash)
-                 VALUES ('cached-pkg', '1.0.0', 'npm', 'pass', '2025-01-01T00:00:00Z', ?1)",
-                rusqlite::params![hash],
+                 (name, version, registry, result, scanned_at, content_hash,
+                  dep_scan_version, policies_json)
+                 VALUES ('cached-pkg', '1.0.0', 'npm', 'pass', '2025-01-01T00:00:00Z', ?1, ?2, ?3)",
+                rusqlite::params![hash, env!("CARGO_PKG_VERSION"), policies_json],
             )
             .unwrap();
     }

@@ -13,7 +13,7 @@ pub mod typosquatting;
 pub mod vcs_host;
 pub mod vulnerability;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::types::ScanContext;
 
@@ -42,7 +42,11 @@ pub trait Policy: Send + Sync {
 }
 
 /// Per-policy evaluation detail, suitable for JSON output.
-#[derive(Debug, Clone, Serialize, PartialEq)]
+///
+/// `Deserialize` (task 112) lets this round-trip through the cache's
+/// `policies_json` column, so a cached verdict can be re-hydrated into the
+/// same shape a fresh scan produces.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct PolicyDetail {
     /// The name of the policy that produced this result.
     pub policy_name: String,

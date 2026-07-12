@@ -223,9 +223,17 @@ impl<'a, F: GitTreeFetcher, G: GitTargetResolver, R: RegistryScanner>
         //    first scan; mutable refs are NEVER written (T-103-09 / T-103-10).
         if ref_kind == RefKind::Pinned {
             let content_hash = crate::git_tree_content_hash(&tree);
-            let _ = self
-                .cache
-                .insert_git(name, &ref_, &result_str, Some(&content_hash), None);
+            // Attribution (task 112): serialize the same `details` vec that fed
+            // aggregate_results above, so a future cache hit can be attributed.
+            let policies_json = serde_json::to_string(&details).ok();
+            let _ = self.cache.insert_git(
+                name,
+                &ref_,
+                &result_str,
+                Some(&content_hash),
+                None,
+                policies_json.as_deref(),
+            );
         }
 
         verdict_from_result_str(&result_str)

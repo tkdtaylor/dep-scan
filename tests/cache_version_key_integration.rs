@@ -94,7 +94,11 @@ min_downloads = 0
     f
 }
 
-/// Pre-populate the SQLite cache with a single row.
+/// Pre-populate the SQLite cache with a single row lacking task-112 attribution
+/// (`dep_scan_version`/`policies_json` both NULL): a pre-112 legacy row.
+/// Tests that assert a genuine cache HIT must use [`seed_cache_attributed`]
+/// instead: an unattributed row is, by design, always a miss (fail-closed,
+/// REQ-112-03) and gets upgraded in place on re-scan.
 fn seed_cache(
     db_path: &str,
     name: &str,
@@ -123,6 +127,58 @@ fn seed_cache(
         rusqlite::params![name, version, registry, result, content_hash],
     )
     .expect("seed cache row");
+}
+
+/// Pre-populate the SQLite cache with a fully task-112-attributed row: sets
+/// `dep_scan_version` (to the running binary's own version, so the row is
+/// indistinguishable from one this binary itself wrote) and `policies_json`
+/// (a single-policy array whose aggregate matches `result`, so the
+/// tamper-consistency check in `attributed_cache_hit` passes). Use this for
+/// any test that asserts `"cache hit (verified)"` in stderr.
+fn seed_cache_attributed(
+    db_path: &str,
+    name: &str,
+    version: &str,
+    registry: &str,
+    result: &str,
+    content_hash: Option<&str>,
+) {
+    let conn = Connection::open(db_path).expect("open seed db");
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS scanned_packages (
+            name                TEXT NOT NULL,
+            version             TEXT NOT NULL,
+            registry            TEXT NOT NULL,
+            result              TEXT NOT NULL,
+            scanned_at          TEXT NOT NULL,
+            content_hash        TEXT,
+            provenance_identity TEXT,
+            source_kind         TEXT,
+            subtree_digest      TEXT,
+            dep_scan_version    TEXT,
+            policies_json       TEXT,
+            PRIMARY KEY (name, version, registry)
+        );",
+    )
+    .expect("create table");
+    // A single-policy array whose aggregate result equals `result`: write_npm_config
+    // enables only check_min_age, so "age" is the only policy that ever contributes.
+    let policies_json = format!(r#"[{{"policy_name":"age","result":"{result}","reason":null}}]"#);
+    conn.execute(
+        "INSERT OR REPLACE INTO scanned_packages
+         (name, version, registry, result, scanned_at, content_hash, dep_scan_version, policies_json)
+         VALUES (?1, ?2, ?3, ?4, datetime('now'), ?5, ?6, ?7)",
+        rusqlite::params![
+            name,
+            version,
+            registry,
+            result,
+            content_hash,
+            env!("CARGO_PKG_VERSION"),
+            policies_json
+        ],
+    )
+    .expect("seed attributed cache row");
 }
 
 /// Count rows in scanned_packages that match the given key.
@@ -284,8 +340,9 @@ async fn t038_02_cache_lookup_uses_resolved_version() {
     let db_path = tmp.path().join("cache.db");
     let db_str = db_path.to_str().unwrap();
 
-    // Pre-populate with the resolved version key.
-    seed_cache(db_str, "express", "1.2.3", "npm", "pass", Some(HASH_A));
+    // Pre-populate with the resolved version key, fully attributed (task 112)
+    // so the row is honored as a genuine hit.
+    seed_cache_attributed(db_str, "express", "1.2.3", "npm", "pass", Some(HASH_A));
 
     let config = write_npm_config(&server.uri(), db_str);
 
@@ -387,7 +444,10 @@ async fn t038_04_two_versions_coexist_independently() {
     let db_path = tmp.path().join("cache.db");
     let db_str = db_path.to_str().unwrap();
 
-    seed_cache(db_str, "express", "1.2.3", "npm", "pass", Some(HASH_A));
+    // "1.2.3" must be attributed (task 112) since it's the row this test
+    // expects to be honored as a genuine hit; "1.3.0" is never looked up in
+    // this test, so an unattributed row is fine for it.
+    seed_cache_attributed(db_str, "express", "1.2.3", "npm", "pass", Some(HASH_A));
     seed_cache(db_str, "express", "1.3.0", "npm", "pass", Some(HASH_B));
 
     let config = write_npm_config(&server.uri(), db_str);
