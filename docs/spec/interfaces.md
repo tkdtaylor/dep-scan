@@ -234,6 +234,28 @@ Sample implementations live in [`../../README.md`](../../README.md#wrapping-pack
 
 ---
 
+## Published channel: version pin (`PINNED_VERSION`)
+
+Task 113. A machine-readable coordination channel that lets dep-scan consumers (code-scanner, reverse-engineer, host PATH installs) converge on a single release, since they otherwise pin independently and drift out of sync.
+
+**File:** `PINNED_VERSION` at the repo root.
+
+**Raw URL:** `https://raw.githubusercontent.com/tkdtaylor/dep-scan/main/PINNED_VERSION`
+
+**Format:** a single line, `"v" + semver + "\n"` (e.g. `v1.3.1\n`). No other whitespace, LF only, nothing else in the file.
+
+**Producer rule:** bumped in the release-prep commit (`RELEASE_CHECKLIST.md` § 2), lockstep-enforced by `tests/version_pin_integration.rs`: the content must equal `format!("v{}\n", env!("CARGO_PKG_VERSION"))`, so a version bump that misses either `Cargo.toml` or `PINNED_VERSION` fails `cargo test` on the release-prep commit itself.
+
+**Consumer rules:**
+- Docker builds (code-scanner, reverse-engineer) fetch the pin and install exactly that release via `install.sh --version=<pin>` (already supported; no `install.sh` change needed for this task).
+- Host installs fetch the pin and compare it to `v$(dep-scan --version | awk '{print $2}')`, warning on drift.
+
+Both patterns, copy-pasteable, live in [`../../README.md`](../../README.md#version-pinning-for-consumers).
+
+**Stability:** the file name, raw URL, and format (single `v`-semver line, LF-terminated) are stable. Changing any of them is a breaking change requiring a major version bump.
+
+---
+
 ## Outbound interfaces: registries + sigstore
 
 ### `Registry` trait

@@ -113,14 +113,31 @@ No endpoints, no polling daemons, no auto-update, no new crates. Text file + doc
 
 ## Acceptance criteria
 
-- [ ] `PINNED_VERSION` exists at the repo root (T-113-01)
-- [ ] Content byte-equals `"v" + CARGO_PKG_VERSION + "\n"` (T-113-02)
-- [ ] Single-line `v`-semver format, LF only, no stray whitespace (T-113-03)
-- [ ] README section + Contents entry with raw URL, Docker recipe, drift check (T-113-04)
-- [ ] RELEASE_CHECKLIST.md release-prep step + `git add` line updated (T-113-05)
-- [ ] interfaces.md published-channel section with stability row (T-113-06)
-- [ ] `bash install.sh --dry-run --version=<pin>` exits 0 and echoes the pin and release URL (T-113-07)
-- [ ] `cargo test` exits 0, clippy clean (`-D warnings`), fmt clean, no new dependencies (T-113-08)
+- [x] `PINNED_VERSION` exists at the repo root (T-113-01)
+- [x] Content byte-equals `"v" + CARGO_PKG_VERSION + "\n"` (T-113-02)
+- [x] Single-line `v`-semver format, LF only, no stray whitespace (T-113-03)
+- [x] README section + Contents entry with raw URL, Docker recipe, drift check (T-113-04)
+- [x] RELEASE_CHECKLIST.md release-prep step + `git add` line updated (T-113-05)
+- [x] interfaces.md published-channel section with stability row (T-113-06)
+- [x] `bash install.sh --dry-run --version=<pin>` exits 0 and echoes the pin and release URL (T-113-07)
+- [x] `cargo test` exits 0, clippy clean (`-D warnings`), fmt clean, no new dependencies (T-113-08)
+
+## Closeout note
+
+Implemented as specified. Runtime observation for the record (offline, `bash install.sh --dry-run --version="$(cat PINNED_VERSION)"`):
+
+```
+Detected platform: linux/x86_64 (x86_64-unknown-linux-gnu)
+Pinned version: v1.3.1
+Binary: dep-scan-v1.3.1-x86_64-unknown-linux-gnu.tar.gz
+Install directory: /home/kevin/.local/bin
+
+[dry-run] Would download: https://github.com/tkdtaylor/dep-scan/releases/download/v1.3.1/dep-scan-v1.3.1-x86_64-unknown-linux-gnu.tar.gz
+[dry-run] Would verify checksum from: https://github.com/tkdtaylor/dep-scan/releases/download/v1.3.1/sha256sums.txt
+[dry-run] Would install to: /home/kevin/.local/bin/dep-scan
+```
+
+Negative check performed by hand: temporarily edited `PINNED_VERSION` to `v0.0.0`, ran `cargo test --test version_pin_integration t113_02`, confirmed T-113-02 failed with a clear left/right diff, then restored the file and confirmed it passed again. The `tests/version_pin_integration.rs` doc comment initially triggered `clippy::doc_lazy_continuation` (a `T-113-01..03:`-style line read as an unindented list continuation); reworded to plain sentences, no functional change.
 
 ## Verification plan
 
