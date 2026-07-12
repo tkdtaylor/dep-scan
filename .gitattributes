@@ -6,3 +6,11 @@
 # signed text so verification fails (tc_110_02 / tc_110_03). Treat the fixture
 # as binary so it is never EOL-converted on any platform. See task 110.
 tests/fixtures/go_sumdb_real/** -text
+
+# The published version pin is a byte-exact, LF-terminated channel (served
+# verbatim over raw.githubusercontent and asserted byte-for-byte by
+# tests/version_pin_integration.rs t113_02/t113_03). Git's autocrlf rewrites
+# LF -> CRLF on Windows checkout, corrupting it to "v1.3.1\r\n" and failing CI
+# on Windows only. Force LF on every platform. See task 113 (same class as the
+# task-110 go_sumdb fixture guard above).
+PINNED_VERSION text eol=lf
